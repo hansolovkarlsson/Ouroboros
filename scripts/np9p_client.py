@@ -2014,6 +2014,10 @@ IMPERSONATE_REFUSALS = (FS_ERR_AUTH, FS_ERR_PERM)
 IMPERSONATE_STAGES = {
     0: {"row 1": True, "row 2": True},
     1: {"row 1": False, "row 2": True},
+    # User-keys step 7: netd's export reads /etc/cluster/users. Every refusal
+    # is "auth", FS_ERR_AUTH exactly: an FS_ERR_PERM would mean the claim was
+    # SERVED as the user and only the file's mode stopped it.
+    7: {"row 1": "auth", "row 2": "auth", "row 3": "auth", "row 4": True, "row 5": True},
 }
 
 
@@ -2039,8 +2043,13 @@ def do_impersonate_gate(host, port, stage):
       `host` identity claiming root, so row 2 reads a file that really is
       `user`'s alone.
 
-    Rows 3 to 5 of the plan's table need a credential or a registry, neither of
-    which exists yet, and are printed as n/a with the step that adds them.
+    Rows 3 to 5 (from stage 7, user-keys step 7) carry credentials: row 3
+    `user`'s made from a wrong password, row 4 `user`'s own, row 5 none, for
+    `guest`, whom the dev registry does not list. Before stage 7 they are n/a.
+
+    The two controls that need a served non-root claim claim `guest`, the
+    unregistered user, at every stage: from stage 7 an uncredentialed claim of
+    `user` is refused before modes are ever consulted.
     """
     want = IMPERSONATE_STAGES.get(stage)
     if want is None:
@@ -2057,11 +2066,15 @@ def do_impersonate_gate(host, port, stage):
         if not ok:
             failed += 1
 
-    def op(np_msg, seed, user):
-        """One signed request as `user`, signed by `seed`. The exception is
-        returned rather than raised, so a dead connection reads as its own
-        outcome and never as a refusal."""
-        frame, nonce = signed_frame(np_msg, seed, user=user.encode())
+    def op(np_msg, seed, user, password=None):
+        """One signed request as `user`, signed by `seed`, credentialed with
+        `password` if one is given. The exception is returned rather than
+        raised, so a dead connection reads as its own outcome and never as a
+        refusal."""
+        if password is None:
+            frame, nonce = signed_frame(np_msg, seed, user=user.encode())
+        else:
+            frame, nonce = credentialed_frame(np_msg, seed, password, user=user.encode())
         try:
             with socket.create_connection((host, port), timeout=10) as s:
                 s.sendall(frame)
@@ -2069,9 +2082,9 @@ def do_impersonate_gate(host, port, stage):
         except (RuntimeError, OSError) as exc:
             return None, f"{exc.__class__.__name__}: {exc}"
 
-    def read(path, seed, user):
+    def read(path, seed, user, password=None):
         pb = path.encode()
-        return op(build_frame(NP_READ, 0, [len(pb), 0, 4096], pb), seed, user)
+        return op(build_frame(NP_READ, 0, [len(pb), 0, 4096], pb), seed, user, password)
 
     def outcome(status, data):
         if status is None:
@@ -2082,15 +2095,15 @@ def do_impersonate_gate(host, port, stage):
 
     print(f"impersonate-gate: stage {stage}, signing as `intruder`", flush=True)
 
-    st, data = read("/etc/shadow", intruder, "user")
-    check("control: the export enforces modes (`user` claiming /etc/shadow is refused)",
+    st, data = read("/etc/shadow", intruder, "guest")
+    check("control: the export enforces modes (`guest` claiming /etc/shadow is refused)",
           st == FS_ERR_PERM,
           outcome(st, data) + ("" if st == FS_ERR_PERM else
                                " - an export that serves this enforces nothing, so rows 1 and 2 "
                                "would prove nothing (FAT32 image? this gate needs ext2)"))
 
-    st, data = read(IMPERSONATE_PUBLIC, intruder, "user")
-    check("control: the intruder key is authorized here (a public file is served)",
+    st, data = read(IMPERSONATE_PUBLIC, intruder, "guest")
+    check("control: the intruder key is authorized here (`guest` is served a public file)",
           st is not None and served(st),
           outcome(st, data) + ("" if st != FS_ERR_AUTH else
                                " - an image built before `intruder` was added to "
@@ -2122,10 +2135,13 @@ def do_impersonate_gate(host, port, stage):
         if got and not good_data(data):
             check(f"{label}: {text}", False, f"served, but not the expected bytes: {data[:40]!r}")
             return
-        ok = got if expect else st in IMPERSONATE_REFUSALS
-        check(f"{label}: {text}", ok,
-              f"{outcome(st, data)}; stage {stage} expects "
-              f"{'served' if expect else 'refused FS_ERR_AUTH or FS_ERR_PERM'}")
+        if expect is True:
+            ok, said = got, "served"
+        elif expect == "auth":
+            ok, said = st == FS_ERR_AUTH, "refused FS_ERR_AUTH"
+        else:
+            ok, said = st in IMPERSONATE_REFUSALS, "refused FS_ERR_AUTH or FS_ERR_PERM"
+        check(f"{label}: {text}", ok, f"{outcome(st, data)}; stage {stage} expects {said}")
 
     st, data = read("/etc/shadow", intruder, "root")
     row("row 1", "intruder claims root, reads /etc/shadow", st, data,
@@ -2135,12 +2151,18 @@ def do_impersonate_gate(host, port, stage):
     row("row 2", f"intruder claims `user`, reads {IMPERSONATE_PRIVATE}", st, data,
         lambda d: d == IMPERSONATE_PRIVATE_TEXT)
 
-    print("[n/a ] row 3: `user` with a credential from the wrong password - no credential "
-          "kind exists until step 7", flush=True)
-    print("[n/a ] row 4: `user` with a valid credential - no credential kind exists until "
-          "step 7", flush=True)
-    print("[n/a ] row 5: `guest`, a name with no registered key - the registry is staged since "
-          "step 3 but no export reads it until step 7", flush=True)
+    if "row 3" not in want:
+        print("[n/a ] rows 3 to 5: credentials and the registry, from stage 7", flush=True)
+    else:
+        st, data = read(IMPERSONATE_PRIVATE, intruder, "user", password=b"not-users-password")
+        row("row 3", f"intruder claims `user` with a wrong-password credential, reads {IMPERSONATE_PRIVATE}",
+            st, data, lambda d: d == IMPERSONATE_PRIVATE_TEXT)
+        st, data = read(IMPERSONATE_PRIVATE, intruder, "user", password=b"user")
+        row("row 4", f"intruder claims `user` with `user`'s credential, reads {IMPERSONATE_PRIVATE}",
+            st, data, lambda d: d == IMPERSONATE_PRIVATE_TEXT)
+        st, data = read(IMPERSONATE_PUBLIC, intruder, "guest")
+        row("row 5", f"intruder claims `guest` (unregistered), no credential, reads {IMPERSONATE_PUBLIC}",
+            st, data, lambda d: len(d) > 0)
 
     print(f"impersonate-gate: {failed} check(s) failed", flush=True)
     return failed

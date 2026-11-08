@@ -212,6 +212,11 @@ fn main() -> ! {
 /// invisible, and invisible is the half worth fixing.
 const AUTHORIZED_MAX: usize = clusterkeys::AUTHORIZED_MAX;
 
+/// Bytes of `/etc/cluster/users` netd keeps: clusterkeys' `USERS_MAX`, the
+/// bound its `lookup_user` judges wholeness by. Beside `authorized` in `Auth`
+/// for the same reason, and measured on the same stack.
+const USERS_MAX: usize = clusterkeys::USERS_MAX;
+
 /// The cluster authentication config, loaded once from disk at boot (see
 /// `docs/roadmap/roadmap-cluster-keys.md`). A *per-machine keypair*: this machine holds
 /// its own private key and a list of the peer PUBLIC keys it accepts, so a
@@ -236,6 +241,16 @@ struct Auth {
     /// unaffected.
     authorized: [u8; AUTHORIZED_MAX],
     authorized_len: usize,
+    /// `/etc/cluster/users` (Decision 9 of docs/roadmap/roadmap-user-keys.md):
+    /// the users whose claims need their own credential here. An absent file
+    /// registers nobody, which is today's behaviour for every user.
+    users: [u8; USERS_MAX],
+    users_len: usize,
+    /// Whether `users` holds the WHOLE file. A file that did not fit, or one
+    /// that could not be read, is not whole, and clusterkeys then answers
+    /// "broken" for every name: no non-root claim is served on the machine's
+    /// word because its line might lie past the cut.
+    users_whole: bool,
 }
 
 /// A machine identity: the expanded signing key, and the seed it came from.
@@ -285,6 +300,11 @@ impl Auth {
         &self.authorized[..self.authorized_len]
     }
 
+    /// What the registry says of a claimed name (NUL-trimmed).
+    fn lookup_user(&self, name: &[u8]) -> clusterkeys::UserLookup {
+        clusterkeys::lookup_user(&self.users[..self.users_len], name, self.users_whole)
+    }
+
 }
 
 /// Log this boot's identity as netd sees it (step 3 of
@@ -327,6 +347,8 @@ const AUTHORIZED_PATH: &[u8] = b"/etc/cluster/authorized";
 /// This machine's own private key. Its presence is what lets netd sign its
 /// outbound requests at all; without it, it can neither serve nor dial.
 const ID_PATH: &[u8] = b"/etc/cluster/id";
+/// The users registry (Decision 9): `<name> <pubkey-hex>` per line.
+const USERS_PATH: &[u8] = b"/etc/cluster/users";
 
 /// Whether an `fsd` reply is a TRANSIENT failure that a boot-time read should
 /// retry, rather than a real answer.
@@ -376,6 +398,9 @@ fn load_auth() -> Auth {
         signing: None,
         authorized: [0u8; AUTHORIZED_MAX],
         authorized_len: 0,
+        users: [0u8; USERS_MAX],
+        users_len: 0,
+        users_whole: false,
     };
     // ONE retry budget across all three reads, not one each.
     //
@@ -521,6 +546,46 @@ fn load_auth() -> Auth {
         log(b"netd: WARNING could not read /etc/cluster/authorized (error ");
         log_dec(u64::MAX - n);
         log(b" below the error ceiling); no peer can be verified by signature\r\n");
+    }
+    // The users registry, read like `authorized` and sharing its budget. Only
+    // two outcomes leave it usable: the whole file read, or a definitive "no
+    // such file" (nobody registered). Anything else, a read error, a file past
+    // USERS_MAX, a probe that could not say, leaves it NOT WHOLE, which
+    // refuses every claim of a non-root user (clusterkeys reads it as broken),
+    // because serving one on the machine's word could switch attestation off
+    // for exactly the user whose line was not read. Said at boot, once, as the
+    // other two reads are.
+    let mut u;
+    loop {
+        u = read_file_chunk(As::FirstParty, USERS_PATH, 0, 0, &mut auth.users);
+        if transient_fs_failure(u) && budget > 0 {
+            budget -= 1;
+            syscall(syscall_abi::NET_WAIT, 40);
+            continue;
+        }
+        break;
+    }
+    if u < syscall_abi::FS_ERR_MIN {
+        auth.users_len = (u as usize).min(USERS_MAX);
+        let mut probe = [0u8; 1];
+        let more = read_file_chunk(As::FirstParty, USERS_PATH, 0, USERS_MAX as u64, &mut probe);
+        // ZERO, and nothing else, is "nothing past the cut": an error from
+        // the probe is not knowing, and not knowing is not whole.
+        auth.users_whole = more == 0;
+        if !auth.users_whole {
+            log(b"netd: WARNING /etc/cluster/users is larger than netd can read (");
+            log_dec(USERS_MAX as u64);
+            log(b" bytes), or its end could not be read;\r\n      every claim of a non-root user will be REFUSED\r\n");
+        }
+        log(b"netd: cluster identity: users registry, ");
+        log_dec(auth.users_len as u64);
+        log(b" bytes\r\n");
+    } else if u == syscall_abi::FS_ERR_NOT_FOUND {
+        auth.users_whole = true;
+    } else {
+        log(b"netd: WARNING could not read /etc/cluster/users (error ");
+        log_dec(u64::MAX - u);
+        log(b" below the error ceiling); every claim of a non-root user will be REFUSED\r\n");
     }
     // REPORTED PER DIRECTION: they have different preconditions, and a machine
     // can be able to do one and not the other. Naming WHICH half is missing
@@ -1636,7 +1701,22 @@ fn park_run(packed_mac: u64, call: u64, buf: &[u8], len: usize, out: &mut [u8], 
     pending.cursor = 0;
     pending.owner = owner;
     match park_remote(&dst_mac, ip, port, ninep_abi::NP_RUN, owner, call, &who, &np[..hdr + clen], remotes) {
-        Ok(()) => None,
+        Ok(()) => {
+            // DECISION 7'S ANCHOR. A run's reply is an unsigned stream, so
+            // `expect_key` verifies nothing on it; it holds instead the key of
+            // the `authorized` line for the address dialled, the machine whose
+            // `/host` callbacks claiming `who` this export accepts while the
+            // run is in flight (`run_in_flight`). No line, no anchor: zeros,
+            // which `run_in_flight` reads as none.
+            if let Some(peer) = clusterkeys::find_by_ip(auth.authorized(), &ip) {
+                if let Some(pk) = remotes.iter_mut().flatten().filter_map(|r| r.parked.as_mut())
+                    .find(|pk| pk.verb == ninep_abi::NP_RUN && pk.caller == owner && pk.call == call)
+                {
+                    pk.expect_key = peer.key;
+                }
+            }
+            None
+        }
         Err(msg) => fail(out, msg),
     }
 }
@@ -2518,6 +2598,9 @@ struct KeyedSession {
     seq: u64,
     /// The session's user, mapped onto this machine's accounts.
     user: Proxy,
+    /// The run its opener was served under by rule 2 (Decision 7), if it was:
+    /// the session closes when that run ends.
+    run: Option<RunTag>,
 }
 
 /// Overwrite a secret with zeros in a way the optimiser may not elide: the
@@ -3230,7 +3313,7 @@ fn on_frame(mac: &[u8; 6], frame: &[u8], conns: &mut [Option<TcpConn>; MAX_CONNS
                 return;
             }
             if let Some(seg) = parse_tcp_in(frame) {
-                handle_tcp(mac, frame, &seg, conns, dials, auth);
+                handle_tcp(mac, frame, &seg, conns, dials, auth, remotes);
             }
         }
         _ => {}
@@ -3350,7 +3433,7 @@ fn parse_tcp_in(frame: &[u8]) -> Option<TcpIn> {
 /// matching connection via [`handle_conn_segment`], and a returned "close" (the
 /// peer's FIN, or an RST) frees the slot. None of those paths validates a
 /// sequence number; see `docs/ROADMAP.md` on the receive path.
-fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], auth: &Auth) {
+fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], auth: &Auth, runs: &[Option<RemoteConn>; MAX_REMOTE]) {
     // RST tears down a matching connection on the 4-TUPLE ALONE: no sequence
     // check, no RFC 5961 challenge, and `find_conn` does not even key on the
     // local port. So a stale RST from a previous incarnation (SERVER_ISN is a
@@ -3440,7 +3523,7 @@ fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conns: &mut [Option<TcpC
     // can be budgeted against the whole table.
     let sessions = conns.iter().filter(|c| matches!(c, Some(c) if c.session)).count();
     if let Some(i) = find_conn(conns, seg) {
-        if handle_conn_segment(mac, frame, seg, conns[i].as_mut().unwrap(), dials, auth, sessions) {
+        if handle_conn_segment(mac, frame, seg, conns[i].as_mut().unwrap(), dials, auth, sessions, runs) {
             conns[i] = None;
         }
     }
@@ -3526,7 +3609,8 @@ fn reap_idle(mac: &[u8; 6], c: &TcpConn, now: u64) -> bool {
 /// Returns `true` when the connection should be closed (the peer FIN'd). The
 /// actual sending (`pump_send`) is *not* done here - it runs once per
 /// event-loop wake so the health-ping stays promptly acked (see `serve`).
-fn handle_conn_segment(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, c: &mut TcpConn, dials: &mut [Option<DialConn>; MAX_DIAL], auth: &Auth, sessions: usize) -> bool {
+#[allow(clippy::too_many_arguments)]
+fn handle_conn_segment(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, c: &mut TcpConn, dials: &mut [Option<DialConn>; MAX_DIAL], auth: &Auth, sessions: usize, runs: &[Option<RemoteConn>; MAX_REMOTE]) -> bool {
     c.last_rx = now();
     // Track the peer's ACK (frees send window), count duplicate ACKs, and
     // update the advertised window.
@@ -3617,7 +3701,7 @@ fn handle_conn_segment(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, c: &mut TcpConn
         // export gateway (cluster Phase 1). Both stage a response in `c.prefix`
         // for pump_send to stream.
         if c.local_port == ninep_abi::NP_NET_PORT {
-            if handle_9p(c, request, dials, mac, auth, sessions) {
+            if handle_9p(c, request, dials, mac, auth, sessions, runs) {
                 // An authentication failure on a keyed session, or a key
                 // offered where none may be: close with NO reply (ninep-abi,
                 // "Keyed sessions"). An RST rather than a FIN, so the client's
@@ -3899,19 +3983,28 @@ const DATA_INLINE: usize = syscall_abi::FS_DATA_MAX as usize;
 /// with a second caller for the keyed format, `build_9p_reply` stopped being
 /// inlined here and every export verb, signed ones included, peaked 1,760
 /// bytes deeper than on `main` (step 6's probe, per verb).
-fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX_DIAL], mac: &[u8; 6], auth: &Auth, sessions: usize) -> bool {
+fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX_DIAL], mac: &[u8; 6], auth: &Auth, sessions: usize, runs: &[Option<RemoteConn>; MAX_REMOTE]) -> bool {
     let first = !c.carried;
     c.carried = true;
-    let (msg, proxy, seal) = if let Some(k) = c.keyed.as_mut() {
+    let (msg, proxy, seal, run) = if let Some(k) = c.keyed.as_mut() {
         // A KEYED session takes AUTHNP04 and nothing else: an AUTHNP03 frame
         // here is not a request to authenticate, it is a refusal. Every
         // failure closes with no reply (see `verify_keyed`), and every verb
         // runs as the session's user, since the frame carries no name.
+        //
+        // A session opened under rule 2 (Decision 7) lives no longer than its
+        // run: its frames carry no credential to re-check, so once the run
+        // ends nothing would still justify the claim. Checked on every frame,
+        // before the frame is verified, so no frame is served after the run
+        // ends; the close is the refusal.
+        if matches!(k.run, Some(run) if !run_live(runs, run)) {
+            return close_keyed(b"netd: 9p: keyed session: the run it was opened under has ended; closing\r\n");
+        }
         let (seq, end) = match verify_keyed(k, request) {
             Ok(v) => v,
             Err(why) => return close_keyed(why),
         };
-        (&request[ninep_abi::NP_NET_LEN_PREFIX + ninep_abi::NP_AUTH_HDR_KEYED..end], k.user, Seal::Keyed(seq))
+        (&request[ninep_abi::NP_NET_LEN_PREFIX + ninep_abi::NP_AUTH_HDR_KEYED..end], k.user, Seal::Keyed(seq), k.run)
     } else {
     // Authenticate first: verify the client's Ed25519 signature over the request
     // and recover the bare NP message. A failure (an unauthorized key, a bad
@@ -3936,7 +4029,7 @@ fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX
         deny_9p(c, request);
         return false;
     }
-    let Some((msg, nonce, name, peer_root)) = authenticate(auth, request) else {
+    let Some(a) = authenticate(auth, request) else {
         deny_9p(c, request);
         return false;
     };
@@ -3959,8 +4052,14 @@ fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX
     // A KEYED SESSION IS COVERED HERE TOO: its user is fixed by the signed
     // NP_SESSION that keyed it, which came through this call, and no later frame
     // on it carries a name.
-    let proxy = match map_user(&name, peer_root) {
-        Ok(p) => p,
+    //
+    // Since user-keys step 7 that limit is narrowed: `admit` applies the
+    // normative block's four rules, so a claim of a REGISTERED user needs the
+    // user's own credential, and a compromised node can no longer act as a
+    // user it does not hold the key of.
+    let nonce = a.nonce;
+    let (proxy, run) = match admit(auth, &a, runs) {
+        Ok(v) => v,
         Err(cause) => {
             // NOT deny_9p: that reports a key failure, and the signature
             // verified fine - sending an operator after /etc/cluster/authorized
@@ -3973,7 +4072,7 @@ fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX
             return false;
         }
     };
-    (msg, proxy, Seal::Signed(nonce))
+    (a.msg, proxy, Seal::Signed(nonce), run)
     };
     // Route: a remote-run request (cluster Phase 4a) vs a normal fs verb. `msg`
     // is the NP message (verb at offset 0), framing + auth already stripped.
@@ -4022,7 +4121,7 @@ fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX
             (Some(boot), Some(id)) => {
                 let mut eph_client = [0u8; ninep_abi::NP_EPHEMERAL_LEN];
                 eph_client.copy_from_slice(&msg[hdr..]);
-                let Some(eph_export) = key_session(id, boot, &nonce, &eph_client, proxy, &mut c.keyed) else {
+                let Some(eph_export) = key_session(id, boot, &nonce, &eph_client, proxy, run, &mut c.keyed) else {
                     // An all-zero shared secret: the offered key was of small
                     // order, so the session keys would be a function of public
                     // values alone. No fallback to an unkeyed session.
@@ -4118,6 +4217,7 @@ fn key_session(
     nonce: &[u8; ninep_abi::NP_NONCE_LEN],
     eph_client: &[u8; ninep_abi::NP_EPHEMERAL_LEN],
     user: Proxy,
+    run: Option<RunTag>,
     out: &mut Option<KeyedSession>,
 ) -> Option<[u8; ninep_abi::NP_EPHEMERAL_LEN]> {
     let mut secret = ephemeral_secret(ninep_abi::SIG_DOMAIN_EPHEMERAL_E, &id.seed, boot, nonce);
@@ -4142,6 +4242,7 @@ fn key_session(
         k_s2c: [0u8; ninep_abi::NP_SESSION_KEY_LEN],
         seq: 0,
         user,
+        run,
     });
     ks.k_c2s.copy_from_slice(&k[..kl]);
     ks.k_s2c.copy_from_slice(&k[kl..2 * kl]);
@@ -4370,17 +4471,41 @@ fn authenticate<'a>(
     // unconfigured export would have accepted requests computed under the empty
     // key, which every attacker also has. Deleting the format deletes the trap
     // with it - there is no longer a verification that succeeds by default.
-    if read_u64(request, p) != ninep_abi::NP_AUTH_MAGIC_SIGNED {
-        return None;
-    }
-    authenticate_signed(auth, request)
+    //
+    // TWO SIGNED FORMATS since user-keys step 7: `AUTHNP03`, and `AUTHNP05`,
+    // which carries a credential block. Each is verified under its OWN tag
+    // (`request_sig_domain`), so neither can be relabelled as the other.
+    let tag = ninep_abi::request_sig_domain(read_u64(request, p))?;
+    authenticate_signed(auth, request, tag)
 }
 
 /// What an authenticated request carries: the bare NP message, the request
-/// nonce the reply is signed against, the claimed user's name (NUL-padded), and
+/// nonce the reply is signed against, the claimed user's name (NUL-padded),
 /// whether the signing peer is trusted with root (its `authorized` line's
-/// `root` flag, for [`map_user`]'s root squash).
-type Authenticated<'a> = (&'a [u8], [u8; ninep_abi::NP_NONCE_LEN], [u8; ninep_abi::NP_NAME_LEN], bool);
+/// `root` flag), the signing machine's key, and the credential. All of it is
+/// [`admit`]'s input, and nothing else decides who the request runs as.
+struct Authenticated<'a> {
+    msg: &'a [u8],
+    nonce: [u8; ninep_abi::NP_NONCE_LEN],
+    name: [u8; ninep_abi::NP_NAME_LEN],
+    peer_root: bool,
+    caller_key: [u8; ninep_abi::NP_PUBKEY_LEN],
+    cred: Cred<'a>,
+}
+
+/// An authenticated request's credential, read by the block's rules
+/// (ninep-abi, "User credentials") only once the machine signature over it has
+/// verified.
+enum Cred<'a> {
+    /// An `AUTHNP03` request: none.
+    None,
+    /// A kind-1 user signature, its length already checked.
+    UserSig(&'a [u8; ninep_abi::NP_CRED_USER_SIG_LEN]),
+    /// A block that is truncated, of a kind this tree does not know, or of a
+    /// known kind with the wrong length: the request is REFUSED, and an
+    /// unknown kind is never skipped.
+    Bad,
+}
 
 /// Where the NP message starts in a framed request, by format.
 ///
@@ -4394,6 +4519,11 @@ fn np_offset(request: &[u8]) -> Option<usize> {
     let p = ninep_abi::NP_NET_LEN_PREFIX;
     if request.len() >= p + 8 && read_u64(request, p) == ninep_abi::NP_AUTH_MAGIC_SIGNED {
         Some(p + ninep_abi::NP_AUTH_HDR_SIGNED)
+    } else if request.len() >= p + 8 && read_u64(request, p) == ninep_abi::NP_AUTH_MAGIC_USER {
+        // Past the credential block, by the same reader `authenticate` uses;
+        // an unreadable block has no verb either.
+        let c = ninep_abi::credentialed(request).ok()?;
+        Some(c.message.as_ptr() as usize - request.as_ptr() as usize)
     } else {
         // NOT a guess. With the MAC'd format gone there is one header layout,
         // and a frame that is not it has no verb at any offset we know - so this
@@ -4424,12 +4554,29 @@ fn np_offset(request: &[u8]) -> Option<usize> {
 fn authenticate_signed<'a>(
     auth: &Auth,
     request: &'a [u8],
+    tag: &[u8],
 ) -> Option<Authenticated<'a>> {
     let p = ninep_abi::NP_NET_LEN_PREFIX;
     let need = p + ninep_abi::NP_AUTH_HDR_SIGNED;
     if request.len() < need {
         return None;
     }
+    let credentialed = read_u64(request, p) == ninep_abi::NP_AUTH_MAGIC_USER;
+    // An AUTHNP05 frame is cut to its DECLARED length before anything is
+    // signed or hashed over (the step 5 review): bytes past it are not part of
+    // the request, and the credential's message hash must cover exactly what
+    // the machine signature does. A declared length past the bytes received
+    // is refused.
+    let end = if credentialed {
+        let declared = u32::from_le_bytes([request[0], request[1], request[2], request[3]]) as usize;
+        let end = p.checked_add(declared)?;
+        if end > request.len() || end < need {
+            return None;
+        }
+        end
+    } else {
+        request.len()
+    };
     let noff = p + ninep_abi::NP_AUTH_NONCE_OFF;
     let woff = p + ninep_abi::NP_AUTH_NAME_OFF;
     let koff = p + ninep_abi::NP_AUTH_PUBKEY_OFF;
@@ -4459,7 +4606,9 @@ fn authenticate_signed<'a>(
     //    interface without making any forgery harder - the key is the claim.
     let peer_root = clusterkeys::find_by_key(auth.authorized(), &offered)?.root;
 
-    let np = &request[need..];
+    // Everything after `sig`: the NP message for AUTHNP03; the credential
+    // block and then the message for AUTHNP05, the block inside the signature.
+    let np = &request[need..end];
     // The signed bytes, after the domain tag: nonce ‖ name ‖ message. Built
     // into one buffer because
     // the signature is over a concatenation the frame does not store adjacently
@@ -4467,7 +4616,6 @@ fn authenticate_signed<'a>(
     // Domain-separated: the signed input is TAG ‖ nonce ‖ name, so a signature
     // made as a REPLY cannot be replayed as a request.
     let mut prefix = [0u8; ninep_abi::SIG_DOMAIN_MAX + ninep_abi::NP_SIG_PREFIX_LEN];
-    let tag = ninep_abi::SIG_DOMAIN_REQUEST;
     prefix[..tag.len()].copy_from_slice(tag);
     prefix[tag.len()..tag.len() + ninep_abi::NP_SIG_PREFIX_LEN]
         .copy_from_slice(&request[noff..noff + ninep_abi::NP_SIG_PREFIX_LEN]);
@@ -4485,9 +4633,24 @@ fn authenticate_signed<'a>(
 
     let mut nonce = [0u8; ninep_abi::NP_NONCE_LEN];
     nonce.copy_from_slice(&request[noff..noff + ninep_abi::NP_NONCE_LEN]);
-    let mut who = [0u8; ninep_abi::NP_NAME_LEN];
-    who.copy_from_slice(&request[woff..woff + ninep_abi::NP_NAME_LEN]);
-    Some((np, nonce, who, peer_root))
+    let mut name = [0u8; ninep_abi::NP_NAME_LEN];
+    name.copy_from_slice(&request[woff..woff + ninep_abi::NP_NAME_LEN]);
+    // The block is read only now, under a signature that verified: ninep-abi's
+    // `credentialed`, the one reader, on the frame cut to its declared length.
+    let (msg, cred) = if !credentialed {
+        (np, Cred::None)
+    } else {
+        match ninep_abi::credentialed(&request[..end]) {
+            Ok(c) => match <&[u8; ninep_abi::NP_CRED_USER_SIG_LEN]>::try_from(c.credential) {
+                Ok(sig) if c.kind == ninep_abi::NP_CRED_KIND_USER_SIG => (c.message, Cred::UserSig(sig)),
+                _ => (c.message, Cred::Bad),
+            },
+            // The message is unknown when the block is unreadable; nothing is
+            // dispatched for a Bad credential, so an empty one stands in.
+            Err(_) => (&request[end..end], Cred::Bad),
+        }
+    };
+    Some(Authenticated { msg, nonce, name, peer_root, caller_key: offered, cred })
 }
 
 /// Seal a framed export reply: reply-auth, i.e. mutual authentication.
@@ -4653,6 +4816,14 @@ fn deny_claim(c: &mut TcpConn, request: &[u8], cause: Refused, auth: &Auth, nonc
             Refused::RootSquash => {
                 b"cpu: this host does not trust yours with root (no `root` flag on its authorized line)\r\n"
             }
+            Refused::Credential => b"cpu: the request's credential cannot be read (truncated, or a kind this host does not know)\r\n",
+            Refused::NoCredential => {
+                b"cpu: that user is registered on this host and the request carries no credential\r\n"
+            }
+            Refused::BadCredential => b"cpu: that user's credential does not verify on this host\r\n",
+            Refused::Registry => {
+                b"cpu: this host's /etc/cluster/users cannot be read for that user (a broken line, or not read whole)\r\n"
+            }
         };
         let n = m.len().min(c.prefix.len());
         c.prefix[..n].copy_from_slice(&m[..n]);
@@ -4664,7 +4835,12 @@ fn deny_claim(c: &mut TcpConn, request: &[u8], cause: Refused, auth: &Auth, nonc
         let status = match cause {
             Refused::Scan(LineScan::Unreadable) => syscall_abi::NO_FS,
             Refused::Scan(LineScan::NoDatabase) => syscall_abi::FS_ERR_NOT_FOUND,
-            Refused::Scan(LineScan::NotFound | LineScan::Found) | Refused::RootSquash => syscall_abi::FS_ERR_AUTH,
+            Refused::Scan(LineScan::NotFound | LineScan::Found)
+            | Refused::RootSquash
+            | Refused::Credential
+            | Refused::NoCredential
+            | Refused::BadCredential
+            | Refused::Registry => syscall_abi::FS_ERR_AUTH,
         };
         // SEALED, or the three statuses above are a distinction no client can
         // observe. An unsealed refusal is 12 bytes - `[len][status]` - and every
@@ -6667,14 +6843,13 @@ fn caller_name(out: &mut [u8; ninep_abi::NP_NAME_LEN]) -> LineScan {
 /// there is a misauthorization. If the cost ever matters, that is the question
 /// to answer first.
 ///
-/// ROOT SQUASH IS A REQUIRED PARAMETER, not a check beside the call: a claim
-/// resolving to uid 0 or gid 0 is refused unless `peer_root` (the signing
-/// peer's `authorized` line carries the `root` flag). gid 0 as well as uid 0,
-/// because `fsd`'s `mode_allows` grants group-root access on it; the primary
-/// gid is the only group that crosses the cluster. Taking it here means an
-/// inbound path cannot resolve a name without deciding it.
+/// CALLED BY [`admit`] ALONE. Until user-keys step 7 the root squash was this
+/// function's required parameter, so that no inbound path could resolve a
+/// name without deciding it; the decision now has four rules (ninep-abi,
+/// "User credentials"), and the property is kept by there being ONE inbound
+/// resolver, `admit`, which calls this and then decides.
 #[inline(never)]
-fn map_user(who: &[u8; ninep_abi::NP_NAME_LEN], peer_root: bool) -> Result<Proxy, Refused> {
+fn find_account(who: &[u8; ninep_abi::NP_NAME_LEN]) -> Result<Proxy, Refused> {
     let name = trim_nul(who);
     if name.is_empty() {
         return Err(Refused::Scan(LineScan::NotFound));
@@ -6690,7 +6865,6 @@ fn map_user(who: &[u8; ninep_abi::NP_NAME_LEN], peer_root: bool) -> Result<Proxy
     // An id too large for the identity word cannot be carried, and truncating it
     // would authorize a different account. Refuse instead.
     match found.filter(|p| ninep_abi::proxy_id(p.uid, p.gid).is_some()) {
-        Some(p) if (p.uid == 0 || p.gid == 0) && !peer_root => Err(Refused::RootSquash),
         Some(p) => Ok(p),
         // A scan that could not read the file has not established that the
         // account is absent - only that we cannot tell, and there are two ways
@@ -6705,14 +6879,113 @@ fn map_user(who: &[u8; ninep_abi::NP_NAME_LEN], peer_root: bool) -> Result<Proxy
     }
 }
 
-/// Why [`map_user`] would not act as a remote caller's claimed user.
+/// Why [`admit`] would not act as a remote caller's claimed user.
 #[derive(Clone, Copy)]
 enum Refused {
     /// The account scan's own answer: no such account, or no database to ask.
     Scan(LineScan),
-    /// The account resolves to uid 0 or gid 0 and the peer is not trusted with
-    /// root (root squash).
+    /// The account resolves to uid 0 or gid 0, the peer is not trusted with
+    /// root, and the request carries no credential of root's that verifies
+    /// (root squash, rule 1).
     RootSquash,
+    /// The credential block is truncated, of an unknown kind, or of a known
+    /// kind with the wrong length.
+    Credential,
+    /// The user is registered here and the request carries no credential.
+    NoCredential,
+    /// The user is registered here and the credential does not verify.
+    BadCredential,
+    /// The registry's line for the user is broken, two lines disagree, or the
+    /// registry was not read whole: never read as "unregistered".
+    Registry,
+}
+
+/// The run a claim was served under by rule 2 (Decision 7): the parked
+/// `NP_RUN`'s caller and call, which no other park shares. A keyed session
+/// opened under the rule carries it, and dies with the run.
+#[derive(Clone, Copy, PartialEq)]
+struct RunTag {
+    caller: u64,
+    call: u64,
+}
+
+/// The export's policy (ninep-abi's normative block, "User credentials"),
+/// for every inbound claim, `AUTHNP03` and `AUTHNP05` alike, single requests
+/// and keyed sessions' openers alike: who the request runs as, and the run it
+/// was served under if rule 2 served it; or why not. The rules in the
+/// block's order, the first that applies deciding:
+///
+/// 0. A credential block that cannot be read refuses the request.
+/// 1. Root-equivalent (uid 0 or gid 0): served if the peer's `authorized`
+///    line has the `root` flag, whether or not root is registered, the
+///    credential unread; otherwise only with root's credential, root
+///    registered. A run in flight never lifts this.
+/// 2. Decision 7: this node has an `NP_RUN` in flight to the calling machine
+///    as this user: served on the machine's word, the credential unread.
+/// 3. Registered: served only with a kind-1 credential that verifies.
+/// 4. Unregistered: served on the machine's word, the credential unread. A
+///    broken registry line is not "unregistered": refused.
+#[inline(never)]
+fn admit(auth: &Auth, a: &Authenticated, runs: &[Option<RemoteConn>; MAX_REMOTE]) -> Result<(Proxy, Option<RunTag>), Refused> {
+    if matches!(a.cred, Cred::Bad) {
+        return Err(Refused::Credential);
+    }
+    let p = find_account(&a.name)?;
+    let name = trim_nul(&a.name);
+    let attested = |look: clusterkeys::UserLookup| match (look, &a.cred) {
+        (clusterkeys::UserLookup::Registered(key), Cred::UserSig(sig)) => user_sig_verifies(auth, &key, a, sig),
+        _ => false,
+    };
+    if p.uid == 0 || p.gid == 0 {
+        return if a.peer_root || attested(auth.lookup_user(name)) { Ok((p, None)) } else { Err(Refused::RootSquash) };
+    }
+    if let Some(run) = run_in_flight(runs, &a.caller_key, &a.name) {
+        return Ok((p, Some(run)));
+    }
+    match auth.lookup_user(name) {
+        clusterkeys::UserLookup::Broken => Err(Refused::Registry),
+        clusterkeys::UserLookup::Unregistered => Ok((p, None)),
+        look @ clusterkeys::UserLookup::Registered(_) => match a.cred {
+            Cred::None => Err(Refused::NoCredential),
+            _ if attested(look) => Ok((p, None)),
+            _ => Err(Refused::BadCredential),
+        },
+    }
+}
+
+/// Whether `sig` is `key`'s kind-1 signature over this request:
+/// `user_sig_input` of the header's nonce, name and calling key, THIS
+/// export's own public key, and the SHA-512 of the message as received.
+/// Its own frame, so the input and the hash state are not resident in
+/// `handle_9p`'s.
+#[inline(never)]
+fn user_sig_verifies(auth: &Auth, key: &[u8; clusterkeys::KEY_LEN], a: &Authenticated, sig: &[u8; ninep_abi::NP_CRED_USER_SIG_LEN]) -> bool {
+    // `accepts_signed` required an identity to reach here; no identity is
+    // no export key to bind to, so nothing verifies.
+    let Some(id) = auth.signing.as_ref() else { return false };
+    let hash = ed25519::sha512(a.msg);
+    let input = ninep_abi::user_sig_input(&a.nonce, &a.name, &a.caller_key, &id.key.public(), &hash);
+    ed25519::verify(key, &input, sig)
+}
+
+/// Decision 7's anchor: the `NP_RUN` this node has in flight to the machine
+/// holding `caller_key` as `name`, if any. The run's peer is the
+/// `authorized` line for the address it dialled, resolved at the park
+/// (`park_run`, into `Parked::expect_key`); a run to an address no line names
+/// has no anchor (all zeros) and lets nothing in. "In flight" is the parked
+/// slot: it is freed when the run ends, and with it the rule.
+fn run_in_flight(runs: &[Option<RemoteConn>; MAX_REMOTE], caller_key: &[u8; ninep_abi::NP_PUBKEY_LEN], name: &[u8; ninep_abi::NP_NAME_LEN]) -> Option<RunTag> {
+    runs.iter().flatten().filter_map(|r| r.parked.as_ref()).find_map(|pk| {
+        let anchored = pk.expect_key != [0u8; clusterkeys::KEY_LEN];
+        (pk.verb == ninep_abi::NP_RUN && anchored && &pk.expect_key == caller_key && &pk.who == name)
+            .then_some(RunTag { caller: pk.caller, call: pk.call })
+    })
+}
+
+/// Whether the run `tag` names is still in flight.
+fn run_live(runs: &[Option<RemoteConn>; MAX_REMOTE], tag: RunTag) -> bool {
+    runs.iter().flatten().filter_map(|r| r.parked.as_ref())
+        .any(|pk| pk.verb == ninep_abi::NP_RUN && pk.caller == tag.caller && pk.call == tag.call)
 }
 
 /// WHO a call to `fsd` is made on behalf of - a **required parameter** of every
