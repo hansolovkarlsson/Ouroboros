@@ -1482,6 +1482,8 @@ def credential_self_test(quiet=True):
             bad.append(f"  - credentials: {label} was refused, but the frame is not the honest "
                        f"one wrong in that one way (no witness)")
 
+    user_keys = {}
+
     def witnessed(mode, body):
         """Whether the refused frame `body` is wrong in exactly `mode`'s way.
         A refusal names only that the signature failed, never which of its
@@ -1508,8 +1510,10 @@ def credential_self_test(quiet=True):
             return False
         cred, np_msg = body[at:at + clen], body[at + clen:]
         password = b"user-wrong" if mode == "wrong-key" else b"user"
-        user_key = ed().public_key(c.user_seed(b"user", password))
-        others = [k for k in dev_authorized() if k not in (caller, host_public())]
+        if password not in user_keys:
+            user_keys[password] = ed().public_key(c.user_seed(b"user", password))
+        user_key = user_keys[password]
+        other = c.other_member(caller, host_public())
         callers, exports = [caller], [host_public()]
         if mode == "other-name":
             name = b"guest".ljust(NP_NAME_LEN, b"\0")
@@ -1518,9 +1522,9 @@ def credential_self_test(quiet=True):
         elif mode == "other-message":
             np_msg = np_msg + b"\0"
         elif mode == "other-machine":
-            callers = others
+            callers = [other]
         elif mode == "other-export":
-            exports = others
+            exports = [other]
         h = hashlib.sha512(np_msg).digest()
         return any(ed().verify(user_key, SIG_DOMAIN_USER + nonce + name + k + e + h, cred)
                    for k in callers for e in exports)
@@ -1551,10 +1555,10 @@ def credential_self_test(quiet=True):
     # cluster, so its own credential cannot help it there.
     refused("root from an unflagged peer with root's credential, root unregistered",
             ask(b"root", b"root"), "root squash")
-    saved = _REGISTRY
+    saved = registry()
     try:
         import mkclusterkeys
-        _REGISTRY = registry_bytes(mkclusterkeys.dev_registry({"user", "root"}))
+        _REGISTRY = saved + registry_bytes(mkclusterkeys.dev_registry({"root"}))
         served("root from an unflagged peer with root's credential, root registered",
                ask(b"root", b"root"))
         refused("root from an unflagged peer with no credential, root registered",
@@ -1562,6 +1566,11 @@ def credential_self_test(quiet=True):
         # The flag outranks the registry.
         served("root from a flagged peer with no credential, root registered",
                ask(b"root", seed=host))
+        # Rule 1 as ninep-abi words it: the flag serves root "without a
+        # credential", so one that is present and wrong is not read either.
+        # Pinned here so netd (step 7) is held to the same reading.
+        served("root from a flagged peer with a wrong credential, root registered",
+               ask(b"root", b"not-roots", seed=host))
         # A broken line is never "unregistered": the claim is refused even
         # with the right credential.
         _REGISTRY = b"user not-a-key\n"
@@ -1569,7 +1578,7 @@ def credential_self_test(quiet=True):
                 ask(b"user", b"user"), "is broken")
         # A registry that is not whole is broken for every name, `user`'s line
         # included, since a later line could contradict it.
-        _REGISTRY = registry_bytes(mkclusterkeys.dev_registry()) + b"#" * USERS_MAX + b"\n"
+        _REGISTRY = saved + b"#" * USERS_MAX + b"\n"
         refused("`user` with its credential, the registry longer than USERS_MAX",
                 ask(b"user", b"user"), "is broken")
     finally:

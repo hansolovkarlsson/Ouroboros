@@ -117,6 +117,10 @@ def dev_registry(names=None):
     stages it, and np9p_server.py serves the dev cluster from it, so the host
     peer and a guest built from this tree require a credential of the same
     users without a second copy to drift."""
+    if isinstance(names, (str, bytes)):
+        # set("user") is {"u", "s", "e", "r"}: an empty registry, which serves
+        # `user` uncredentialed. Fail closed, loudly.
+        raise TypeError("dev_registry takes a collection of names, not one name")
     names = REGISTERED if names is None else set(names)
     # Filtered BEFORE deriving: a key costs a 210,000-round PBKDF2 and a
     # scalar multiplication, paid only for the names asked for.

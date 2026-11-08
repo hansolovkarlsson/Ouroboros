@@ -36,8 +36,8 @@ e.g. after `make run-image-9p`:
     python3 scripts/np9p_client.py localhost 5640 readdir / --sign=nobody      # -> refused (unauthorized key)
     python3 scripts/np9p_client.py localhost 5640 readdir / --legacy-mac       # -> refused (retired format)
     python3 scripts/np9p_client.py localhost 5640 read /etc/shadow --user user # -> refused (permissions)
-    python3 scripts/np9p_client.py localhost 5641 stat /HELLO.TXT --user user --password=user  # AUTHNP05, a user credential
-    python3 scripts/np9p_client.py localhost 5641 stat /HELLO.TXT --user user --password=user --cred-misbehave=other-export  # -> refused
+    python3 scripts/np9p_client.py localhost 5641 stat /HELLO.TXT --peer=host --user user --password=user  # AUTHNP05, a user credential
+    python3 scripts/np9p_client.py localhost 5641 stat /HELLO.TXT --peer=host --user user --password=user --cred-misbehave=other-export  # -> refused
     python3 scripts/np9p_client.py localhost 5640 noverb /                     # -> FS_ERR_NO_SUCH_VERB (NP_PWRITE)
     python3 scripts/np9p_client.py localhost 5640 noverb / 0x10c               # -> served: NP_STAT (the control)
 """
@@ -424,6 +424,22 @@ CRED_MISBEHAVE = None
 FROM_FLAGS = object()
 
 
+_DEV_MEMBER_KEYS = None
+
+
+def other_member(*not_these):
+    """A dev machine's public key that is none of `not_these`: the field an
+    `other-machine` or `other-export` credential signs, wrong and still a
+    real cluster member's key. The server's self-test asks the same function,
+    so its witness checks the one key the frame was made with. The keys are
+    memoized, each a scalar multiplication here."""
+    global _DEV_MEMBER_KEYS
+    if _DEV_MEMBER_KEYS is None:
+        ed = load_ed_reference()
+        _DEV_MEMBER_KEYS = [ed.public_key(dev_seed(l)) for l in DEV_PEER_LABELS.values()]
+    return next(k for k in _DEV_MEMBER_KEYS if k not in not_these)
+
+
 def other_nonce(nonce):
     """The nonce an `other-nonce` credential signs: the frame's own with every
     bit flipped. Derived, not random, so the server's self-test can recompute
@@ -456,8 +472,7 @@ def credentialed_frame(np_msg, seed, password, user=None, mode=None):
     if mode in ("other-machine", "other-export"):
         # A dev machine that is neither end, so the field is wrong and still a
         # real cluster member's key.
-        other = next(k for k in (ed.public_key(dev_seed(l)) for l in DEV_PEER_LABELS.values())
-                     if k not in (public, export))
+        other = other_member(public, export)
         if mode == "other-machine":
             in_caller = other
         else:
@@ -631,7 +646,9 @@ def run_op(host, port, command, timeout=10):
     # offer - it exports nothing back - so they stay zero and the command runs
     # with the remote's own namespace only.
     np_msg = build_frame(NP_RUN, 0, [len(cmd), 0, 0, 0], cmd)
-    frame, _nonce = signed_frame(np_msg, SIGN_KEY)
+    # request_frame, so `--password` and `--cred-misbehave` reach NP_RUN too:
+    # Decision 7's run is the one a credential has to open.
+    frame, _nonce = request_frame(np_msg)
     out = b""
     with socket.create_connection((host, port), timeout=timeout) as s:
         s.sendall(frame)
@@ -704,7 +721,7 @@ class Session:
         self.sock.sendall(frame)
         return recv_reply(self.sock, nonce, peer_key=peer_key())
 
-    def open(self, keyed=False, user=None, password=FROM_FLAGS):
+    def open(self, keyed=False, user=None, password=FROM_FLAGS, cred_mode=FROM_FLAGS):
         """Send NP_SESSION. With `keyed`, offer an ephemeral X25519 key as its
         payload: an export that keys answers with its own in the SIGNED reply,
         and every later op is AUTHNP04; one that does not answers an empty
@@ -712,11 +729,12 @@ class Session:
         answer came in a reply whose signature was checked, so an attacker
         cannot strip the offer or swap a key."""
         if not keyed:
-            return self.op(build_frame(NP_SESSION, 0, [], b""), user=user, password=password)
+            return self.op(build_frame(NP_SESSION, 0, [], b""), user=user, password=password,
+                           cred_mode=cred_mode)
         secret = client_ephemeral(SIGN_KEY)
         eph_client = x25519_ref.public(secret)
         frame, nonce = request_frame(build_frame(NP_SESSION, 0, [], eph_client), user=user,
-                                     password=password)
+                                     password=password, cred_mode=cred_mode)
         self.sock.sendall(frame)
         status, data = recv_reply(self.sock, nonce, peer_key=peer_key())
         if status != 0 or not data:
@@ -2488,6 +2506,11 @@ def main():
             stage = int(args[3])
         except ValueError:
             sys.exit(f"impersonate-gate: the stage is a number, not {args[3]!r}")
+        if PASSWORD is not None:
+            # Refused, not ignored: every row is a claim made WITHOUT the
+            # user's credential, which is what the gate exists to send.
+            sys.exit("impersonate-gate: --password does not apply; the gate's claims carry "
+                     "no credential on purpose")
         sys.exit(min(do_impersonate_gate(host, port, stage), 125))
 
     if op == "session-gate":
