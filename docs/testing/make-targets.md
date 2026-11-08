@@ -138,8 +138,9 @@ after a range test silently swallowed five verbs its docstring claimed; since
 2026-09-23 also a KEYED session against `np9p_client.py` over loopback, every
 verb plus the refusals on both sides; since 2026-11-08, user-keys step 6, also
 user credentials, every case of Decisions 5 and 6 and each of the client's ten
-misbehaving credentials, each refusal checked for its reason; about 49 s, most
-of the suite's time), and
+misbehaving credentials, each refusal checked for its reason and each mode
+witnessed wrong in its one field, and the registry read by clusterkeys' rules;
+about 51 s, most of the suite's time), and
 `check-site` (above), and since 2026-10-03 `check-xhci-barriers` (above),
 which builds the kernel and finds the xHCI driver's two DMA barriers in its
 image, the one check here no QEMU rig could stand in for, and since

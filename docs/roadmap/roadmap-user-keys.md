@@ -658,6 +658,46 @@ credential, the second against `mkclusterkeys.py`'s independent derivation.
 `check-wire-constants.py`: its mask resolver ORed a bare alias of a bytes
 constant as an integer. A lone alias now takes its value whatever its type.
 
+**The high review** (`/code-review high`, ten findings, nine fixed):
+
+- *The registry was not read by clusterkeys' rules.* The transcription left
+  out the `whole` rule (a registry past `USERS_MAX`, 1024 bytes, is broken for
+  every name), used Python's whitespace (`\v` and `\f` in, NUL out) where
+  clusterkeys uses space, tab, CR, LF and NUL, and let `bytes.fromhex` skip
+  whitespace inside a key. The two exports would have judged the same file
+  differently, which step 8's comparison would have reported as a credential
+  bug. All three rules are now transcribed. The registry is bytes throughout,
+  `--users=PATH` is read as `rb`, and `check-wire-constants.py` compares the
+  server's `USERS_MAX` with clusterkeys'. The self-test reads seven registry
+  shapes directly, each against what clusterkeys answers.
+- *"Refused for its own reason" could not tell six modes apart.* Six of the
+  modes all fail with "credential does not verify": wrong-key, other-name,
+  other-machine, other-export, other-nonce and other-message. Old-tag and
+  relabel both failed with a bare "denied". A frame broken in a second way
+  would pass. Each mode is now **witnessed**: the refused credential (or, for
+  old-tag and relabel, the machine signature) verifies over the honest input
+  with only that mode's field changed. `other-nonce` flips every bit of the
+  frame's nonce instead of drawing a random one, so the witness can recompute
+  it. The unsigned denial now names its cause.
+- *The keyed credential cases dropped a server crash.* They now go through
+  the same wrapper as the single-request cases, which counts one.
+- *`None` meant "as the flags say".* After `--password` or
+  `--cred-misbehave`, no caller could ask for an uncredentialed or honest
+  frame. The defaults are now `FROM_FLAGS`, and `None` means none.
+- *Cleanups:* one header builder for both signed formats, one Ed25519
+  reference load in the server, and `dev_registry` derives only the names it
+  is asked for.
+- *Not fixed:* an `AUTHNP05` frame's block is parsed up to four times per
+  request. That is small, and the fix would reshape `serve_connection`.
+
+The controls: the ten above, all still caught, and six new ones, each on its
+own copy. The client's `other-export` also changing the nonce, and `old-tag`
+signing under the reply tag, are both caught by their witnesses (both frames
+are still refused for the expected reason). Folding the denial's causes into
+one is caught by its reason. Python's whitespace, the `USERS_MAX` rule
+removed, and loose hex are each caught by the registry cases. A server
+`USERS_MAX` of 2048 is caught by the checker. The self-test takes 51 s.
+
 ## Decisions
 
 Scored on the project's standing order: **stable, safe, and not blocking
