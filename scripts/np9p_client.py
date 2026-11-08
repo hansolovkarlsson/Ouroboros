@@ -2066,7 +2066,7 @@ def do_impersonate_gate(host, port, stage):
         if not ok:
             failed += 1
 
-    def op(np_msg, seed, user, password=None):
+    def op(np_msg, seed, user, password=None, mode=None):
         """One signed request as `user`, signed by `seed`, credentialed with
         `password` if one is given. The exception is returned rather than
         raised, so a dead connection reads as its own outcome and never as a
@@ -2074,7 +2074,7 @@ def do_impersonate_gate(host, port, stage):
         if password is None:
             frame, nonce = signed_frame(np_msg, seed, user=user.encode())
         else:
-            frame, nonce = credentialed_frame(np_msg, seed, password, user=user.encode())
+            frame, nonce = credentialed_frame(np_msg, seed, password, user=user.encode(), mode=mode)
         try:
             with socket.create_connection((host, port), timeout=10) as s:
                 s.sendall(frame)
@@ -2082,9 +2082,9 @@ def do_impersonate_gate(host, port, stage):
         except (RuntimeError, OSError) as exc:
             return None, f"{exc.__class__.__name__}: {exc}"
 
-    def read(path, seed, user, password=None):
+    def read(path, seed, user, password=None, mode=None):
         pb = path.encode()
-        return op(build_frame(NP_READ, 0, [len(pb), 0, 4096], pb), seed, user, password)
+        return op(build_frame(NP_READ, 0, [len(pb), 0, 4096], pb), seed, user, password, mode)
 
     def outcome(status, data):
         if status is None:
@@ -2163,6 +2163,24 @@ def do_impersonate_gate(host, port, stage):
         st, data = read(IMPERSONATE_PUBLIC, intruder, "guest")
         row("row 5", f"intruder claims `guest` (unregistered), no credential, reads {IMPERSONATE_PUBLIC}",
             st, data, lambda d: len(d) > 0)
+        # Each of step 6's misbehaving credentials, wrong in exactly one way,
+        # must be refused FS_ERR_AUTH; row 4 above is the same request made
+        # honestly, so a refusal here is the binding the mode breaks.
+        for mode in CRED_MODES:
+            st, data = read(IMPERSONATE_PRIVATE, intruder, "user", password=b"user", mode=mode)
+            check(f"misbehaving: a '{mode}' credential for `user` is refused",
+                  st == FS_ERR_AUTH, outcome(st, data))
+        # Rule 1 as ninep-abi words it: the root flag serves root without a
+        # credential, so one present and wrong is not read either (pinned in
+        # np9p_server.py's self-test too). `host` is root-flagged.
+        st, data = read("/etc/shadow", trusted, "root", password=b"not-roots-password")
+        check("rule 1: a flagged peer claiming root with a wrong credential is served",
+              st is not None and served(st) and data.startswith(b"root:"), outcome(st, data))
+        # And without the flag, root's own credential cannot help while root
+        # is unregistered here (the dev registry lists `user` only).
+        st, data = read("/etc/shadow", intruder, "root", password=b"root")
+        check("rule 1: an unflagged peer claiming root with root's credential, root unregistered, "
+              "is refused", st == FS_ERR_AUTH, outcome(st, data))
 
     print(f"impersonate-gate: {failed} check(s) failed", flush=True)
     return failed
