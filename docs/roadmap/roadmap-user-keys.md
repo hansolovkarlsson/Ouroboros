@@ -490,6 +490,59 @@ in `ROADMAP.md`.
 goes. There are no attested sessions until step 8, so there is nothing to
 close yet; the table is exercised here, as the step says.
 
+### Step 5's results (2026-11-08): the wire, `AUTHNP05`
+
+**What went in.** `ninep-abi`'s normative block gains "User credentials": the
+`AUTHNP05` frame, which is `AUTHNP03`'s header at the same offsets, then a
+credential block `[kind:2][clen:2][credential]` (little-endian), then the NP
+message. Kind 1 is the user's Ed25519 signature over `SIG_DOMAIN_USER ‖
+nonce:16 ‖ name:32 ‖ pubkey:32 ‖ SHA-512(NP message):64`, as Decision 8 says.
+The block also states the user key's derivation and the realm rule (1 to 32
+bytes, `0x21` to `0x7e`, whitespace trimmed, no realm means no credential),
+and the export's order: the machine half first, then the block, then policy.
+A block that runs past the frame, a kind the export does not know, or a known
+kind with any other length refuses the request; an unknown kind is never
+skipped. New constants: `NP_AUTH_MAGIC_USER`, the block's field lengths and
+offset, `NP_CRED_KIND_USER_SIG`, `NP_CRED_USER_SIG_LEN`, `NP_CRED_MAX`,
+`NP_AUTH_HDR_USER_MAX` (220), `NP_MSG_HASH_LEN`, `NP_USER_SIG_PREFIX_LEN`, and
+two tags. `credential_block` reads the block's rules once on the Rust side and
+`user_sig_input` lays out the signed bytes; steps 7 and 8 call them.
+
+**One decision the plan left open.** Decision 8 says the credential block is
+"covered by the machine signature" but not under which tag. It is **its own,
+`SIG_DOMAIN_REQUEST_CRED`**, not `AUTHNP03`'s `SIG_DOMAIN_REQUEST`. Under one
+tag, a captured `AUTHNP05` frame reframed as `AUTHNP03`, its credential block
+read as the head of the NP message, would carry a machine signature that
+still verifies. Today the reframed message's verb would be garbage, but that
+is the incidental barrier the request tag's own doc says not to rely on. Both
+new tags fit in 29 bytes, so `SIG_DOMAIN_MAX`, and every `netd` buffer sized
+from it, is unchanged.
+
+**What steps 7 and 8 inherit.** `NP_FRAME_MAX` is now sized from the
+credentialed header (2320, was 2252). Nothing outside `ninep-abi` uses it.
+`netd` sizes its own frames from `NP_AUTH_HDR_SIGNED` (`REMOTE_SBUF`,
+`NP_SIGNED_NP_OFF`, and the receive paths), and those grow by
+`NP_CRED_HDR_LEN + NP_CRED_MAX` (68 bytes) only where `AUTHNP05` is built or
+read, which is the stack measurement Risk 3 names.
+
+**The check and its controls.** `check-wire-constants.py` pins all fifteen new
+names, the three derivation constants among them (`SIG_DOMAIN_USERKEY`,
+`USERKEY_ITERATIONS`, `REALM_MAX`, which no peer spelled before), on both
+Python peers. Both declare them ahead of step 6, as session-auth's wire step
+did. 199 constants agree, up from 171. To see them, the script had to learn
+three things: a `u16`, a literal with `_` separators (`USERKEY_ITERATIONS` is
+`210_000`, so it had been invisible in Rust), and sums and bare aliases
+resolved together until neither adds a name (`NP_AUTH_HDR_USER_MAX` sums
+`NP_CRED_MAX`, an alias the sum pass ran before, and the script refused it as
+"no peer spells it"). The per-peer floors were raised to the counts as run,
+which found the server's and `sys.h`'s floors each already one behind on
+`main`. Controls, each one constant on one side and each caught by name: the
+client's credentialed tag, its magic and its iteration count (`210_001`); the
+server's kind and its `NP_CRED_MAX` alias; the Rust kind (`u16`), user tag
+and hash length; and a server name misspelled, caught by the floor. In the
+Rust tests: a short credential accepted, an unknown kind skipped, and name
+and pubkey swapped in the signed input, each failing one test.
+
 ## Decisions
 
 Scored on the project's standing order: **stable, safe, and not blocking

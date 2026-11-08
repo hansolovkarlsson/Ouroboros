@@ -50,8 +50,9 @@ This document is the one to update first when direction changes.
 > [`roadmap-completed.md`](roadmap-completed.md)). Open from the one-disk
 > plan: its step 0 on Parallels and steps 6 and 7 (Pi item 3 below). Pi
 > item 1, more than one partition in use, was finished on 2026-11-08 (#422,
-> #423, seen on the card) and moved to `roadmap-completed.md`. Next by the
-> roadmap: per-user keys step 5 (item 1), or the next Pi item.
+> #423, seen on the card) and moved to `roadmap-completed.md`. Per-user keys
+> step 5, the wire, went in the same day; step 6 (item 1) is next by the
+> roadmap, or the next Pi item.
 
 > **Released 2026-10-13: v0.23.0, multi-core, and DevTools's preprocessor
 > and editor run here** (#209 to #281, recorded in [`CHANGELOG.md`](CHANGELOG.md)
@@ -99,7 +100,8 @@ the microkernel arc itself still leaves open):
    keys held by `netd` while the user is logged in, root squash first, shaped as the foundation for the
    auth server below). **Steps 0 to 4 on `main` 2026-09-27** (#170 to #174:
    the impersonation gate, root squash, PBKDF2, the user key and realm, and
-   keys held by `netd` from login to logout); step 5, the wire, is next. Per-user cluster *identity* shipped
+   keys held by `netd` from login to logout). **Step 5, the wire
+   (`AUTHNP05`), 2026-11-08**; step 6, both Python peers, is next. Per-user cluster *identity* shipped
    2026-08-31 (see [`CHANGELOG.md`](CHANGELOG.md) and
    [`unspellable-postmortem.md`](postmortems/unspellable-postmortem.md)): a remote request
    carries the requesting user's **name** inside the signature, the far side resolves
