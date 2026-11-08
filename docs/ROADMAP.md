@@ -780,8 +780,15 @@ not yet checked on this tree are marked (predicted).
             `write test something` in `/mnt` was refused, as it should be,
             since `/mnt` is a name in the namespace and not a directory on
             the root; from `/` the same command made `test`.
-      - [ ] **The refusal's message**: built 2026-11-08 on QEMU, the board
-            not yet. That `write` in `/mnt` said `write: no such file or
+      - [x] **The refusal's message**: built 2026-11-08 on QEMU (#423),
+            seen on the board the same day on `68c9a04c` (the merge,
+            clean): `write test hello` in `/mnt` printed `write: its
+            directory holds only mount points, so nothing can be made in
+            it`. The same run in `/mnt/boot` was refused by the SD driver,
+            as designed (the firmware partition is never written), but
+            said only `write: device I/O error`, the kernel's log line the
+            one place that says why: the same kind of message, noted
+            under item 2's open tail. That `write` in `/mnt` said `write: no such file or
             directory`, which is true of the disk but reads as if `/mnt`
             were missing, right after `ls` listed it. Hans, on the board:
             the message could be more informative. It now says `write: its
@@ -800,8 +807,7 @@ not yet checked on this tree are marked (predicted).
             controls. Left as they were: `NO_FS` (`/` answers it while
             `fsd` restarts), `mv` into such a directory (its "not found"
             may be the source's, so it would need a stat to tell) and C
-            programs (`ENOENT`, as the C `stat` item below). Done when the
-            board shows the message.
+            programs (`ENOENT`, as the C `stat` item below).
       - [ ] **C programs**: `libc/src/file.c`'s `stat` of a mounts' parent
             is still `ENOENT`. `nsresolve` would export the same walk;
             wanted when a C program first walks a tree across a mount.
@@ -823,6 +829,17 @@ not yet checked on this tree are marked (predicted).
       and new values as `bootstick.py` does (`make test-sdcard`, #417),
       and seen on the board the same day: a re-stage from `56946121`
       took boot 1 to boot 2.
+      - [ ] **A refused write says why** (seen 2026-11-08, not asked for
+            yet): `write test hello` in `/mnt/boot` on the card, the
+            firmware partition `mount 0` gives, is refused by the SD
+            driver as designed, but the program prints `write: device I/O
+            error`; only the kernel's log line (`sd: a write to sector 2080
+            refused: sectors 0 to 133118 hold the card's firmware
+            partition ...`) says why. A read-only refusal would read as
+            what it is: the kernel's `BLOCK_*` answer for a guarded sector
+            is an I/O error today, and `fsd` passes it on. A design
+            question first (which layer knows, and whether `mount 0`
+            should say read-only up front); not built.
 - [ ] **3. Booting from a stick, with no card.** Most of it exists: on QEMU
       the kernel already boots from a USB stick behind a hub and mounts that
       same stick as its runtime disk (`test-usb-hub.py --usb-boot`, and
