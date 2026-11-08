@@ -697,6 +697,10 @@ fn serve(packed_mac: u64) -> ! {
                     conns[i] = None;
                     continue;
                 }
+                if run_ended(&mac, conns[i].as_ref().unwrap(), &remotes) {
+                    conns[i] = None;
+                    continue;
+                }
                 loop {
                     let c = conns[i].as_mut().unwrap();
                     if !c.responded {
@@ -3565,6 +3569,22 @@ fn reap_idle(mac: &[u8; 6], c: &TcpConn, now: u64) -> bool {
     true
 }
 
+/// A keyed session bound to a run (rule 2) whose run has ended: RST it, and
+/// `true` so the caller drops the slot, which releases its fids (`Drop for
+/// TcpConn`). Swept once per loop, right after `service_remotes` frees a
+/// finished run's park, so the session ends WITH its run and not at its next
+/// frame or the idle reap: until then its fids would stay open as the run's
+/// user with no rule left to justify them (the medium review of step 7).
+/// `handle_9p`'s per-frame check stays, for a frame that arrives first.
+fn run_ended(mac: &[u8; 6], c: &TcpConn, runs: &[Option<RemoteConn>; MAX_REMOTE]) -> bool {
+    if !matches!(c.keyed.as_ref().and_then(|k| k.run), Some(run) if !run_live(runs, run)) {
+        return false;
+    }
+    log(b"netd: 9p: keyed session: the run it was opened under has ended; closing\r\n");
+    send_seg(mac, c, TCP_RST | TCP_ACK, false, &[]);
+    true
+}
+
 /// The per-connection TCP state machine for one non-SYN segment: process its
 /// ACK (flow-control window, duplicate-ACK fast retransmit), complete the
 /// handshake, set up the response from the request, and handle the peer's FIN.
@@ -4497,7 +4517,10 @@ fn np_offset(request: &[u8]) -> Option<usize> {
         let hdr = request.get(at..at + ninep_abi::NP_CRED_HDR_LEN)?;
         let clen = u16::from_le_bytes([hdr[2], hdr[3]]) as usize;
         let off = at + ninep_abi::NP_CRED_HDR_LEN + clen;
-        (off <= request.len()).then_some(off)
+        // Within the DECLARED frame, as `authenticate_signed` cuts it, so the
+        // peek never reads a verb from bytes past the request.
+        let declared = u32::from_le_bytes([request[0], request[1], request[2], request[3]]) as usize;
+        (off + 8 <= request.len().min(p.saturating_add(declared))).then_some(off)
     } else {
         // NOT a guess. With the MAC'd format gone there is one header layout,
         // and a frame that is not it has no verb at any offset we know - so this
@@ -6901,7 +6924,9 @@ struct RunTag {
 ///    credential unread; otherwise only with root's credential, root
 ///    registered. A run in flight never lifts this.
 /// 2. Decision 7: this node has an `NP_RUN` in flight to the calling machine
-///    as this user: served on the machine's word, the credential unread.
+///    as this user: served on the machine's word, the credential unread, and
+///    bound to the run (asked after 3 and 4 so that only a claim nothing but
+///    the run would let in is bound; see below).
 /// 3. Registered: served only with a kind-1 credential that verifies.
 /// 4. Unregistered: served on the machine's word, the credential unread. A
 ///    broken registry line is not "unregistered": refused.
@@ -6921,22 +6946,33 @@ fn admit(auth: &Auth, a: &Authenticated, runs: &[Option<RemoteConn>; MAX_REMOTE]
         // to check against it: an uncredentialed claim from an unflagged peer
         // is refused without a read. A registry that cannot be read leaves
         // root unattested, which is the squash.
+        if a.peer_root {
+            return Ok((p, None));
+        }
         let by_credential = matches!(a.cred, Cred::UserSig(_))
             && matches!(registry_lookup(name), Some(look) if attested(look));
-        return if a.peer_root || by_credential { Ok((p, None)) } else { Err(Refused::RootSquash) };
+        return if by_credential { Ok((p, None)) } else { Err(Refused::RootSquash) };
     }
-    if let Some(run) = run_in_flight(runs, &a.caller_key, &a.name) {
-        return Ok((p, Some(run)));
-    }
-    match registry_lookup(name) {
-        None => Err(Refused::RegistryUnreadable),
-        Some(clusterkeys::UserLookup::Broken) => Err(Refused::Registry),
-        Some(clusterkeys::UserLookup::Unregistered) => Ok((p, None)),
+    // Rules 3 and 4 are asked BEFORE rule 2 is consulted, though rule 2 comes
+    // first in the block: the set of claims served is the same either way,
+    // since rule 2 serves whatever the registry says, but a session is BOUND
+    // to a run only when the run is the one reason it was let in. Asked the
+    // other way round, an unregistered user's session, or one opened with a
+    // credential that verifies, was bound to an unrelated run in flight and
+    // torn down when that run ended (the medium review of step 7).
+    let refused = match registry_lookup(name) {
+        None => Refused::RegistryUnreadable,
+        Some(clusterkeys::UserLookup::Broken) => Refused::Registry,
+        Some(clusterkeys::UserLookup::Unregistered) => return Ok((p, None)),
         Some(look @ clusterkeys::UserLookup::Registered(_)) => match a.cred {
-            Cred::None => Err(Refused::NoCredential),
-            _ if attested(look) => Ok((p, None)),
-            _ => Err(Refused::BadCredential),
+            Cred::None => Refused::NoCredential,
+            _ if attested(look) => return Ok((p, None)),
+            _ => Refused::BadCredential,
         },
+    };
+    match run_in_flight(runs, &a.caller_key, &a.name) {
+        Some(run) => Ok((p, Some(run))),
+        None => Err(refused),
     }
 }
 
@@ -7016,7 +7052,8 @@ fn user_sig_verifies(auth: &Auth, key: &[u8; clusterkeys::KEY_LEN], a: &Authenti
 /// `authorized` line for the address it dialled, resolved at the park
 /// (`park_run`, into `Parked::expect_key`); a run to an address no line names
 /// has no anchor (all zeros) and lets nothing in. "In flight" is the parked
-/// slot: it is freed when the run ends, and with it the rule.
+/// slot: it is freed when the run ends, and with it the rule. At most one
+/// matches: `park_run` refuses a second run while one is in flight.
 fn run_in_flight(runs: &[Option<RemoteConn>; MAX_REMOTE], caller_key: &[u8; ninep_abi::NP_PUBKEY_LEN], name: &[u8; ninep_abi::NP_NAME_LEN]) -> Option<RunTag> {
     runs.iter().flatten().filter_map(|r| r.parked.as_ref()).find_map(|pk| {
         let anchored = pk.expect_key != [0u8; clusterkeys::KEY_LEN];

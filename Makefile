@@ -2266,7 +2266,7 @@ test-held-keys: image
 # dev addresses (10.0.2.2, root-flagged; 10.0.2.20 by guestfwd, not) and calls
 # back into the export. Minutes, so not in `make test`. Run it whenever netd's
 # admit, run_in_flight, run_live, park_run or the keyed session's run binding
-# changes.
+# changes, or registry_lookup or read_registry (its registry checks).
 test-run-callback: image-ext2
 	python3 scripts/test-run-callback.py
 

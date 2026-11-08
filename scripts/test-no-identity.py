@@ -40,15 +40,18 @@ DENIED = "cpu: authentication failed"
 
 def debugfs():
     prefix = subprocess.run(["brew", "--prefix", "e2fsprogs"], capture_output=True, text=True).stdout.strip()
-    return os.path.join(prefix, "sbin", "debugfs")
+    tool = os.path.join(prefix, "sbin", "debugfs")
+    if not prefix or not os.access(tool, os.X_OK):
+        sys.exit("test-no-identity: needs e2fsprogs' debugfs (brew install e2fsprogs)")
+    return tool
 
 
 def strip_identity():
+    tool = debugfs()  # before any copy, so a missing tool leaves nothing behind
     shutil.copyfile(IMAGE, COPY)
     with open(COPY, "rb") as f:
         f.seek(OFF)
         open(PART, "wb").write(f.read(SIZE))
-    tool = debugfs()
     if subprocess.run([tool, "-R", "stat /etc/cluster/id", PART], capture_output=True, text=True).stdout.find("Inode:") < 0:
         sys.exit("test-no-identity: /etc/cluster/id not found where the ext2 root should be; the layout moved")
     subprocess.run([tool, "-w", "-R", "rm /etc/cluster/id", PART], capture_output=True, check=True)
@@ -59,7 +62,13 @@ def strip_identity():
 
 
 def main():
-    strip_identity()
+    try:
+        strip_identity()
+    except BaseException:
+        for leftover in (COPY, PART):
+            if os.path.exists(leftover):
+                os.unlink(leftover)
+        raise
     failed = 0
     g = drive_qemu.Guest(COPY, extra_args=(
         "-netdev", f"user,id=net0,hostfwd=tcp::{PORT}-:564",

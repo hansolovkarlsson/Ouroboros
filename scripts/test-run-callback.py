@@ -18,10 +18,13 @@ to the host). That gives every bound a check:
 
 - served: `host`, the run's machine, claims the run's user during the run
   (a read of a file only `user` may read), one-shot and on a keyed session;
+  and a session opened as `guest` in the same run, which rule 4 serves
+  anyway, is not bound to it;
 - the machine bound: `intruder` claims the same user during the same run,
   refused;
 - the time bound: after the run ends, `host`'s one-shot claim is refused,
-  and the keyed session opened under the run is closed at its next frame;
+  and the keyed session opened under the run is closed, while `guest`'s
+  still serves;
 - the squash: a run as root to the UNFLAGGED machine, whose callback claims
   root, refused (a run never lifts the squash); to the flagged one, served.
 
@@ -101,12 +104,12 @@ def shown(st, data):
     return f"served, {len(data)} bytes" if c.served(st) else f"refused {c.status_name(st)}"
 
 
-def keyed_as_user():
+def keyed_as(user=b"user"):
     """A keyed session opened by `host` as `user`: the Session, or why not."""
     c.SIGN_KEY = HOST
     s = c.Session("localhost", EXPORT)
     try:
-        st, _ = s.open(keyed=True, user=b"user", password=None)
+        st, _ = s.open(keyed=True, user=user, password=None)
         if st != 0 or s.keys is None:
             s.close()
             return None, f"not keyed (status {st})"
@@ -127,7 +130,7 @@ def stat_on(s):
 # Every check the rig records on a full run. A thread that died, or a phase
 # that never ran, records fewer, and that is a failure: a rig that counts only
 # the FAILs it saw passes when its checks never ran.
-EXPECTED = 15
+EXPECTED = 18
 
 
 def stand_in(port, during, ready):
@@ -187,11 +190,17 @@ def user_run():
         st, data = read(PRIVATE, INTRUDER, b"user")
         check("the machine bound: another machine claims the run's user during the run, refused",
               st == c.FS_ERR_AUTH, shown(st, data))
-        s, how = keyed_as_user()
+        s, how = keyed_as()
         state["session"] = s
         st, why = stat_on(s) if s else (None, how)
         check("rule 2: a keyed session opened by the run's machine as the run's user serves",
               s is not None and st is not None and c.served(st), why or f"status {st}")
+        # Opened during the same run, as `guest`, whom rule 4 serves anyway:
+        # it must NOT be bound to the run, so the run's end leaves it alone.
+        g_s, how = keyed_as(b"guest")
+        state["guest"] = g_s
+        check("a keyed session as `guest` (unregistered) opens during the run",
+              g_s is not None, how)
 
     def after():
         st, data = read(PRIVATE, HOST, b"user")
@@ -202,10 +211,29 @@ def user_run():
             check("the time bound: the session opened under the run closes when it ends", False,
                   "no session was opened")
             return
+        # Closed BY THE GUEST at the run's end, before anything is sent on it:
+        # the sweep after `service_remotes`, not the per-frame check, which
+        # would only close it at the next frame (its fids held until then).
+        s.sock.settimeout(5)
+        try:
+            unprompted = s.sock.recv(1) == b""
+            how = "closed (FIN)" if unprompted else "data arrived"
+        except ConnectionResetError:
+            unprompted, how = True, "reset (RST)"
+        except OSError as e:
+            unprompted, how = False, f"still open after 5 s ({type(e).__name__})"
+        check("the time bound: the guest closes the session at the run's end, unprompted",
+              unprompted, how)
         st, why = stat_on(s)
         check("the time bound: the session opened under the run closes when it ends",
               st is None, why or f"served or answered: status {st}")
         s.close()
+        g_s = state.get("guest")
+        if g_s is not None:
+            st, why = stat_on(g_s)
+            check("a session rule 4 let in is not bound: `guest`'s still serves after the run",
+                  st is not None and c.served(st), why or f"status {st}")
+            g_s.close()
 
     return during, after
 

@@ -2011,6 +2011,9 @@ IMPERSONATE_PUBLIC = "/HELLO.TXT"
 # are the export's answers about WHO is asking: the name or key is refused
 # (FS_ERR_AUTH), or the resolved user may not (FS_ERR_PERM).
 IMPERSONATE_REFUSALS = (FS_ERR_AUTH, FS_ERR_PERM)
+# A stage is what the run CLAIMS about the code it runs against. Stages 0 and
+# 1 describe trees before user-keys step 7: against today's tree, whose dev
+# registry lists `user`, their row 2 is refused, and the run to make is stage 7.
 IMPERSONATE_STAGES = {
     0: {"row 1": True, "row 2": True},
     1: {"row 1": False, "row 2": True},
