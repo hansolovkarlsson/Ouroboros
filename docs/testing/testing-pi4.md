@@ -589,6 +589,16 @@ the card's value instead of starting again at the build's 0. fsd mounted the
 ext2 root, `ls /` still listed `keep`, `Users` and `etc`, the cluster
 identity was unchanged, and the log held no fault line.
 
+**Observed 2026-11-07, the boot partition mounted beside the root**, the
+same card and build. `mount 0 /mnt/boot`, then `ls /mnt/boot`, listed the
+card's FAT32 boot partition whole: `RPI_EFI.fd`, `config.txt`,
+`start4.elf`, `fixup4.dat`, the three `bcm2711-*.dtb` files, `overlays/`,
+`firmware/` and the staged `EFI/`, `bin/`, `etc/`, `include/`, `man/` and
+`Users/`. `cd /mnt/boot/EFI` listed `BOOT/` and `ORBS/`. The mount prints
+nothing, bare `mount` still reported only the ext2 root, and `ls /mnt`
+said `no such file or directory` with no `/mnt` on the root, so the first
+try looked like a failure. It was not one (`ROADMAP.md`, Pi item 1).
+
 ---
 
 ## 5. Firmware settings to check before the first boot

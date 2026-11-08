@@ -50,7 +50,9 @@ This document is the one to update first when direction changes.
 > [`roadmap-completed.md`](roadmap-completed.md)). Open from the one-disk
 > plan: its step 0 on Parallels and steps 6 and 7 (Pi item 3 below). Next
 > by the roadmap: per-user keys step 5 (item 1) or Pi item 1, more than one
-> partition in use, which the card now unblocks.
+> partition in use, which on 2026-11-07 turned out to be mostly there
+> already (`mount <n> <path>`, seen on the card): what is left is making a
+> mount visible to `mount` and to `ls` of its parent.
 
 > **Released 2026-10-13: v0.23.0, multi-core, and DevTools's preprocessor
 > and editor run here** (#209 to #281, recorded in [`CHANGELOG.md`](CHANGELOG.md)
@@ -735,16 +737,29 @@ keep in the pipeline before the current tests go on. Not sequenced against
 the rest of this roadmap; the dependencies between them are stated. Claims
 not yet checked on this tree are marked (predicted).
 
-- [ ] **1. More than one partition in use, on the card or a stick.** `fsd`
-      already discovers MBR and GPT partitions (`partition::discover`) but
-      mounts only the first one that probes as FAT32, exFAT or ext2 (`vfs.rs`).
-      Wanted: the card's FAT32 boot partition and, beside it, a data
-      partition (ext2, the one where `fsd` enforces permissions), each
-      mountable, `mount` naming which. This is where the `/dev` namespace
-      item under "Remaining follow-ups" stops being speculative. **Depends on
-      item 2 for the card**, done 2026-11-06, so it can be built for the
-      card now; on a stick too, and on QEMU first
-      (`make run-image-ext2` already builds a two-partition disk).
+- [ ] **1. More than one partition in use, on the card or a stick.**
+      **Mostly there already; corrected 2026-11-07.** Until then this item
+      said `fsd` "mounts only the first one that probes", which was false
+      when it was written on 2026-10-03: `mount <n> <path>` has mounted a
+      disk's `n`-th partition beside `/` since 2026-08-25 (`b2159609`,
+      cluster Phase 0 multi-mount, up to three more at once;
+      `shell-commands.md`). Seen on the Pi's card 2026-11-07, on `56946121`:
+      `mount 0 /mnt/boot` beside the ext2 root, then `ls /mnt/boot` listed
+      the boot partition whole (`RPI_EFI.fd`, `config.txt`, `start4.elf`,
+      the `bcm2711-*.dtb` files, `overlays/`, `firmware/`, `EFI/`), and on
+      QEMU's `disk.img` both partitions mounted at once, 0 fault lines.
+      What is left is that a mount cannot be seen except at its own path,
+      which made a working mount on the board look like a failed one:
+      - bare `mount` reports only `/` (`FSOP_MOUNT_INFO`), so it should
+        list every mount and the path it is bound at;
+      - a bind is a namespace entry, not a directory entry, so `ls /mnt`
+        does not list `boot`, and with no `/mnt` on the disk it says
+        `no such file or directory` while `ls /mnt/boot` works. A
+        parent should show the mount points below it, or at least not
+        call a path with one under it missing.
+      Both are the shell's and `fsd`'s mount reporting, built and checked on
+      QEMU first. This is still where the `/dev` namespace item under
+      "Remaining follow-ups" stops being speculative.
 - [x] **2. The SD card as a runtime disk. DONE 2026-11-06 (#412), moved to
       [`roadmap-completed.md`](roadmap-completed.md)**; the plan is
       [`roadmap-sd-card.md`](roadmap/roadmap-sd-card.md). Its open tail
