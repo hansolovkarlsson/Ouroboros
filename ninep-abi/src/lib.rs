@@ -1321,7 +1321,7 @@ impl<'a> MountPoints<'a> {
             Some(b'/') => &line[..line.len() - 1],
             _ => line,
         };
-        self.names[..self.n].iter().any(|&n| n == name)
+        self.names[..self.n].contains(&name)
     }
 
     /// Each name with what it is, for the caller to list after the server's
