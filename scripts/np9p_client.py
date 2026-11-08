@@ -123,7 +123,7 @@ NP_PUBKEY_LEN = 32
 NP_SIG_LEN = 64
 # A sanity ceiling on a DECLARED reply length, so recv_reply cannot be made to
 # allocate on a number the peer chose. Deliberately NOT a mirror of ninep-abi's
-# NP_FRAME_MAX (~2.2 KB): a defensive bound only has to be finite and
+# NP_FRAME_MAX (a little over 2 KB): a defensive bound only has to be finite and
 # comfortably above real traffic, and mirroring the exact constant would add
 # two more hand-copied ABI values (NP_NET_MAX and NP_FRAME_MAX) for no gain:
 # a round 64 KiB couples to nothing and still refuses the 4 GiB case this

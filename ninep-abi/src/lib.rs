@@ -835,7 +835,10 @@ pub const NP_REMOTE_CHUNK: usize = 512;
 //      verifies. A run in flight (rule 2) never lifts this.
 //   2. A claim of user U from machine A while this export has an `NP_RUN` as
 //      U in flight to A (Decision 7, a `cpu` child's `/host` reads): served on
-//      the machine's word until that run ends, the credential unread.
+//      the machine's word until that run ends, the credential unread. A keyed
+//      session opened under this rule is bound to the run: the export closes
+//      it when the run ends, since its keyed frames carry no credential to
+//      re-check and would otherwise outlive the rule that let it open.
 //   3. A name with a registered key (Decision 5): served only if a kind-1
 //      credential verifies under that key. An `AUTHNP03` claim of it is
 //      refused.
@@ -1012,9 +1015,10 @@ pub const SIG_DOMAIN_EPHEMERAL_E: &[u8] = b"ouroboros-cluster-eph-e-v1\0";
 /// states the whole derivation.
 pub const SIG_DOMAIN_USERKEY: &[u8] = b"ouroboros-cluster-userkey-v1\0";
 
-/// Domain tag of a kind-1 **user signature**: `SIG_DOMAIN_USER ‖ nonce ‖ name
-/// ‖ pubkey ‖ SHA-512(NP message)`. Not the machine's request tag, so a user's
-/// signature can never be presented as a machine's, nor the reverse.
+/// Domain tag of a kind-1 **user signature**, the head of the bytes
+/// [`user_sig_input`] lays out (the normative block lists them). Not the
+/// machine's request tag, so a user's signature can never be presented as a
+/// machine's, nor the reverse.
 pub const SIG_DOMAIN_USER: &[u8] = b"ouroboros-cluster-user-v1\0";
 
 /// Domain tag of the MACHINE signature on a credentialed (`AUTHNP05`) request.
@@ -1248,7 +1252,8 @@ pub fn request_sig_domain(magic: u64) -> Option<&'static [u8]> {
 pub enum CredError {
     /// The magic is not [`NP_AUTH_MAGIC_USER`]: not a credentialed frame.
     NotCredentialed,
-    /// The header, the block's header or its `clen` bytes run past the frame.
+    /// The prefix, the header, the block's header or its `clen` bytes run past
+    /// the bytes given or the declared length.
     Truncated,
     /// A kind this tree does not know. Never skipped (see the normative block).
     UnknownKind(u16),
@@ -1265,15 +1270,24 @@ pub struct Credentialed<'a> {
     pub message: &'a [u8],
 }
 
-/// Read a credentialed request. `frame` is the request from its magic to the
-/// end of its DECLARED length (the bytes after the `u32` prefix, cut to
-/// `len`), and the result hands back the NP message itself, so no caller
-/// finds it by adding an offset of its own.
+/// Read a credentialed request. `framed` is the request as received, from
+/// its `u32` length prefix on; it may run past the declared length (a receive
+/// buffer), and those bytes are not part of the request. The result hands
+/// back the NP message itself, cut to the declared length, so no caller finds
+/// it by adding an offset or cutting the frame of its own.
 ///
-/// The one reading of the block's rules on the Rust side, so the export and
+/// The one reading of the frame's rules on the Rust side, so the export and
 /// any test read it alike. It verifies nothing: the machine signature is
 /// checked before this runs, and the credential after, by its kind.
-pub fn credentialed(frame: &[u8]) -> Result<Credentialed<'_>, CredError> {
+pub fn credentialed(framed: &[u8]) -> Result<Credentialed<'_>, CredError> {
+    let declared = match framed.get(..NP_NET_LEN_PREFIX) {
+        Some(p) => u32::from_le_bytes([p[0], p[1], p[2], p[3]]) as usize,
+        None => return Err(CredError::Truncated),
+    };
+    let frame = match framed.get(NP_NET_LEN_PREFIX..NP_NET_LEN_PREFIX.saturating_add(declared)) {
+        Some(f) => f,
+        None => return Err(CredError::Truncated),
+    };
     let magic = match frame.get(..8) {
         Some(m) => u64::from_le_bytes([m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7]]),
         None => return Err(CredError::Truncated),
@@ -2094,16 +2108,19 @@ mod tests {
         assert_eq!(got.len(), t + 176);
     }
 
-    /// A credentialed frame from its magic: the signed header's 152 bytes
-    /// (0x11 filler), `kind` and `clen`, 64 bytes of credential (0x22) and
-    /// 12 of message (0x33).
-    fn frame(kind: u16, clen: u16) -> [u8; 232] {
-        let mut f = [0x11u8; 232];
-        f[..8].copy_from_slice(&NP_AUTH_MAGIC_USER.to_le_bytes());
-        f[152..154].copy_from_slice(&kind.to_le_bytes());
-        f[154..156].copy_from_slice(&clen.to_le_bytes());
-        f[156..220].fill(0x22);
-        f[220..].fill(0x33);
+    /// A credentialed request as received: the `u32` prefix declaring 232,
+    /// then the signed header's 152 bytes (0x11 filler), `kind` and `clen`, 64
+    /// bytes of credential (0x22) and 12 of message (0x33), then 8 bytes of
+    /// receive-buffer junk (0x44) past the declared length.
+    fn frame(kind: u16, clen: u16) -> [u8; 244] {
+        let mut f = [0x11u8; 244];
+        f[..4].copy_from_slice(&232u32.to_le_bytes());
+        f[4..12].copy_from_slice(&NP_AUTH_MAGIC_USER.to_le_bytes());
+        f[156..158].copy_from_slice(&kind.to_le_bytes());
+        f[158..160].copy_from_slice(&clen.to_le_bytes());
+        f[160..224].fill(0x22);
+        f[224..236].fill(0x33);
+        f[236..].fill(0x44);
         f
     }
 
@@ -2112,26 +2129,38 @@ mod tests {
         let f = frame(1, 64);
         let c = credentialed(&f).expect("a well-formed frame");
         assert_eq!(c.kind, NP_CRED_KIND_USER_SIG);
-        assert_eq!(c.credential, &f[156..220]);
-        assert_eq!(c.message, &f[220..]);
+        assert_eq!(c.credential, &f[160..224]);
+        // The message stops at the declared length, not at the buffer's end.
+        assert_eq!(c.message, &f[224..236]);
         assert!(c.credential.iter().all(|&b| b == 0x22));
         assert!(c.message.iter().all(|&b| b == 0x33));
         // Exactly long enough is enough: the NP message may be empty here.
-        assert_eq!(credentialed(&f[..220]).map(|c| c.message.len()), Ok(0));
+        let mut short = f;
+        short[..4].copy_from_slice(&220u32.to_le_bytes());
+        assert_eq!(credentialed(&short).map(|c| c.message.len()), Ok(0));
     }
 
     #[test]
     fn every_malformed_frame_is_refused_by_name() {
         let f = frame(1, 64);
-        assert_eq!(credentialed(&f[..7]), Err(CredError::Truncated));
-        assert_eq!(credentialed(&f[..155]), Err(CredError::Truncated));
-        assert_eq!(credentialed(&f[..219]), Err(CredError::Truncated));
+        assert_eq!(credentialed(&f[..3]), Err(CredError::Truncated));
+        // A declared length the bytes given do not hold.
+        assert_eq!(credentialed(&f[..235]), Err(CredError::Truncated));
+        let mut huge = f;
+        huge[..4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(credentialed(&huge), Err(CredError::Truncated));
+        // A declared length that ends inside the header, the block or the credential.
+        for declared in [7u32, 155, 219] {
+            let mut d = f;
+            d[..4].copy_from_slice(&declared.to_le_bytes());
+            assert_eq!(credentialed(&d), Err(CredError::Truncated), "declared {declared}");
+        }
         // An AUTHNP03 frame, or the magic written in the wrong byte order.
         let mut old = f;
-        old[..8].copy_from_slice(&NP_AUTH_MAGIC_SIGNED.to_le_bytes());
+        old[4..12].copy_from_slice(&NP_AUTH_MAGIC_SIGNED.to_le_bytes());
         assert_eq!(credentialed(&old), Err(CredError::NotCredentialed));
         let mut be = f;
-        be[..8].copy_from_slice(&NP_AUTH_MAGIC_USER.to_be_bytes());
+        be[4..12].copy_from_slice(&NP_AUTH_MAGIC_USER.to_be_bytes());
         assert_eq!(credentialed(&be), Err(CredError::NotCredentialed));
         // A zeroed block is never a credential: 0 is not a kind.
         assert_eq!(credentialed(&frame(0, 0)), Err(CredError::UnknownKind(0)));
@@ -2144,7 +2173,7 @@ mod tests {
         assert_eq!(credentialed(&frame(1, 0xffff)), Err(CredError::BadLength { kind: 1, len: 0xffff }));
         // Byte order of the kind: 1 written big-endian is 256, unknown.
         let mut bk = f;
-        bk[152..154].copy_from_slice(&1u16.to_be_bytes());
+        bk[156..158].copy_from_slice(&1u16.to_be_bytes());
         assert_eq!(credentialed(&bk), Err(CredError::UnknownKind(256)));
     }
 
