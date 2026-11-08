@@ -1185,14 +1185,15 @@ pub fn fs_list_dir_page(path: &str, start: u64, buf: &mut [u8]) -> u64 {
 /// more than that, so a mixed cluster lists as it did.
 ///
 /// The listing is the union with this task's namespace
-/// ([`ninep_abi::MountPoints`]): a mount point below `path` is listed as a
-/// directory after the server's own entries, and a `path` the server has no
-/// directory for, with a mount below it, lists those names alone (`/mnt`
-/// after `mount 0 /mnt/boot`).
+/// ([`ninep_abi::MountPoints`]): each mount point below `path` is listed after
+/// the server's own entries, as what is bound there, in place of any entry of
+/// the server's it shadows; and a `path` the server has no directory for, with
+/// a mount below it, lists those names alone (`/mnt` after `mount 0
+/// /mnt/boot`, and with `/` unmounted too).
 pub fn fs_list_dir(path: &str, buf: &mut [u8]) -> Result<(usize, bool), u64> {
     let mut ns = [0u8; syscall_abi::NS_MAX as usize];
     let nlen = get_ns(&mut ns);
-    let mut points = ninep_abi::MountPoints::below(&ns[..nlen], path.as_bytes());
+    let points = ninep_abi::MountPoints::below(&ns[..nlen], path.as_bytes());
     let mut page = [0u8; ninep_abi::READDIR_PAGE];
     let mut spare = [0u8; ninep_abi::READDIR_PAGE];
     let mut written = 0usize;
@@ -1201,10 +1202,12 @@ pub fn fs_list_dir(path: &str, buf: &mut [u8]) -> Result<(usize, bool), u64> {
         if is_fs_error(n) { Err(n) } else { Ok(n as usize) }
     };
     let end = ninep_abi::readdir_pages(&mut page, &mut spare, fetch, |line| {
+        if points.shadows(line) {
+            return true; // the mount's entry stands in its place, below
+        }
         if written + line.len() + 1 > buf.len() {
             return false;
         }
-        points.note(line);
         buf[written..written + line.len()].copy_from_slice(line);
         buf[written + line.len()] = b'\n';
         written += line.len() + 1;
@@ -1212,13 +1215,17 @@ pub fn fs_list_dir(path: &str, buf: &mut [u8]) -> Result<(usize, bool), u64> {
     });
     let mut complete = match end {
         Ok(end) => matches!(end, ninep_abi::ReaddirEnd::Complete | ninep_abi::ReaddirEnd::OldServer),
-        // No such directory, but a mount below it: it is the mounts' parent.
-        Err(syscall_abi::FS_ERR_NOT_FOUND) if !points.is_empty() => true,
+        // No directory here, but a mount below it: it is the mounts' parent.
+        Err(code) if !points.is_empty() && mounts_stand_in(code) => true,
         Err(code) => return Err(code),
     };
     complete &= !points.full();
-    points.for_each_unseen(|name, ends_here| {
-        let slash = !ends_here || child_is_dir(path, name);
+    points.for_each(|name, kind| {
+        let slash = match kind {
+            ninep_abi::MountKind::Dir => true,
+            ninep_abi::MountKind::File => false,
+            ninep_abi::MountKind::Stat => child_is_dir(path, name),
+        };
         let len = name.len() + slash as usize;
         if written + len + 1 > buf.len() {
             complete = false;
@@ -1234,10 +1241,19 @@ pub fn fs_list_dir(path: &str, buf: &mut [u8]) -> Result<(usize, bool), u64> {
     Ok((written, complete))
 }
 
+/// Whether a server's answer for a path means it has no directory there, so a
+/// mount below the path stands in for one: no such file, not a directory (a
+/// file a binding below shadows), or nothing mounted at all (`/` unmounted,
+/// with `/dev/cons` or `/proc` still bound).
+fn mounts_stand_in(code: u64) -> bool {
+    code == syscall_abi::FS_ERR_NOT_FOUND || code == syscall_abi::FS_ERR_NOT_A_DIRECTORY || code == syscall_abi::NO_FS
+}
+
 /// Whether `dir`'s entry `name` is a directory, by a stat of the joined path:
-/// what a mount point is when a binding ends there (a partition's root, or
-/// the console, a file). `false` when the stat fails, so an entry nobody can
-/// stat is listed as a name and not claimed a directory.
+/// what a mount point is where a `bind` of a subtree ends
+/// ([`ninep_abi::MountKind::Stat`]), a local question. `false` when the stat
+/// fails, so an entry nobody can stat is listed as a name and not claimed a
+/// directory.
 fn child_is_dir(dir: &str, name: &[u8]) -> bool {
     let d = dir.as_bytes();
     let d = if d.last() == Some(&b'/') { &d[..d.len() - 1] } else { d };
@@ -1417,9 +1433,10 @@ pub fn fs_read_file(path: &str, buf: &mut [u8]) -> u64 {
 /// on success, or [`NO_FS`]/an `FS_ERR_*` code (test with [`is_fs_error`]). The
 /// record is decoded with the `stat_*` accessors below.
 ///
-/// A path the server does not have, with a mount below it in this task's
-/// namespace, is a directory ([`ninep_abi::mount_point_stat`]): `/mnt` after
-/// `mount 0 /mnt/boot`, as [`fs_list_dir`] lists it.
+/// A path with a mount below it in this task's namespace, where the server has
+/// no directory (see `mounts_stand_in`, or a file there), is a directory
+/// ([`ninep_abi::mount_point_stat`]): `/mnt` after `mount 0 /mnt/boot`, as
+/// [`fs_list_dir`] lists it.
 pub fn fs_stat(path: &str, info: &mut [u8]) -> u64 {
     let mut ns = [0u8; syscall_abi::NS_MAX as usize];
     let nlen = get_ns(&mut ns);
@@ -1433,7 +1450,8 @@ pub fn fs_stat(path: &str, info: &mut [u8]) -> u64 {
         &[],
         info,
     );
-    if status == syscall_abi::FS_ERR_NOT_FOUND
+    let no_dir = if is_fs_error(status) { mounts_stand_in(status) } else { info.len() >= ninep_abi::STAT_INFO_LEN && !stat_is_dir(info) };
+    if no_dir
         && info.len() >= ninep_abi::STAT_INFO_LEN
         && !ninep_abi::MountPoints::below(&ns[..nlen], path.as_bytes()).is_empty()
     {

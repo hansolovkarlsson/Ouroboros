@@ -1190,6 +1190,24 @@ pub fn resolve_ns(ns: &[u8], path: &[u8], out: &mut [u8]) -> NsResolved {
     NsResolved { target, len: n }
 }
 
+/// Each binding of namespace blob `ns` in order, as `(tree, prefix, target)`:
+/// the one reading of the `[tree][prefix_len][target_len][prefix][target]`
+/// layout that [`MountPoints`] and the shell's bare `mount` share. A binding
+/// whose lengths run past the end stops the walk, as [`resolve_ns`] stops.
+pub fn for_each_binding<'a>(ns: &'a [u8], mut f: impl FnMut(u8, &'a [u8], &'a [u8])) {
+    let mut i = 0usize;
+    while i + 3 <= ns.len() {
+        let pstart = i + 3;
+        let tstart = pstart + ns[i + 1] as usize;
+        let tend = tstart + ns[i + 2] as usize;
+        if tend > ns.len() {
+            return;
+        }
+        f(ns[i], &ns[pstart..tstart], &ns[tstart..tend]);
+        i = tend;
+    }
+}
+
 /// The most names one [`MountPoints`] holds. A kernel-held namespace is at most
 /// `NS_MAX` (256) bytes, and the smallest binding takes 6 (the 3-byte header,
 /// a 2-byte prefix such as `/x`, a 1-byte target), so at most 42 bindings and
@@ -1197,28 +1215,45 @@ pub fn resolve_ns(ns: &[u8], path: &[u8], out: &mut [u8]) -> NsResolved {
 /// [`MountPoints::full`] says so.
 pub const MOUNT_POINTS_MAX: usize = 64;
 
+/// What a mount point is, as a listing shows it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MountKind {
+    /// A directory: a name some binding goes on below (`mnt` for
+    /// `/mnt/boot`), or one where a binding of a root ends (a partition,
+    /// `/proc`, `/net`, a remote export, a `bind` of `/`).
+    Dir,
+    /// A file: where the console's binding ends (`/dev/cons`).
+    File,
+    /// Where a `bind` of a subtree ends, which may be a file or a directory:
+    /// the caller stats the path. Local, so no peer is ever asked.
+    Stat,
+}
+
 /// The names a directory gains from a namespace: for every binding whose
 /// prefix lies strictly below `dir`, the prefix's first component after `dir`,
-/// once each, in binding order. `mount 0 /mnt/boot` gives `/` the name `mnt`
-/// and `/mnt` the name `boot`.
+/// once each, in binding order, with what it is ([`MountKind`]).
+/// `mount 0 /mnt/boot` gives `/` the name `mnt` and `/mnt` the name `boot`.
 ///
 /// WHY THIS EXISTS. A mount is a binding in the task's namespace, not an entry
 /// in any directory, so the server listing `/mnt` (or `/`) has never heard of
 /// it. On the Pi on 2026-11-07, `ls /mnt` said "no such file or directory" and
 /// `ls /` showed no `proc`, `net` or `dev`, while each mount below them worked.
 /// The namespace is the client's, so the union is the client's too, as in
-/// Plan 9: a listing adds these names, and a stat or `cd` of a path with a
-/// binding below it finds a directory. ulib and the shell both build theirs
-/// from this one walk, so they cannot disagree on what a parent shows.
+/// Plan 9: a listing drops the server's entries these names shadow
+/// ([`MountPoints::shadows`]) and adds the names, and a stat or `cd` of a path
+/// with a binding below it finds a directory. ulib's listing and stat, and the
+/// shell's walk and `cd`, are built from this one walk. C's `stat`
+/// (`libc/src/file.c`) and `netd`'s export do not use it yet
+/// (`docs/ROADMAP.md`, Pi item 1).
 ///
-/// Byte-only and bounded, like [`resolve_ns`]: offsets into `ns`, no `str`.
+/// Names compare byte for byte, as [`resolve_ns`] matches prefixes: on FAT32 a
+/// disk's `MNT` and a binding's `mnt` are two paths to the namespace, and both
+/// are listed.
+///
+/// Byte-only and bounded, like [`resolve_ns`]: slices of `ns`, no `str`.
 pub struct MountPoints<'a> {
-    ns: &'a [u8],
-    /// `(offset into ns, length)` of each name.
-    at: [(u16, u8); MOUNT_POINTS_MAX],
-    seen: [bool; MOUNT_POINTS_MAX],
-    /// Whether some binding goes on below the name, so it is a directory.
-    through: [bool; MOUNT_POINTS_MAX],
+    names: [&'a [u8]; MOUNT_POINTS_MAX],
+    kinds: [MountKind; MOUNT_POINTS_MAX],
     n: usize,
     full: bool,
 }
@@ -1228,40 +1263,37 @@ impl<'a> MountPoints<'a> {
     /// resolves it against its cwd (a trailing `/` is ignored); a relative one
     /// gains nothing, since bindings are absolute.
     pub fn below(ns: &'a [u8], dir: &[u8]) -> Self {
-        let mut points = MountPoints {
-            ns,
-            at: [(0, 0); MOUNT_POINTS_MAX],
-            seen: [false; MOUNT_POINTS_MAX],
-            through: [false; MOUNT_POINTS_MAX],
-            n: 0,
-            full: false,
-        };
-        let mut i = 0usize;
-        while i + 3 <= ns.len() {
-            let pstart = i + 3;
-            let tstart = pstart + ns[i + 1] as usize;
-            let tend = tstart + ns[i + 2] as usize;
-            if tend > ns.len() {
-                break; // malformed blob, as resolve_ns stops
-            }
-            i = tend;
-            let Some((s, len)) = child_below(&ns[pstart..tstart], dir) else { continue };
-            let start = pstart + s;
-            let name = &ns[start..start + len];
+        let mut points = MountPoints { names: [&[]; MOUNT_POINTS_MAX], kinds: [MountKind::Dir; MOUNT_POINTS_MAX], n: 0, full: false };
+        for_each_binding(ns, |tree, prefix, target| {
+            let Some((start, len)) = child_below(prefix, dir) else { return };
+            let name = &prefix[start..start + len];
             // Anything but `/`s after the name means the binding goes on below.
-            let through = ns[start + len..tstart].iter().any(|&b| b != b'/');
-            if let Some(k) = (0..points.n).find(|&k| points.name(k) == name) {
-                points.through[k] |= through;
-                continue;
+            let through = prefix[start + len..].iter().any(|&b| b != b'/');
+            let kind = if through {
+                MountKind::Dir
+            } else if tree == NS_CON_TREE {
+                MountKind::File
+            } else if tree == 0 && target != b"/" {
+                MountKind::Stat
+            } else {
+                MountKind::Dir
+            };
+            if let Some(k) = (0..points.n).find(|&k| points.names[k] == name) {
+                // A binding going on below makes it a directory; otherwise the
+                // first binding ending here is the one resolve_ns picks.
+                if through {
+                    points.kinds[k] = MountKind::Dir;
+                }
+                return;
             }
-            if points.n == MOUNT_POINTS_MAX || start > u16::MAX as usize {
+            if points.n == MOUNT_POINTS_MAX {
                 points.full = true;
-                break;
+                return;
             }
-            points.at[points.n] = (start as u16, len as u8);
-            points.through[points.n] = through;
+            points.names[points.n] = name;
+            points.kinds[points.n] = kind;
             points.n += 1;
-        }
+        });
         points
     }
 
@@ -1280,37 +1312,23 @@ impl<'a> MountPoints<'a> {
         self.full
     }
 
-    /// The `k`-th name, `k < len()`.
-    pub fn name(&self, k: usize) -> &'a [u8] {
-        let (start, len) = self.at[k];
-        &self.ns[start as usize..start as usize + len as usize]
-    }
-
-    /// Note one line of the server's own listing (`name` or `name/`): a name
-    /// the server already lists is not added a second time.
-    pub fn note(&mut self, line: &[u8]) {
+    /// Whether one line of the server's own listing (`name` or `name/`) is a
+    /// name a binding shadows. The caller drops that line: the path resolves
+    /// to the mount, so the mount's entry stands in its place (a disk's file
+    /// `net` under a `/net` binding is netd's directory, not the file).
+    pub fn shadows(&self, line: &[u8]) -> bool {
         let name = match line.last() {
             Some(b'/') => &line[..line.len() - 1],
             _ => line,
         };
-        for k in 0..self.n {
-            if self.name(k) == name {
-                self.seen[k] = true;
-            }
-        }
+        self.names[..self.n].iter().any(|&n| n == name)
     }
 
-    /// Each name the server's listing did not have, for the caller to add,
-    /// with whether a binding ENDS there. A name only passed through (`mnt`
-    /// for `/mnt/boot`) is a directory and nothing else. A name a binding ends
-    /// at is what is bound there, which this walk cannot know: a partition's
-    /// root is a directory, the console (`/dev/cons`) is a file, and `bind`
-    /// takes either. The caller stats that path to learn which.
-    pub fn for_each_unseen(&self, mut f: impl FnMut(&'a [u8], bool)) {
+    /// Each name with what it is, for the caller to list after the server's
+    /// entries it kept.
+    pub fn for_each(&self, mut f: impl FnMut(&'a [u8], MountKind)) {
         for k in 0..self.n {
-            if !self.seen[k] {
-                f(self.name(k), !self.through[k]);
-            }
+            f(self.names[k], self.kinds[k]);
         }
     }
 }
@@ -1893,19 +1911,19 @@ mod tests {
     fn names(p: &MountPoints) -> ([[u8; 16]; 8], usize) {
         let mut got = [[0u8; 16]; 8];
         let mut count = 0;
-        p.for_each_unseen(|name, _| {
+        p.for_each(|name, _| {
             got[count][..name.len()].copy_from_slice(name);
             count += 1;
         });
         (got, count)
     }
 
-    /// Whether a binding ends at each unseen name, in order.
-    fn ends(p: &MountPoints) -> ([bool; 8], usize) {
-        let mut got = [false; 8];
+    /// Each name's kind, in order.
+    fn kinds(p: &MountPoints) -> ([MountKind; 8], usize) {
+        let mut got = [MountKind::Dir; 8];
         let mut count = 0;
-        p.for_each_unseen(|_, ends_here| {
-            got[count] = ends_here;
+        p.for_each(|_, kind| {
+            got[count] = kind;
             count += 1;
         });
         (got, count)
@@ -1957,35 +1975,46 @@ mod tests {
     }
 
     #[test]
-    fn mount_points_say_where_a_binding_ends() {
+    fn mount_points_know_what_is_bound() {
+        use MountKind::{Dir, File, Stat};
         let (ns, n) = ns_of(&PI);
-        // `/`'s names are all passed through except proc and net, bound there.
-        assert_eq!(ends(&MountPoints::below(&ns[..n], b"/")), ([false, true, true, false, false, false, false, false], 4));
-        // In /dev, cons is where the console's binding ends: the caller stats it.
-        assert!(ends(&MountPoints::below(&ns[..n], b"/dev")).0[0]);
-        // A name one binding ends at and another goes through is a directory.
-        let (ns, n) = ns_of(&[(1, b"/x", b"/"), (2, b"/x/y", b"/")]);
-        assert_eq!(ends(&MountPoints::below(&ns[..n], b"/")), ([false; 8], 1));
-        let (ns, n) = ns_of(&[(2, b"/x/y", b"/"), (1, b"/x", b"/")]);
-        assert_eq!(ends(&MountPoints::below(&ns[..n], b"/")), ([false; 8], 1));
+        // A partition, /proc, /net and a remote root are directories, with
+        // no question asked of any server (a remote one would dial its peer).
+        assert_eq!(kinds(&MountPoints::below(&ns[..n], b"/")).0[..4], [Dir, Dir, Dir, Dir]);
+        assert_eq!(kinds(&MountPoints::below(&ns[..n], b"/mnt")).0[..2], [Dir, Dir]);
+        // The console is a file.
+        assert_eq!(kinds(&MountPoints::below(&ns[..n], b"/dev")).0[0], File);
+        // A `bind` of a subtree may be either: the caller stats it. A `bind` of
+        // `/` (or `mount` of the root's own partition, tree 0) is the root.
+        let (ns, n) = ns_of(&[(0, b"/readme", b"/README.TXT"), (0, b"/root", b"/")]);
+        assert_eq!(kinds(&MountPoints::below(&ns[..n], b"/")), ([Stat, Dir, Dir, Dir, Dir, Dir, Dir, Dir], 2));
+        // A name one binding ends at and another goes through is a directory,
+        // in either order.
+        let (ns, n) = ns_of(&[(NS_CON_TREE, b"/x", b"/"), (2, b"/x/y", b"/")]);
+        assert_eq!(kinds(&MountPoints::below(&ns[..n], b"/")), ([Dir; 8], 1));
+        let (ns, n) = ns_of(&[(2, b"/x/y", b"/"), (NS_CON_TREE, b"/x", b"/")]);
+        assert_eq!(kinds(&MountPoints::below(&ns[..n], b"/")), ([Dir; 8], 1));
+        // Two ending at one name: the first, as resolve_ns picks it.
+        let (ns, n) = ns_of(&[(NS_CON_TREE, b"/x", b"/"), (1, b"/x", b"/")]);
+        assert_eq!(kinds(&MountPoints::below(&ns[..n], b"/")).0[0], File);
         // A trailing `/` on a prefix does not make it go on below.
-        let (ns, n) = ns_of(&[(1, b"/x/", b"/")]);
-        assert!(ends(&MountPoints::below(&ns[..n], b"/")).0[0]);
+        let (ns, n) = ns_of(&[(NS_CON_TREE, b"/x/", b"/")]);
+        assert_eq!(kinds(&MountPoints::below(&ns[..n], b"/")).0[0], File);
     }
 
     #[test]
-    fn mount_points_skip_what_the_server_lists() {
+    fn mount_points_shadow_what_the_server_lists() {
         let (ns, n) = ns_of(&PI);
-        let mut root = MountPoints::below(&ns[..n], b"/");
-        // A disk with a real `/mnt` and a file named `net` lists both itself.
-        root.note(b"bin/");
-        root.note(b"mnt/");
-        root.note(b"net");
-        assert_names(&root, &[b"proc", b"dev"]);
+        let root = MountPoints::below(&ns[..n], b"/");
+        // A disk's own `mnt/`, and a file `net` a binding covers, give way to
+        // the mount; the disk's other entries stay.
+        assert!(root.shadows(b"mnt/"));
+        assert!(root.shadows(b"net"));
+        assert!(!root.shadows(b"bin/"));
+        assert!(!root.shadows(b"ne"));
+        assert!(!root.shadows(b"netx"));
         // The rule is bytes, as resolve_ns's: a FAT32 `MNT` is another path.
-        let mut root = MountPoints::below(&ns[..n], b"/");
-        root.note(b"MNT/");
-        assert_names(&root, &[b"mnt", b"proc", b"net", b"dev"]);
+        assert!(!root.shadows(b"MNT/"));
     }
 
     #[test]

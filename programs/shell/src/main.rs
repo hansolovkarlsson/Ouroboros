@@ -370,7 +370,10 @@ fn expand_one_glob(tok: &str, cwd: &str, out: &mut [u8]) -> usize {
     let dir = if dir_part.is_empty() {
         cwd
     } else {
-        let trimmed = if dir_part.last() == Some(&b'/') {
+        // `/` alone stays `/`: trimmed to empty it resolved as the cwd, so
+        // `echo /*` typed in /etc gave /etc's names as `/passwd`, ... (found
+        // 2026-11-07 by test-mount-points, with a glob from below the root).
+        let trimmed = if dir_part.len() > 1 && dir_part.last() == Some(&b'/') {
             &dir_part[..dir_part.len() - 1]
         } else {
             dir_part
@@ -2030,11 +2033,11 @@ fn cmd_cd(arg: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
     // lists it: `ninep_abi::MountPoints`, the one walk both use.
     let mut scratch = [0u8; LIST_SIZE];
     match fs_list_dir_page(path, 0, &mut scratch) {
+        code if mounts_stand_in(code) && has_mount_below(path) => {}
         NO_FS => {
             print_no_fs();
             return;
         }
-        syscall_abi::FS_ERR_NOT_FOUND if has_mount_below(path) => {}
         code if code >= FS_ERR_MIN => {
             print_fs_error("cd", code);
             return;
@@ -3370,7 +3373,7 @@ fn fs_list_dir_page(path: &str, start: u64, buf: &mut [u8]) -> u64 {
 fn for_each_dir_entry(dir: &str, mut f: impl FnMut(&[u8], bool)) -> u64 {
     let mut ns = [0u8; syscall_abi::NS_MAX as usize];
     let nlen = get_ns(&mut ns);
-    let mut points = ninep_abi::MountPoints::below(&ns[..nlen], dir.as_bytes());
+    let points = ninep_abi::MountPoints::below(&ns[..nlen], dir.as_bytes());
     let mut page = [0u8; ninep_abi::READDIR_PAGE];
     let mut spare = [0u8; ninep_abi::READDIR_PAGE];
     let fetch = |start: u64, page: &mut [u8]| {
@@ -3381,21 +3384,37 @@ fn for_each_dir_entry(dir: &str, mut f: impl FnMut(&[u8], bool)) -> u64 {
     // paging (an older peer's export) ends the listing at page one, as it
     // did before paging, and a broken page ends it where it broke.
     let status = match ninep_abi::readdir_pages(&mut page, &mut spare, fetch, |line| {
-        points.note(line);
-        for_each_entry(line, &mut f);
+        // A name a binding shadows: the mount's entry stands in its place.
+        if !points.shadows(line) {
+            for_each_entry(line, &mut f);
+        }
         true
     }) {
         Ok(_) => 0,
-        Err(syscall_abi::FS_ERR_NOT_FOUND) if !points.is_empty() => 0,
+        Err(code) if !points.is_empty() && mounts_stand_in(code) => 0,
         Err(code) => return code,
     };
-    points.for_each_unseen(|name, ends_here| f(name, !ends_here || child_is_dir(dir, name)));
+    points.for_each(|name, kind| {
+        let is_dir = match kind {
+            ninep_abi::MountKind::Dir => true,
+            ninep_abi::MountKind::File => false,
+            ninep_abi::MountKind::Stat => child_is_dir(dir, name),
+        };
+        f(name, is_dir)
+    });
     status
 }
 
+/// Whether a server's answer for a path means it has no directory there, so a
+/// mount below it stands in for one. As `ulib`'s `mounts_stand_in`.
+fn mounts_stand_in(code: u64) -> bool {
+    code == syscall_abi::FS_ERR_NOT_FOUND || code == syscall_abi::FS_ERR_NOT_A_DIRECTORY || code == NO_FS
+}
+
 /// Whether `dir`'s entry `name` is a directory, by an `NP_STAT` of the joined
-/// path: what a mount point is when a binding ends there. `false` when the
-/// stat fails. As `ulib`'s `child_is_dir` (the shell keeps its own fs layer).
+/// path: what a mount point is where a `bind` of a subtree ends
+/// (`ninep_abi::MountKind::Stat`), a local question. `false` when the stat
+/// fails. As `ulib`'s `child_is_dir` (the shell keeps its own fs layer).
 fn child_is_dir(dir: &str, name: &[u8]) -> bool {
     let d = dir.as_bytes();
     let d = if d.last() == Some(&b'/') { &d[..d.len() - 1] } else { d };
@@ -4274,8 +4293,8 @@ pub(crate) fn mounted_fs_unprotected() -> bool {
 /// `test-volume-bound.py`); ` on /` follows.
 fn mount_info(out: &mut Output) {
     match mount_info_of(0) {
-        None => print_line("nothing mounted (run `mount -a` to mount the disk)"),
-        Some(Err(())) => print_line("mount: unexpected return"),
+        None => out.put_line("nothing mounted (run `mount -a` to mount the disk)"),
+        Some(Err(())) => out.put_line("mount: unexpected return"),
         Some(Ok(info)) => {
             let part_lba = u64::from_le_bytes([
                 info[0], info[1], info[2], info[3], info[4], info[5], info[6], info[7],
@@ -4296,18 +4315,7 @@ fn mount_info(out: &mut Output) {
     }
     let mut ns = [0u8; syscall_abi::NS_MAX as usize];
     let nlen = get_ns(&mut ns);
-    let ns = &ns[..nlen];
-    let mut i = 0;
-    while i + 3 <= ns.len() {
-        let tree = ns[i];
-        let pstart = i + 3;
-        let tstart = pstart + ns[i + 1] as usize;
-        let tend = tstart + ns[i + 2] as usize;
-        if tend > ns.len() {
-            break; // malformed, as ninep_abi::resolve_ns stops
-        }
-        i = tend;
-        let (prefix, target) = (&ns[pstart..tstart], &ns[tstart..tend]);
+    ninep_abi::for_each_binding(&ns[..nlen], |tree, prefix, target| {
         match tree {
             ninep_abi::NS_NET_TREE => out.put_str("the network server's /net"),
             ninep_abi::NS_CON_TREE => out.put_str("the console"),
@@ -4323,8 +4331,10 @@ fn mount_info(out: &mut Output) {
                 out.put_u64_decimal(u16::from_le_bytes([target[4], target[5]]) as u64);
                 out_bytes(out, &target[ninep_abi::NS_ENDPOINT_LEN..]);
             }
-            // A `bind` within the root mount: tree 0, the subtree it stands for.
-            0 => {
+            // A `bind` within the root mount: tree 0, the subtree it stands
+            // for. Tree 0 bound at `/` is the root's own partition (`mount 1
+            // /mnt/root` on disk.img binds tree 0), so it is named below.
+            0 if target != b"/" => {
                 out.put_str("bind of ");
                 out_bytes(out, target);
             }
@@ -4346,7 +4356,7 @@ fn mount_info(out: &mut Output) {
         out.put_str(" on ");
         out_bytes(out, prefix);
         out.put_line("");
-    }
+    });
 }
 
 /// `FSOP_MOUNT_INFO` for `tree`: the reply payload, `None` when nothing is
