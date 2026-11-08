@@ -254,6 +254,7 @@ make test-cfenv               # the floating-point exception flags picolibc's ma
 make test-include             # the C headers on the disk
 make test-cpp                 # the C-hosting arc's finish line
 make test-unmount             # `unmount` with a partition mount and a held file, on a copy of the ext2 image
+make test-mount-points        # a parent lists the mounts below it, and bare `mount` lists every mount
 make test-crename             # unlink, rename and fstat in the C port
 make test-mv-into             # a directory moved into itself by a case-only name
 make test-fat-link            # FAT32 never reaches past its volume, by a link or a first cluster
