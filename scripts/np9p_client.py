@@ -2170,6 +2170,25 @@ def do_impersonate_gate(host, port, stage):
             st, data = read(IMPERSONATE_PRIVATE, intruder, "user", password=b"user", mode=mode)
             check(f"misbehaving: a '{mode}' credential for `user` is refused",
                   st == FS_ERR_AUTH, outcome(st, data))
+        # A `cpu` run refused for its block is told so as TEXT: the export
+        # finds the verb past a block it cannot read by the block's own clen
+        # (the high review of step 7; it answered a framed status, which a
+        # `cpu` caller prints as binary).
+        for mode in ("unknown-kind", "bad-length"):
+            cmd = b"id"
+            frame, _ = credentialed_frame(build_frame(NP_RUN, 0, [len(cmd), 0, 0, 0], cmd), intruder,
+                                          b"user", user=b"user", mode=mode)
+            try:
+                with socket.create_connection((host, port), timeout=10) as s:
+                    s.sendall(frame)
+                    out = b""
+                    while chunk := s.recv(4096):
+                        out += chunk
+                text = out.decode("latin-1")
+            except OSError as exc:
+                text = f"no reply ({exc})"
+            check(f"a `cpu` run with a '{mode}' credential is refused as text",
+                  text.startswith("cpu: the request's credential cannot be read"), repr(text[:80]))
         # Rule 1 as ninep-abi words it: the root flag serves root without a
         # credential, so one present and wrong is not read either (pinned in
         # np9p_server.py's self-test too). `host` is root-flagged.
