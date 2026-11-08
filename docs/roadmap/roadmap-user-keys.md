@@ -504,9 +504,13 @@ A block that runs past the frame, a kind the export does not know, or a known
 kind with any other length refuses the request; an unknown kind is never
 skipped. New constants: `NP_AUTH_MAGIC_USER`, the block's field lengths and
 offset, `NP_CRED_KIND_USER_SIG`, `NP_CRED_USER_SIG_LEN`, `NP_CRED_MAX`,
-`NP_AUTH_HDR_USER_MAX` (220), `NP_MSG_HASH_LEN`, `NP_USER_SIG_PREFIX_LEN`, and
-two tags. `credential_block` reads the block's rules once on the Rust side and
-`user_sig_input` lays out the signed bytes; steps 7 and 8 call them.
+`NP_AUTH_HDR_USER_MAX` (220), `NP_MSG_HASH_LEN`, `NP_USER_SIG_PREFIX_LEN` (176),
+and two tags. Three functions for steps 7 and 8 to call, so the Rust side reads
+the rules once: `credentialed` takes a frame from its magic and returns the
+kind, the credential and the NP message as slices (no caller adds an offset);
+`user_sig_input` lays out the user signature's bytes; and `request_sig_domain`
+names the machine signature's tag by magic, so no site can sign a credentialed
+frame under the old tag.
 
 **One decision the plan left open.** Decision 8 says the credential block is
 "covered by the machine signature" but not under which tag. It is **its own,
@@ -517,6 +521,22 @@ still verifies. Today the reframed message's verb would be garbage, but that
 is the incidental barrier the request tag's own doc says not to rely on. Both
 new tags fit in 29 bytes, so `SIG_DOMAIN_MAX`, and every `netd` buffer sized
 from it, is unchanged.
+
+**The review (high, nine findings, all acted on).** Three were contradictions
+inside the normative block, each of which an implementation transcribed from
+it would have carried: the keyed-session text still said one-shot requests and
+`NP_RUN` "stay `AUTHNP03`"; the policy let a registered root through only with
+root's credential, against Decision 6's "the flag outranks the registry"; and
+it left out Decision 7, so `cpu` with `/host` would have stopped working for
+every registered user. The policy is now Decisions 6, 7 and 5 in precedence,
+for both formats. One was a hole in Decision 8 itself, the relay above, closed
+by binding the export's key. One was an API hazard: the block reader returned
+an offset into the slice it was given, which a caller would have used as an
+offset into the frame; it now takes the frame and returns the message. The
+rest: no helper for the machine signature's tag (now `request_sig_domain`),
+`NP_FRAME_MAX`'s doc claiming buffers are sized from it, the Rust side of the
+wire check without the fixpoint loop added to the Python side (now one
+function for both), and a miscount in a comment this step rewrote.
 
 **What steps 7 and 8 inherit.** `NP_FRAME_MAX` is now sized from the
 credentialed header (2320, was 2252). Nothing outside `ninep-abi` uses it.
@@ -541,7 +561,13 @@ client's credentialed tag, its magic and its iteration count (`210_001`); the
 server's kind and its `NP_CRED_MAX` alias; the Rust kind (`u16`), user tag
 and hash length; and a server name misspelled, caught by the floor. In the
 Rust tests: a short credential accepted, an unknown kind skipped, and name
-and pubkey swapped in the signed input, each failing one test.
+and pubkey swapped in the signed input, each failing one test. After the
+review, five more, each caught: `AUTHNP05` given the old tag, the export left
+out of the signed input, the message slice started at the block, an
+`AUTHNP03` frame read as credentialed, and a peer's signed-input length
+without the export's key (the check names it, 176 against 144). The Rust
+resolver's fixpoint has no control: no Rust constant needs it today, so
+removing the loop changes nothing the check can see.
 
 ## Decisions
 
@@ -736,8 +762,12 @@ is never a way around the squash. Step 7 tests both halves.
 `[kind:2][len:2][credential]`, all covered by the machine signature, then the
 NP message. Kind 1 is a user signature: Ed25519 by the user's key over
 `SIG_DOMAIN_USER ‖ nonce:16 ‖ name:32 ‖ calling machine's public key:32 ‖
-SHA-512(NP message):64`, every field fixed-width (the name NUL-padded, as in
-`AUTHNP03`). This is the one definition: the client's `netd` builds and signs
+export's public key:32 ‖ SHA-512(NP message):64`, every field fixed-width (the
+name NUL-padded, as in `AUTHNP03`). *(The export's key was added at step 5, by
+its review: without it, an export that received a credentialed one-shot
+request could relay the whole frame to a third machine that authorizes the
+caller, and act there as the user. The client already knows the key, by the
+address it dialled, to verify the reply.)* This is the one definition: the client's `netd` builds and signs
 exactly these bytes with the held key (Decision 4), `netd`'s export and
 `np9p_server.py` verify exactly these bytes, and `np9p_client.py` builds and
 signs them the same way. Each side computes the SHA-512 of the NP message
