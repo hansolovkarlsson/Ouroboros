@@ -69,8 +69,12 @@ def rust_consts(path):
     # constant it was added alongside.
     for name, sh in re.findall(r"pub const (\w+): u32 = 1 << (\d+);", src):
         out[name] = 1 << int(sh)
-    for name, val in re.findall(r"pub const (\w+): u32 = (\d+);", src):
-        out[name] = int(val)
+    # `u32` and `u16` literals, `_` separators allowed: USERKEY_ITERATIONS is
+    # `210_000` and the credential kinds are `u16`, so until user-keys step 5
+    # the count every node derives with and the kind that says what a
+    # credential is were invisible here, however a peer spelled them.
+    for name, val in re.findall(r"pub const (\w+): u(?:32|16) = (\d[\d_]*);", src):
+        out[name] = int(val.replace("_", ""))
     # A `usize` written as a SUM of literals and earlier constants, on one line
     # or across several (`NP_AUTH_HDR_SIGNED = \n 8 + NP_NONCE_LEN + ...`). The
     # plain pattern above wants `= <digits>;` and so saw none of the header
@@ -140,8 +144,8 @@ def py_consts(path):
     # A trailing `# comment` is ordinary in these files, so it must not make a
     # constant invisible to this check - that failure mode is a check that
     # quietly stops looking at the thing it is named for.
-    for name, val in re.findall(r"^(\w+) = (\d+)\s*(?:#.*)?$", src, re.M):
-        out[name] = int(val)
+    for name, val in re.findall(r"^(\w+) = (\d[\d_]*)\s*(?:#.*)?$", src, re.M):
+        out[name] = int(val.replace("_", ""))
     # The peers' spelling of NP_BASE (`0x100`) and of the verbs (`NP_BASE + 12`),
     # for the same reason as on the Rust side above.
     for name, val in re.findall(r"^(\w+) = 0x([0-9a-fA-F]+)\s*(?:#.*)?$", src, re.M):
@@ -165,9 +169,16 @@ def py_consts(path):
     # A SUM of literals and earlier names on one line (`NP_AUTH_HDR_SIGNED = 8 +
     # NP_NONCE_LEN + ...`), the peers' spelling of the header lengths.
     sums = re.findall(r"^(\w+) = ((?:\w+\s*\+\s*)+\w+)\s*(?:#.*)?$", src, re.M)
-    _resolve_sums(sums, out)
-    _resolve_ors(re.findall(r"^(\w+) = ([A-Z_]+(?: \| [A-Z_]+)*)\s*(?:#.*)?$", src, re.M), out)
-    return out
+    ors = re.findall(r"^(\w+) = ([A-Z_]+(?: \| [A-Z_]+)*)\s*(?:#.*)?$", src, re.M)
+    # Until neither adds a name: a bare alias (`NP_CRED_MAX =
+    # NP_CRED_USER_SIG_LEN`) is read by the mask resolver, and a sum naming it
+    # (NP_AUTH_HDR_USER_MAX) resolved before it, once each, was left out.
+    while True:
+        before = len(out)
+        _resolve_sums(sums, out)
+        _resolve_ors(ors, out)
+        if len(out) == before:
+            return out
 
 
 def c_consts(path):
@@ -410,6 +421,28 @@ CHECKED = [
     # The per-request data cap the fid gate's read-to-EOF check must exceed:
     # a file that fits one chunk cannot show a wrong rising offset.
     "NP_REMOTE_CHUNK",
+    # User credentials (step 5 of docs/roadmap/roadmap-user-keys.md). The
+    # magic and the header lengths tell AUTHNP05 from AUTHNP03 and find the NP
+    # message; the kind and its length decide whether a credential is refused;
+    # the two tags and the signed-input length are what a user signature and
+    # its machine signature cover, whose drift reads as a wrong password.
+    "NP_AUTH_MAGIC_USER",
+    "NP_CRED_KIND_LEN",
+    "NP_CRED_LEN_LEN",
+    "NP_CRED_HDR_LEN",
+    "NP_CRED_KIND_USER_SIG",
+    "NP_CRED_USER_SIG_LEN",
+    "NP_CRED_MAX",
+    "NP_AUTH_HDR_USER_MAX",
+    "NP_MSG_HASH_LEN",
+    "NP_USER_SIG_PREFIX_LEN",
+    "SIG_DOMAIN_USER",
+    "SIG_DOMAIN_REQUEST_CRED",
+    # The user key's derivation, which the client will spell for --password.
+    # The count is also held against the two generators by check_userkey_count.
+    "SIG_DOMAIN_USERKEY",
+    "USERKEY_ITERATIONS",
+    "REALM_MAX",
 ]
 
 # NOT checked: NP_MAC_LEN. Neither peer names it - both write the literal 32 at
@@ -453,7 +486,7 @@ CHECKED = [
 # what it is named for. Confirmed, which is why these are numbers and not a
 # truthiness test. Raise a baseline when a peer learns a new constant.
 PEER_BASELINE = {
-    "np9p_client.py": 51,  # counted 2026-09-23: +10 keyed-session names (session-auth step 4); 41 on 09-20: NO_FS pinned by the second review of #145; 40 on 09-12: 31 after step 5 (NP_PREAD/NP_FSTAT/NP_CLUNK, OPEN_READ), then step 6 taught it the path verbs for path-gate, NP_PWRITE, FS_ERR_NOT_SUPPORTED and NP_REMOTE_CHUNK
+    "np9p_client.py": 67,  # counted 2026-11-08: +15 user-credential names and NP_AUTH_HDR_SIGNED, which the credentialed header sums (user-keys step 5); 51 on 2026-09-23: +10 keyed-session names (session-auth step 4); 41 on 09-20: NO_FS pinned by the second review of #145; 40 on 09-12: 31 after step 5 (NP_PREAD/NP_FSTAT/NP_CLUNK, OPEN_READ), then step 6 taught it the path verbs for path-gate, NP_PWRITE, FS_ERR_NOT_SUPPORTED and NP_REMOTE_CHUNK
     # Rose from 10 when the `noverb` probe's status-name table was rebuilt
     # from module constants instead of repeated literals: FS_ERROR,
     # FS_ERR_READ_ONLY, FS_ERR_PERM and FS_ERR_NO_SUCH_VERB became names this
@@ -465,13 +498,13 @@ PEER_BASELINE = {
     # reduced count was recorded as expected. Both now use the shared names; the
     # floor rises with them, or the rename could be undone without this
     # noticing.
-    "np9p_server.py": 47,  # counted 2026-10-29: +OPEN_FLAGS and OPEN_DIR_REFUSED (the medium review of #370); 45 on 2026-10-28: +OPEN_EXCL and FS_ERR_ALREADY_EXISTS (O_CREAT|O_EXCL); 43 on 2026-09-23: +11 keyed-session names and NP_AUTH_HDR_SIGNED, now parsed as a sum (session-auth step 4); 32 on 09-20: NO_FS pinned by the second review of #145; 31 on 09-12: 26 on 09-07 with the verbs, then the four OPEN_* flags and MAX_FIDS pinned by step 5
+    "np9p_server.py": 60,  # counted 2026-11-08: +12 user-credential names (user-keys step 5), and it already matched 48 on main, one past its floor; 47 on 2026-10-29: +OPEN_FLAGS and OPEN_DIR_REFUSED (the medium review of #370); 45 on 2026-10-28: +OPEN_EXCL and FS_ERR_ALREADY_EXISTS (O_CREAT|O_EXCL); 43 on 2026-09-23: +11 keyed-session names and NP_AUTH_HDR_SIGNED, now parsed as a sum (session-auth step 4); 32 on 09-20: NO_FS pinned by the second review of #145; 31 on 09-12: 26 on 09-07 with the verbs, then the four OPEN_* flags and MAX_FIDS pinned by step 5
     # The C header. It spells far more of the ABI than either Python peer; this
     # floor covers the names CHECKED lists today.
     # Raised from 3 when step 3b's constants were pinned. The script's own
     # instruction is to raise a baseline when a peer learns a new constant; it
     # had already learned FS_ERR_NOT_FOUND without the floor moving.
-    "libc/include/sys.h": 66,  # counted 2026-10-08 (run, not added up): 66 with KBD_FLUSH for TCSAFLUSH (NO_CHAR, mirrored for poll's first form, dropped again); 65 with the four KBD_* names for termios; 61 on 2026-10-07 with CON_INFO_COLS and CON_INFO_ROWS for ioctl's TIOCGWINSZ; 59 on 2026-10-05 with ENV_MAX for crt0's environ; 58 with NO_ARG and ARGV_MAX for crt0's argv; 56 with fstat's six STAT_* names; 50 with NP_RM, NP_MV, NP_RMDIR and eight FS_ERR_* codes for unlink, rename, rmdir and remove; 38 on 2026-09-26: +FS_ERR_AUTH (session-auth step 7, raised by its review); 37 on 09-23: it already matched 37 on main, so the floor had fallen one behind; 36 on 09-20: 31 on 09-13 with the five HEAP_INFO_* field selectors, then the three TASK_ERR_* codes, NO_FS and FS_ERR_BUSY
+    "libc/include/sys.h": 67,  # counted 2026-11-08 (run): it already matched 67 on main, so the floor had fallen one behind; 66 on 2026-10-08 (run, not added up): 66 with KBD_FLUSH for TCSAFLUSH (NO_CHAR, mirrored for poll's first form, dropped again); 65 with the four KBD_* names for termios; 61 on 2026-10-07 with CON_INFO_COLS and CON_INFO_ROWS for ioctl's TIOCGWINSZ; 59 on 2026-10-05 with ENV_MAX for crt0's environ; 58 with NO_ARG and ARGV_MAX for crt0's argv; 56 with fstat's six STAT_* names; 50 with NP_RM, NP_MV, NP_RMDIR and eight FS_ERR_* codes for unlink, rename, rmdir and remove; 38 on 2026-09-26: +FS_ERR_AUTH (session-auth step 7, raised by its review); 37 on 09-23: it already matched 37 on main, so the floor had fallen one behind; 36 on 09-20: 31 on 09-13 with the five HEAP_INFO_* field selectors, then the three TASK_ERR_* codes, NO_FS and FS_ERR_BUSY
     "libc/include/nsresolve.h": 5,  # + 4 STAT_* offsets, FS_ERR_READ_ONLY, STAT_FLAG_DIR, FS_ERROR, FS_ERR_NO_SUCH_VERB
 }
 

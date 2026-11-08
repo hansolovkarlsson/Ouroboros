@@ -671,7 +671,9 @@ pub const NP_REMOTE_CHUNK: usize = 512;
 // name resolving to uid 0 or gid 0 on the export is refused (FS_ERR_AUTH,
 // signed) unless the peer's `authorized` line carries the `root` flag
 // (docs/roadmap/roadmap-user-keys.md, Decision 6). Per-user keys, the rest of
-// that plan, close the remainder.
+// that plan, close the remainder: the USER CREDENTIALS section below defines
+// the format that carries a user's own signature (`AUTHNP05`), and an export
+// requires it for a user it has a registered key for.
 //
 // The retired shared-key MAC format ("AUTHNP02") is refused outright; it
 // survives only as a negative control `np9p_client.py --legacy-mac` can send.
@@ -754,6 +756,79 @@ pub const NP_REMOTE_CHUNK: usize = 512;
 // - A client binds a session to the name its `NP_SESSION` was signed as, and
 //   refuses to send a later verb for a caller who now resolves to another
 //   name, rather than run it as the opener: a keyed frame carries no name.
+//
+// USER CREDENTIALS (docs/roadmap/roadmap-user-keys.md, Decision 8). The
+// formats above authenticate the calling MACHINE and let it assert a user. A
+// request can also carry the USER's own signature, made with a key derived
+// from the user's password, which the machine cannot make unless that user is
+// logged in on it:
+//
+//   credentialed request:
+//     [u32 len][magic:8][nonce:16][name:32][pubkey:32][sig:64]
+//              [kind:2][clen:2][credential:clen][NP message...]
+//
+// - `magic` is [`NP_AUTH_MAGIC_USER`] ("AUTHNP05"). `nonce`, `name` and
+//   `pubkey` are exactly `AUTHNP03`'s, at the same offsets.
+// - `kind` and `clen` are little-endian `u16`s, the credential block's header
+//   ([`NP_CRED_HDR_LEN`] bytes, at [`NP_AUTH_HDR_SIGNED`]). `clen` is the
+//   credential's length in bytes.
+// - `sig` is the machine's Ed25519 signature over [`SIG_DOMAIN_REQUEST_CRED`]
+//   ‖ `nonce` ‖ `name` ‖ `kind` ‖ `clen` ‖ `credential` ‖ NP message: the
+//   whole frame after `pubkey` and `sig`, the credential block included, so it
+//   cannot be stripped, swapped or edited in flight. ITS OWN DOMAIN TAG, not
+//   `AUTHNP03`'s: under one tag, a captured `AUTHNP05` frame reframed as an
+//   `AUTHNP03` one, the credential block read as the head of the NP message,
+//   would carry a machine signature that still verifies.
+//
+// Kind [`NP_CRED_KIND_USER_SIG`] (1), the only kind today: `credential` is an
+// Ed25519 signature ([`NP_CRED_USER_SIG_LEN`], 64 bytes) by the USER's key
+// over
+//
+//   [`SIG_DOMAIN_USER`] ‖ nonce:16 ‖ name:32 ‖ pubkey:32 ‖ SHA-512(NP message):64
+//
+// every field the frame's own bytes (the name NUL-padded as in the header,
+// `pubkey` the calling machine's key from the header), the hash computed by
+// each side itself: the signer over the message it sends, the verifier over
+// the message it received. The machine's key inside it means a credential
+// lifted off the wire does not verify from another machine; the nonce and the
+// hash bind it to this one request. [`user_sig_input`] lays these bytes out.
+//
+// The user's key. Its Ed25519 seed (RFC 8032; the public key follows from the
+// seed as it does for a machine key) is the first 32 bytes of
+// `PBKDF2-HMAC-SHA-512(password, salt, `[`USERKEY_ITERATIONS`]`, 64)`, with
+//
+//   salt = [`SIG_DOMAIN_USERKEY`] ‖ len(realm):1 ‖ realm ‖ len(name):1 ‖ name
+//
+// where `name` is the user's name WITHOUT its padding, 1 to [`NP_NAME_LEN`]
+// bytes, and `realm` is `/etc/cluster/realm` with surrounding whitespace
+// trimmed: 1 to [`REALM_MAX`] bytes, each printable ASCII other than space
+// (0x21 to 0x7e). The realm is the same on every node of a cluster and unique
+// to it. A node with no realm, or one that breaks this rule, derives no user
+// key and sends no credential. No node identity is in the derivation, so a user
+// with one password has one key on every node of the realm.
+//
+// What an export does, in this order:
+//
+// - The machine half first, exactly as for `AUTHNP03`: the key looked up in
+//   `authorized`, then `sig` verified. Nothing in the credential is read until
+//   it has.
+// - A credential block whose `clen` runs past the declared frame, a kind the
+//   export does not know, or a known kind whose `clen` is not that kind's
+//   length REFUSES THE REQUEST (`FS_ERR_AUTH`, a signed reply). An unknown kind
+//   is never skipped: a future kind (a ticket would be kind 2) may be the only
+//   evidence its sender has.
+// - Then policy (Decision 5): a claimed name with a registered key is served
+//   only if the credential verifies under that key; a name with none is
+//   served on the machine's word, as `AUTHNP03`, the credential unread; a
+//   root-equivalent name is still squashed unless its peer carries the `root`
+//   flag or root's own credential verifies (Decision 6).
+//
+// The reply is `AUTHNP03`'s signed reply, unchanged: [`SIG_DOMAIN_REPLY`] ‖
+// request nonce ‖ status ‖ result. A keyed session's `NP_SESSION` may be sent
+// as `AUTHNP05`; its keyed frames then run as the user that credential
+// attested, and carry no credential of their own (the key schedule is
+// unchanged: the credential is already covered by the machine signature of
+// the frame that opened the session).
 // ---------------------------------------------------------------------------
 
 
@@ -845,6 +920,35 @@ pub const NP_EPHEMERAL_LEN: usize = 32;
 /// of the SHA-512 key schedule.
 pub const NP_SESSION_KEY_LEN: usize = 32;
 
+/// Magic marking a **credentialed** request (see "User credentials" above):
+/// `AUTHNP03`'s header, then a credential block, then the NP message.
+pub const NP_AUTH_MAGIC_USER: u64 = 0x4155_5448_4E50_3035; // "AUTHNP05"
+/// Bytes of a credential block's `kind`, a little-endian `u16`.
+pub const NP_CRED_KIND_LEN: usize = 2;
+/// Bytes of a credential block's `clen`, a little-endian `u16`.
+pub const NP_CRED_LEN_LEN: usize = 2;
+/// Bytes of a credential block's header, `kind` and `clen`.
+pub const NP_CRED_HDR_LEN: usize = NP_CRED_KIND_LEN + NP_CRED_LEN_LEN;
+/// Offset of the credential block within a credentialed header: right where
+/// the signed header ends, so every `AUTHNP03` offset holds unchanged.
+pub const NP_AUTH_CRED_OFF: usize = NP_AUTH_HDR_SIGNED;
+/// Credential kind 1: the user's Ed25519 signature (Decision 8). Kind 2 is
+/// left for a ticket, and 0 is never a kind, so a zeroed block is refused.
+pub const NP_CRED_KIND_USER_SIG: u16 = 1;
+/// A kind-1 credential's exact length: one Ed25519 signature.
+pub const NP_CRED_USER_SIG_LEN: usize = NP_SIG_LEN;
+/// The longest credential of any kind this tree knows, which a buffer for a
+/// credentialed frame is sized from. A new kind raises it with its own length.
+pub const NP_CRED_MAX: usize = NP_CRED_USER_SIG_LEN;
+/// The longest credentialed header: the signed header, the block's header and
+/// the longest credential, 220 bytes with kind 1.
+pub const NP_AUTH_HDR_USER_MAX: usize = NP_AUTH_HDR_SIGNED + NP_CRED_HDR_LEN + NP_CRED_MAX;
+/// Bytes of the NP message's SHA-512 inside a user signature's input.
+pub const NP_MSG_HASH_LEN: usize = 64;
+/// The bytes a kind-1 user signature covers after its domain tag:
+/// `nonce ‖ name ‖ pubkey ‖ SHA-512(NP message)`, 144 bytes.
+pub const NP_USER_SIG_PREFIX_LEN: usize = NP_NONCE_LEN + NP_NAME_LEN + NP_PUBKEY_LEN + NP_MSG_HASH_LEN;
+
 /// Domain tag prefixed to the bytes a **request** signature covers.
 ///
 /// Without it a request signature and a reply signature are the same shape -
@@ -881,9 +985,21 @@ pub const SIG_DOMAIN_EPHEMERAL_E: &[u8] = b"ouroboros-cluster-eph-e-v1\0";
 /// `SIG_DOMAIN_USERKEY ‖ len(realm):1 ‖ realm ‖ len(name):1 ‖ name`
 /// (docs/roadmap/roadmap-user-keys.md, Decision 2). A key-derivation input,
 /// not a signature's, but it lives with the others so that [`SIG_DOMAIN_MAX`]
-/// and the no-prefix test cover it. Step 5 writes it into the normative block
-/// with the rest of the credential.
+/// and the no-prefix test cover it. The normative block's "User credentials"
+/// states the whole derivation.
 pub const SIG_DOMAIN_USERKEY: &[u8] = b"ouroboros-cluster-userkey-v1\0";
+
+/// Domain tag of a kind-1 **user signature**: `SIG_DOMAIN_USER ‖ nonce ‖ name
+/// ‖ pubkey ‖ SHA-512(NP message)`. Not the machine's request tag, so a user's
+/// signature can never be presented as a machine's, nor the reverse.
+pub const SIG_DOMAIN_USER: &[u8] = b"ouroboros-cluster-user-v1\0";
+
+/// Domain tag of the MACHINE signature on a credentialed (`AUTHNP05`) request.
+/// Not [`SIG_DOMAIN_REQUEST`]: under one tag, an `AUTHNP05` frame reframed as
+/// `AUTHNP03`, its credential block read as the head of the NP message, would
+/// still verify. Chosen no longer than [`SIG_DOMAIN_REQUEST`], so
+/// [`SIG_DOMAIN_MAX`] and every `netd` buffer sized from it did not grow.
+pub const SIG_DOMAIN_REQUEST_CRED: &[u8] = b"ouroboros-cluster-credreq-v1\0";
 
 /// PBKDF2-HMAC-SHA-512 iterations for a user key (Decision 3), and for a
 /// version-2 `/etc/shadow` hash (Decision 10). **Permanent**: every user's
@@ -933,6 +1049,8 @@ pub const SIG_DOMAIN_MAX: usize = max_len(&[
     SIG_DOMAIN_EPHEMERAL_C,
     SIG_DOMAIN_EPHEMERAL_E,
     SIG_DOMAIN_USERKEY,
+    SIG_DOMAIN_USER,
+    SIG_DOMAIN_REQUEST_CRED,
 ]);
 
 /// The longest of `tags`, at compile time.
@@ -958,6 +1076,8 @@ const _: () = {
     assert!(SIG_DOMAIN_EPHEMERAL_C.len() <= SIG_DOMAIN_MAX);
     assert!(SIG_DOMAIN_EPHEMERAL_E.len() <= SIG_DOMAIN_MAX);
     assert!(SIG_DOMAIN_USERKEY.len() <= SIG_DOMAIN_MAX);
+    assert!(SIG_DOMAIN_USER.len() <= SIG_DOMAIN_MAX);
+    assert!(SIG_DOMAIN_REQUEST_CRED.len() <= SIG_DOMAIN_MAX);
 };
 
 /// The bytes an Ed25519 **signature** covers before the NP message:
@@ -1066,13 +1186,82 @@ pub fn proxy_parts(word: u64) -> Option<(u32, u32)> {
 /// header + the biggest NP message. Buffers that build or receive a framed
 /// export request are sized to this.
 ///
-/// Was a `max` of the two header sizes while both formats existed.
-pub const NP_FRAME_MAX: usize = NP_NET_LEN_PREFIX + NP_AUTH_HDR_SIGNED + NP_NET_MAX;
+/// Was a `max` of the two header sizes while both formats existed. Sized from
+/// the credentialed header since user credentials (`AUTHNP05`), the longest
+/// of the three, so a maximal NP message fits behind any of them.
+pub const NP_FRAME_MAX: usize = NP_NET_LEN_PREFIX + NP_AUTH_HDR_USER_MAX + NP_NET_MAX;
 
-/// A keyed frame's header is smaller than a signed one's, so a buffer sized by
-/// [`NP_FRAME_MAX`] holds either format. At BUILD time, since a test comparing
-/// two constants cannot fail at run time.
+/// A keyed frame's header is smaller than a signed one's, and a signed one's
+/// than a credentialed one's, so a buffer sized by [`NP_FRAME_MAX`] holds every
+/// format. At BUILD time, since a test comparing two constants cannot fail at
+/// run time.
 const _: () = assert!(NP_AUTH_HDR_KEYED < NP_AUTH_HDR_SIGNED);
+const _: () = assert!(NP_AUTH_HDR_SIGNED < NP_AUTH_HDR_USER_MAX);
+
+/// Why a credential block was refused. Every arm is a refusal of the whole
+/// request (`FS_ERR_AUTH`); the arms exist so a test, and a log line, can tell
+/// them apart.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CredError {
+    /// The block's header or its `clen` bytes run past the bytes given.
+    Truncated,
+    /// A kind this tree does not know. Never skipped (see the normative block).
+    UnknownKind(u16),
+    /// A known kind whose `clen` is not that kind's length.
+    BadLength { kind: u16, len: usize },
+}
+
+/// The credential block at the head of `block` (the bytes of a credentialed
+/// frame from [`NP_AUTH_CRED_OFF`] on): its kind, the credential, and the
+/// offset in `block` where the NP message starts.
+///
+/// The one reading of the block's rules on the Rust side, so the export and
+/// any test read it alike. It does not verify anything: the machine signature
+/// is checked before this runs, and the credential after, by its kind.
+pub fn credential_block(block: &[u8]) -> Result<(u16, &[u8], usize), CredError> {
+    if block.len() < NP_CRED_HDR_LEN {
+        return Err(CredError::Truncated);
+    }
+    let kind = u16::from_le_bytes([block[0], block[1]]);
+    let len = u16::from_le_bytes([block[2], block[3]]) as usize;
+    let want = match kind {
+        NP_CRED_KIND_USER_SIG => NP_CRED_USER_SIG_LEN,
+        other => return Err(CredError::UnknownKind(other)),
+    };
+    if len != want {
+        return Err(CredError::BadLength { kind, len });
+    }
+    let end = NP_CRED_HDR_LEN + len;
+    match block.get(NP_CRED_HDR_LEN..end) {
+        Some(cred) => Ok((kind, cred, end)),
+        None => Err(CredError::Truncated),
+    }
+}
+
+/// Bytes of a kind-1 user signature's input: the domain tag and
+/// [`NP_USER_SIG_PREFIX_LEN`].
+pub const USER_SIG_INPUT_LEN: usize = SIG_DOMAIN_USER.len() + NP_USER_SIG_PREFIX_LEN;
+
+/// The bytes a kind-1 user signature covers, laid out as the normative block
+/// says: `SIG_DOMAIN_USER ‖ nonce ‖ name ‖ pubkey ‖ msg_hash`, where `name`
+/// is the header's NUL-padded name, `pubkey` the calling machine's key from the
+/// header, and `msg_hash` the SHA-512 of the NP message, which each side
+/// computes over its own copy. Fixed-width arguments, so no field can be passed
+/// short.
+pub fn user_sig_input(
+    nonce: &[u8; NP_NONCE_LEN],
+    name: &[u8; NP_NAME_LEN],
+    pubkey: &[u8; NP_PUBKEY_LEN],
+    msg_hash: &[u8; NP_MSG_HASH_LEN],
+) -> [u8; USER_SIG_INPUT_LEN] {
+    let mut out = [0u8; USER_SIG_INPUT_LEN];
+    let mut at = 0;
+    for part in [SIG_DOMAIN_USER, &nonce[..], &name[..], &pubkey[..], &msg_hash[..]] {
+        out[at..at + part.len()].copy_from_slice(part);
+        at += part.len();
+    }
+    out
+}
 
 // ---------------------------------------------------------------------------
 // The shared namespace resolver. A namespace is a sequence of bindings
@@ -1746,7 +1935,7 @@ mod tests {
         assert!(SIG_DOMAIN_REPLY.len() <= SIG_DOMAIN_MAX);
     }
 
-    /// All six tags, pinned as literals (the same reasoning as the two above),
+    /// All eight tags, pinned as literals (the same reasoning as the two above),
     /// pairwise distinct and none a prefix of another: a tag that prefixes
     /// another lets an input made under one be read as made under the other.
     #[test]
@@ -1755,6 +1944,8 @@ mod tests {
         assert_eq!(SIG_DOMAIN_EPHEMERAL_C, b"ouroboros-cluster-eph-c-v1\0");
         assert_eq!(SIG_DOMAIN_EPHEMERAL_E, b"ouroboros-cluster-eph-e-v1\0");
         assert_eq!(SIG_DOMAIN_USERKEY, b"ouroboros-cluster-userkey-v1\0");
+        assert_eq!(SIG_DOMAIN_USER, b"ouroboros-cluster-user-v1\0");
+        assert_eq!(SIG_DOMAIN_REQUEST_CRED, b"ouroboros-cluster-credreq-v1\0");
         let tags = [
             SIG_DOMAIN_REQUEST,
             SIG_DOMAIN_REPLY,
@@ -1762,6 +1953,8 @@ mod tests {
             SIG_DOMAIN_EPHEMERAL_C,
             SIG_DOMAIN_EPHEMERAL_E,
             SIG_DOMAIN_USERKEY,
+            SIG_DOMAIN_USER,
+            SIG_DOMAIN_REQUEST_CRED,
         ];
         for (i, a) in tags.iter().enumerate() {
             assert_eq!(*a.last().expect("non-empty"), 0);
@@ -1789,6 +1982,83 @@ mod tests {
     }
 
     #[test]
+    fn the_credentialed_header_lays_out_as_the_spec_says() {
+        // Spelled as literals, independently of the definitions: a sum that
+        // tracks its own terms cannot catch an edit to one of them.
+        assert_eq!(NP_AUTH_MAGIC_USER.to_be_bytes(), *b"AUTHNP05");
+        assert_eq!(NP_AUTH_CRED_OFF, 152);
+        assert_eq!(NP_CRED_HDR_LEN, 4);
+        assert_eq!(NP_CRED_KIND_USER_SIG, 1);
+        assert_eq!(NP_CRED_USER_SIG_LEN, 64);
+        assert_eq!(NP_MSG_HASH_LEN, 64);
+        assert_eq!(NP_USER_SIG_PREFIX_LEN, 144);
+        assert_eq!(USER_SIG_INPUT_LEN, 26 + 144);
+        // The three magics are three different 8 bytes.
+        assert_ne!(NP_AUTH_MAGIC_USER, NP_AUTH_MAGIC_SIGNED);
+        assert_ne!(NP_AUTH_MAGIC_USER, NP_AUTH_MAGIC_KEYED);
+    }
+
+    /// The user signature's input, field by field at its offset: a swapped
+    /// pair of equal-width fields (name and pubkey are both 32) would still
+    /// have the right length, so only the content can show it.
+    #[test]
+    fn the_user_signature_covers_exactly_these_bytes() {
+        let nonce = [1u8; NP_NONCE_LEN];
+        let mut name = [0u8; NP_NAME_LEN];
+        name[..4].copy_from_slice(b"user");
+        let pubkey = [3u8; NP_PUBKEY_LEN];
+        let hash = [4u8; NP_MSG_HASH_LEN];
+        let got = user_sig_input(&nonce, &name, &pubkey, &hash);
+        let t = SIG_DOMAIN_USER.len();
+        assert_eq!(&got[..t], SIG_DOMAIN_USER);
+        assert_eq!(&got[t..t + 16], &nonce[..]);
+        assert_eq!(&got[t + 16..t + 48], &name[..]);
+        assert_eq!(&got[t + 48..t + 80], &pubkey[..]);
+        assert_eq!(&got[t + 80..t + 144], &hash[..]);
+        assert_eq!(got.len(), t + 144);
+    }
+
+    /// A block of `kind` and `clen`, then 76 filler bytes: room for any test.
+    fn block(kind: u16, clen: u16) -> [u8; 80] {
+        let mut b = [0xabu8; 80];
+        b[..2].copy_from_slice(&kind.to_le_bytes());
+        b[2..4].copy_from_slice(&clen.to_le_bytes());
+        b
+    }
+
+    #[test]
+    fn a_kind_one_block_reads_its_signature_and_where_the_message_starts() {
+        let b = block(1, 64);
+        let (kind, cred, end) = credential_block(&b).expect("a well-formed block");
+        assert_eq!(kind, NP_CRED_KIND_USER_SIG);
+        assert_eq!(cred.len(), 64);
+        assert_eq!(cred.as_ptr(), b[4..].as_ptr());
+        assert_eq!(end, 68);
+        // Exactly long enough is enough: the NP message may be empty here.
+        assert!(credential_block(&b[..68]).is_ok());
+    }
+
+    #[test]
+    fn every_malformed_block_is_refused_by_name() {
+        let b = block(1, 64);
+        assert_eq!(credential_block(&b[..3]), Err(CredError::Truncated));
+        assert_eq!(credential_block(&b[..67]), Err(CredError::Truncated));
+        // A zeroed block is never a credential: 0 is not a kind.
+        assert_eq!(credential_block(&[0u8; 80]), Err(CredError::UnknownKind(0)));
+        // A future kind is refused, never skipped, whatever its length.
+        assert_eq!(credential_block(&block(2, 64)), Err(CredError::UnknownKind(2)));
+        assert_eq!(credential_block(&block(9, 0)), Err(CredError::UnknownKind(9)));
+        // A known kind with any other length, short or long.
+        assert_eq!(credential_block(&block(1, 63)), Err(CredError::BadLength { kind: 1, len: 63 }));
+        assert_eq!(credential_block(&block(1, 65)), Err(CredError::BadLength { kind: 1, len: 65 }));
+        assert_eq!(credential_block(&block(1, 0xffff)), Err(CredError::BadLength { kind: 1, len: 0xffff }));
+        // Byte order: kind 1 written big-endian is kind 256, unknown.
+        let mut be = block(1, 64);
+        be[..2].copy_from_slice(&1u16.to_be_bytes());
+        assert_eq!(credential_block(&be), Err(CredError::UnknownKind(256)));
+    }
+
+    #[test]
     fn the_signed_header_lays_out_as_both_sides_expect() {
         // Two implementations read these offsets - netd and the Python peer -
         // and a disagreement shows up as "signature invalid", which looks like a
@@ -1813,11 +2083,12 @@ mod tests {
         // what makes the sum mean something.
         assert_eq!(NP_NET_LEN_PREFIX, 4);
         assert_eq!(NP_AUTH_HDR_SIGNED, 152);
+        assert_eq!(NP_AUTH_HDR_USER_MAX, 220);
         assert_eq!(NP_NET_MAX, 2096);
-        assert_eq!(NP_FRAME_MAX, 2252);
+        assert_eq!(NP_FRAME_MAX, 2320);
         // And the composition still holds, so a buffer sized from `NP_FRAME_MAX`
-        // cannot truncate a maximal frame.
-        assert_eq!(NP_FRAME_MAX, NP_NET_LEN_PREFIX + NP_AUTH_HDR_SIGNED + NP_NET_MAX);
+        // cannot truncate a maximal frame behind the longest header.
+        assert_eq!(NP_FRAME_MAX, NP_NET_LEN_PREFIX + NP_AUTH_HDR_USER_MAX + NP_NET_MAX);
     }
 
     #[test]

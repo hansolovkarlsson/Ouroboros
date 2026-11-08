@@ -231,6 +231,22 @@ SIG_DOMAIN_EPHEMERAL_E = b"ouroboros-cluster-eph-e-v1\0"
 # reported "10 constants agree".
 NP_AUTH_HDR_SIGNED = 8 + NP_NONCE_LEN + NP_NAME_LEN + NP_PUBKEY_LEN + NP_SIG_LEN
 
+# User credentials (ninep-abi's normative block, "User credentials"; step 5 of
+# docs/roadmap/roadmap-user-keys.md). Declared here ahead of step 6, which
+# uses them, so check-wire-constants.py pins them from the step that defines them.
+NP_AUTH_MAGIC_USER = int.from_bytes(b"AUTHNP05", "big")
+NP_CRED_KIND_LEN = 2
+NP_CRED_LEN_LEN = 2
+NP_CRED_HDR_LEN = NP_CRED_KIND_LEN + NP_CRED_LEN_LEN
+NP_CRED_KIND_USER_SIG = 1
+NP_CRED_USER_SIG_LEN = 64
+NP_CRED_MAX = NP_CRED_USER_SIG_LEN
+NP_AUTH_HDR_USER_MAX = NP_AUTH_HDR_SIGNED + NP_CRED_HDR_LEN + NP_CRED_MAX
+NP_MSG_HASH_LEN = 64
+NP_USER_SIG_PREFIX_LEN = NP_NONCE_LEN + NP_NAME_LEN + NP_PUBKEY_LEN + NP_MSG_HASH_LEN
+SIG_DOMAIN_USER = b"ouroboros-cluster-user-v1\0"
+SIG_DOMAIN_REQUEST_CRED = b"ouroboros-cluster-credreq-v1\0"
+
 # Public keys this server accepts, by hex. The dev cluster's identities,
 # derived the same way scripts/mkclusterkeys.py derives them - so a guest built
 # from this tree is authorized here without any copying.
