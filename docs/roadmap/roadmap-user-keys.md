@@ -591,6 +591,73 @@ and the check compares each with Rust. The Rust
 resolver's fixpoint has no control: no Rust constant needs it today, so
 removing the loop changes nothing the check can see.
 
+### Step 6's results (2026-11-08): both Python peers
+
+**The client.** `np9p_client.py --password=<pw>` makes every request
+`AUTHNP05`, credentialed for `--user` in `--realm` (the dev realm by default).
+It derives the user key from the spec on its own, not through
+`mkclusterkeys.py`, since it is the third implementation of the derivation
+(Risk 5). The export's key in the signed input is `peer_key()`, the key the
+reply is checked against. `--cred-misbehave=<mode>` sends a credential wrong in
+exactly one way, so each mode checks that an export binds that one thing:
+`wrong-key`, `other-name`, `other-machine`, `other-export`, `other-nonce` and
+`other-message` (the plan's four, a credential lifted from another request
+being the last two, and the review's export), then `unknown-kind`,
+`bad-length`, `old-tag` and `relabel` for the block's and the machine
+signature's own rules. Step 8 aims all ten at `netd`.
+
+**The server.** `np9p_server.py` verifies both signed formats' machine half,
+each under its own tag, reads `AUTHNP05`'s block by the rules, and puts every
+claim through one policy, `admit`, for a single request and a keyed
+`NP_SESSION` alike: Decision 6 (the `root` flag outranks the registry,
+otherwise only root's own credential) and Decision 5 (a registered name needs a
+credential that verifies, an unregistered one is served with its credential
+unread, a broken registry line refuses). Not Decision 7: this server never
+dispatches an `NP_RUN`, so it never has a run in flight to accept a callback
+against. Its registry is the dev cluster's, from a new
+`mkclusterkeys.dev_registry()` that the staged `/etc/cluster/users` is now
+written from too (byte-identical to before, checked by diffing a staging run),
+or `--users=PATH`.
+
+**Who this changes.** The dev registry lists `user`, so an uncredentialed
+claim of `user` at this server is now refused, and no guest can make a
+credential until step 8. Counted before changing it, as step 1 counted root's:
+every rig that drives this server (`test-async-rmount`, `test-call-interrupt`,
+`trace-remote-flake`, the `testing-qemu.md` recipes) logs in as root from a
+flagged node, which rule 1 serves. The one check that changed is the
+self-test's own squash control, "an unflagged peer claiming `user` is
+served", which now claims `guest`.
+
+**The check.** `credential_self_test`, in the server's `--self-test` and so in
+`make test`, runs every case once over loopback against the client: `user`
+served with its credential and refused without; `guest` served without one and
+with a wrong one (the credential unread); each of the ten misbehaving modes
+refused; root from an unflagged peer refused with its credential while root is
+unregistered, then, with a registry that lists root, served with it, refused
+without it, and served from a flagged peer without it; `user` refused with a
+good credential when its registry line is broken; and a keyed session keyed
+and serving when opened with a credential, refused and never keyed without
+one. **Every refusal is checked for its reason, not only its status**: the
+server records why it refused (`LAST_REFUSAL`), and a mode refused for some
+other cause fails. That check caught a bug in the test itself on its first
+run: a nested function assigned the reason without `global`, read its own
+`None`, and failed. The self-test takes 49 s, up from 24 s.
+
+**The controls**, each one mutation on its own copy of `scripts/`, run in
+parallel, each caught and naming its own case: the server accepting a
+credential made for any authorized machine (the plan's control: `other-machine`
+served) or for any authorized export (`other-export` served); the registry
+ignored for an uncredentialed claim; an unknown kind read as kind 1; the
+registry outranking the flag; a broken line read as unregistered; one tag for
+both formats (`old-tag` served, every honest credential refused); a keyed
+session's opener not judged; and on the client, the export left out of the
+signed input and the salt's realm and name swapped, each failing every honest
+credential, the second against `mkclusterkeys.py`'s independent derivation.
+
+**Found on the way.** The client's new `REALM = DEV_REALM` crashed
+`check-wire-constants.py`: its mask resolver ORed a bare alias of a bytes
+constant as an integer. A lone alias now takes its value whatever its type.
+
 ## Decisions
 
 Scored on the project's standing order: **stable, safe, and not blocking

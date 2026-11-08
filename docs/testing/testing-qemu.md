@@ -542,6 +542,10 @@ python3 scripts/np9p_server.py 5641                 # on the host; serves a smal
 python3 scripts/np9p_server.py 5641 --misbehave bad-tag   # keyed replies a correct client must refuse
 #   (modes: bad-tag, wrong-key, replay-seq, skip-seq; for step 7's guest-client controls)
 python3 scripts/np9p_server.py 5641 --unkeyed       # a v0.20.0-shaped export: ignores a key offer
+python3 scripts/np9p_server.py 5641 --users=PATH    # require credentials by that registry, not the dev one
+#   (the dev registry lists `user`: an uncredentialed claim of `user` here is
+#   refused, so a guest logged in as `user` reads nothing until step 8 of
+#   docs/roadmap/roadmap-user-keys.md; every rig here logs in as root)
 #   ...then in the guest shell:
 #   mount -r 10.0.2.2:5641 /mnt/a ; ls /mnt/a ; cat /mnt/a/HELLO.TXT
 ```
