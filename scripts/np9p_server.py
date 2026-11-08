@@ -258,15 +258,15 @@ _ED = None
 
 
 def ed():
-    """The Ed25519 reference, memoized. Asserts itself against RFC 8032 on load."""
+    """The Ed25519 reference, memoized. Asserts itself against RFC 8032 on load.
+
+    mkclusterkeys.py's copy of gen-sign-vectors.py, not a second load of the
+    same file: the registry needs mkclusterkeys anyway, and each load runs the
+    slow RFC 8032 self-check again."""
     global _ED
     if _ED is None:
-        import importlib.util
-        here = os.path.dirname(os.path.abspath(__file__))
-        spec = importlib.util.spec_from_file_location("edref", os.path.join(here, "gen-sign-vectors.py"))
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        _ED = mod
+        import mkclusterkeys
+        _ED = mkclusterkeys.edref
     return _ED
 
 
@@ -292,10 +292,146 @@ def claimed(name):
     return name.split(b"\0", 1)[0]
 
 
-def squashed(name, peer):
-    """Whether a claim of `name` (the NUL-padded wire field) from dev peer
-    `peer` is refused by root squash."""
-    return claimed(name) in ROOT_CLAIMS and peer not in DEV_ROOT_PEERS
+# THE REGISTRY (Decision 9 of docs/roadmap/roadmap-user-keys.md): the users
+# whose claims need their own credential here. By default the dev cluster's,
+# from mkclusterkeys.py's own lines (`user` only), which is what every dev
+# image stages as /etc/cluster/users; `--users=PATH` reads a file of that
+# format instead, a guest's own included. Held as the file's TEXT and read by
+# lookup_user on every claim, as netd reads its copy, so a test can hand this
+# server a registry with a broken line and see the claim refused.
+_REGISTRY = None
+
+# clusterkeys' USERS_MAX (clusterkeys/src/users.rs; check-wire-constants.py
+# compares the two): the most of /etc/cluster/users a reader fills. A registry
+# longer than this is not WHOLE, and a registry that is not whole answers
+# "broken" for every name, as clusterkeys' `lookup_user` does.
+USERS_MAX = 1024
+
+
+def registry_bytes(lines):
+    """Registry lines (str) as the file's bytes."""
+    return ("\n".join(lines) + "\n").encode()
+
+
+def dev_registry_text():
+    import mkclusterkeys
+    return registry_bytes(mkclusterkeys.dev_registry())
+
+
+def registry():
+    global _REGISTRY
+    if _REGISTRY is None:
+        _REGISTRY = dev_registry_text()
+    return _REGISTRY
+
+
+# clusterkeys' `is_space`: space, tab, CR, LF and NUL, and nothing else. Not
+# Python's whitespace, which adds \v and \f and leaves out NUL, so a line
+# padded with NULs (a zero-filled buffer) or split by \v would read one way
+# here and another in netd.
+_SPACE = b" \t\r\n\0"
+_HEX = b"0123456789abcdefABCDEF"
+
+
+def _split_field(s):
+    """clusterkeys' `split_field`: the first field and the rest, or None."""
+    s = s.lstrip(_SPACE)
+    if not s:
+        return None
+    end = next((i for i, c in enumerate(s) if c in _SPACE), len(s))
+    return s[:end], s[end:]
+
+
+def lookup_user(text, name):
+    """What the registry `text` (bytes) says of `name` (bytes):
+    ("registered", key), ("unregistered",), or ("broken",). Transcribed from
+    clusterkeys' `lookup_user`, rule for rule: a registry longer than
+    USERS_MAX is not whole and is broken for every name; blank lines and `#`
+    comments are skipped, and so is another user's line whatever it says; a
+    line naming the user that is not exactly one 64-digit hex key (and an
+    optional `# note`) is BROKEN, and so are two lines giving different keys.
+    Broken is never read as unregistered: that would switch attestation off
+    for the user whose line was mistyped."""
+    if len(text) > USERS_MAX:
+        return ("broken",)
+    found = None
+    for raw in text.split(b"\n"):
+        line = raw.strip(_SPACE)
+        if not line or line.startswith(b"#"):
+            continue
+        who, rest = _split_field(line)
+        if who != name:
+            continue
+        field = _split_field(rest)
+        if field is None:
+            return ("broken",)
+        key_text, after = field
+        after = after.strip(_SPACE)
+        if after and not after.startswith(b"#"):
+            return ("broken",)
+        # Strictly 64 hex digits: bytes.fromhex would also skip whitespace
+        # inside the field, which clusterkeys' decode_key does not.
+        if len(key_text) != 2 * NP_PUBKEY_LEN or any(c not in _HEX for c in key_text):
+            return ("broken",)
+        key = bytes.fromhex(key_text.decode())
+        if found is not None and found != key:
+            return ("broken",)
+        found = key
+    return ("registered", found) if found is not None else ("unregistered",)
+
+
+def credential_verifies(user_key, nonce, name, caller_key, np_msg, credential):
+    """Kind 1: `credential` is `user_key`'s signature over SIG_DOMAIN_USER ||
+    nonce || name || caller's key || THIS export's key || SHA-512(np_msg),
+    every field this server's own: the header's nonce, name and key, its own
+    public key, and the hash of the message it received."""
+    prefix = nonce + name + caller_key + host_public() + hashlib.sha512(np_msg).digest()
+    assert len(prefix) == NP_USER_SIG_PREFIX_LEN, "user signature input is not NP_USER_SIG_PREFIX_LEN"
+    return ed().verify(user_key, SIG_DOMAIN_USER + prefix, credential)
+
+
+# Why the last request was refused, or None if it was served: "denied: <why>"
+# for the unsigned denial (an unknown magic, an unauthorized key, a machine
+# signature that does not verify), else `admit`'s reason. Read by the
+# self-test, so a misbehaving credential is shown refused for ITS reason and
+# not for some other one that happens to give the same status. LAST_REQUEST
+# is the frame body judged, for the self-test's witnesses.
+LAST_REFUSAL = None
+LAST_REQUEST = None
+_DENIED = None
+
+
+def admit(np_msg, nonce, name, peer, caller_key, cred):
+    """The export's policy (ninep-abi's normative block, "User credentials"),
+    for AUTHNP03 (`cred` None) and AUTHNP05 alike: None to serve, or why not.
+    Decisions 6 and 5 in that order; not Decision 7, since this server never
+    dispatches an NP_RUN and so never has one in flight to accept a callback
+    against."""
+    who = claimed(name)
+    shown = who.decode("ascii", "replace")
+    if cred is not None and cred[0] == "bad":
+        return f"credential refused: {cred[1]}"
+
+    def verifies(look):
+        return (cred is not None and look[0] == "registered"
+                and credential_verifies(look[1], nonce, name, caller_key, np_msg, cred[2]))
+
+    if who in ROOT_CLAIMS:
+        # The flag outranks the registry: a flagged peer is trusted with root,
+        # registered or not. Otherwise only root's own credential will do.
+        if peer in DEV_ROOT_PEERS or verifies(lookup_user(registry(), who)):
+            return None
+        return f"root squash: {peer} claimed {shown}"
+    look = lookup_user(registry(), who)
+    if look[0] == "broken":
+        return f"the registry's line for {shown} is broken"
+    if look[0] == "unregistered":
+        return None  # served on the machine's word, the credential unread
+    if cred is None:
+        return f"{shown} is registered and the request carries no credential"
+    if not verifies(look):
+        return f"{shown}'s credential does not verify"
+    return None
 
 
 def dev_authorized():
@@ -316,15 +452,41 @@ def dev_authorized():
     return _AUTHORIZED
 
 
-def verify_signed(body):
-    """Verify an AUTHNP03 frame: [magic][nonce][name][pubkey][sig][np].
+def credential_block(body):
+    """AUTHNP05's block, read by the rules: (("ok", kind, credential), the NP
+    message) or (("bad", why), None). Transcribed from ninep-abi's
+    `credentialed`: a truncated block, a kind this peer does not know, or a
+    known kind with any other length refuses the request, and an unknown kind
+    is never skipped."""
+    at = NP_AUTH_HDR_SIGNED + NP_CRED_HDR_LEN
+    if len(body) < at:
+        return ("bad", "truncated"), None
+    kind, clen = struct.unpack("<HH", body[NP_AUTH_HDR_SIGNED:at])
+    if kind != NP_CRED_KIND_USER_SIG:
+        return ("bad", f"unknown kind {kind}"), None
+    if clen != NP_CRED_USER_SIG_LEN:
+        return ("bad", f"kind {kind} with length {clen}"), None
+    if len(body) < at + clen:
+        return ("bad", "truncated"), None
+    return ("ok", kind, body[at:at + clen]), body[at + clen:]
+
+
+def verify_signed(body, magic):
+    """Verify an AUTHNP03 or AUTHNP05 frame's MACHINE half:
+    (NP message, nonce, name, peer, caller's key, credential), or None.
 
     The offered key must be one this server authorizes BEFORE the signature is
     checked - the same order netd uses, and for the same reason: a valid
     signature by a key nobody authorized is exactly as unwelcome as an invalid
-    one.
+    one. The signature covers the format's own tag || nonce || name || every
+    byte after `sig`, which for AUTHNP05 puts the credential block inside it.
+    `credential` is None for AUTHNP03; for AUTHNP05 it is read only after the
+    signature verifies, and a malformed one comes back ("bad", why) for the
+    caller to refuse with a signed reply.
     """
+    global _DENIED
     if len(body) < NP_AUTH_HDR_SIGNED:
+        _DENIED = "short header"
         return None
     noff = 8 + NP_NONCE_LEN  # past the magic and the nonce
     # SLICED BY THE CONSTANT, not by 8:24. This was the one field still spelled
@@ -339,13 +501,19 @@ def verify_signed(body):
     koff = noff + NP_NAME_LEN
     pub = body[koff : koff + NP_PUBKEY_LEN]
     sig = body[koff + NP_PUBKEY_LEN : NP_AUTH_HDR_SIGNED]
-    np = body[NP_AUTH_HDR_SIGNED:]
+    rest = body[NP_AUTH_HDR_SIGNED:]
     peer = dev_authorized().get(pub)
     if peer is None:
+        _DENIED = "unauthorized key"
         return None
-    if not ed().verify(pub, SIG_DOMAIN_REQUEST + nonce + name + np, sig):
+    tag = SIG_DOMAIN_REQUEST_CRED if magic == NP_AUTH_MAGIC_USER else SIG_DOMAIN_REQUEST
+    if not ed().verify(pub, tag + nonce + name + rest, sig):
+        _DENIED = "machine signature does not verify"
         return None
-    return np, nonce, name, peer
+    if magic != NP_AUTH_MAGIC_USER:
+        return rest, nonce, name, peer, pub, None
+    cred, np = credential_block(body)
+    return (np if np is not None else b""), nonce, name, peer, pub, cred
 
 
 # The host peer's own identity - the "host" dev key, which every image's
@@ -353,6 +521,19 @@ def verify_signed(body):
 # signed replies without any copying.
 def host_seed():
     return hashlib.sha256(DEV_PEER_LABELS["host"].encode()).digest()
+
+
+_HOST_PUBLIC = None
+
+
+def host_public():
+    """This export's own public key, the `export` field of every user
+    signature it verifies. Memoized: a scalar multiplication per credential
+    would double the cost of checking one."""
+    global _HOST_PUBLIC
+    if _HOST_PUBLIC is None:
+        _HOST_PUBLIC = ed().public_key(host_seed())
+    return _HOST_PUBLIC
 
 
 def warm_up():
@@ -369,26 +550,32 @@ def warm_up():
     seed = host_seed()
     sig = ed().sign(seed, b"warm")
     assert ed().verify(ed().public_key(seed), b"warm", sig), "reference disagrees with itself"
+    host_public()
+    registry()
     return dev_authorized()
 
 
 def verify(body):
-    """Strip + verify the auth header; return (NP message, nonce, name, peer),
-    or None. The nonce is what the reply is signed against (reply-auth); the
-    name is the user the request is made as, which a fid is bound to at open;
-    the peer is the dev identity that signed, whose root flag decides a root
-    claim.
+    """Strip + verify the auth header's machine half; return (NP message,
+    nonce, name, peer, caller's key, credential), or None. The nonce is what
+    the reply is signed against (reply-auth); the name is the user the request
+    is made as, which a fid is bound to at open; the peer is the dev identity
+    that signed, whose root flag decides a root claim; the credential is
+    AUTHNP05's, None for AUTHNP03, and `admit` decides what it is worth.
 
-    ONE FORMAT. The retired shared-key MAC'd format (`AUTHNP02`) was accepted
-    here until the flag day; a frame carrying it is now refused like any other
-    unknown magic, which is what makes this peer able to show that the GUEST
-    refuses one too rather than merely assuming so."""
+    TWO SIGNED FORMATS, AUTHNP03 and AUTHNP05. The retired shared-key MAC'd
+    format (`AUTHNP02`) was accepted here until the flag day; a frame carrying
+    it is now refused like any other unknown magic, which is what makes this
+    peer able to show that the GUEST refuses one too rather than merely
+    assuming so."""
+    global _DENIED
+    _DENIED = "unknown magic"
     if len(body) < 8:
         return None
     (magic,) = struct.unpack("<Q", body[:8])
-    if magic != NP_AUTH_MAGIC_SIGNED:
+    if magic not in (NP_AUTH_MAGIC_SIGNED, NP_AUTH_MAGIC_USER):
         return None
-    return verify_signed(body)
+    return verify_signed(body, magic)
 
 # The served tree. Directories map a path to a list of (name, is_dir); files map
 # a path to bytes. HELLO.TXT is deliberately > NP_REMOTE_CHUNK (512) so a guest
@@ -517,14 +704,26 @@ def read_frame(sock):
 SESSION_IDLE_S = 60
 
 
-def request_verb(body):
-    """The NP verb inside a signed request frame, or None if it is not one."""
-    if len(body) < NP_AUTH_HDR_SIGNED + 8:
+def request_np(body):
+    """The NP message inside a signed or credentialed request frame, unverified,
+    or None if it is not one. Where the message starts depends on the format,
+    so nothing finds it by a fixed offset."""
+    if len(body) < 8:
         return None
     (magic,) = struct.unpack("<Q", body[:8])
-    if magic != NP_AUTH_MAGIC_SIGNED:
+    if magic == NP_AUTH_MAGIC_SIGNED and len(body) >= NP_AUTH_HDR_SIGNED:
+        return body[NP_AUTH_HDR_SIGNED:]
+    if magic == NP_AUTH_MAGIC_USER:
+        return credential_block(body)[1]
+    return None
+
+
+def request_verb(body):
+    """The NP verb inside a signed or credentialed request frame, or None."""
+    np = request_np(body)
+    if np is None or len(np) < 8:
         return None
-    return struct.unpack("<Q", body[NP_AUTH_HDR_SIGNED:NP_AUTH_HDR_SIGNED + 8])[0]
+    return struct.unpack("<Q", np[:8])[0]
 
 
 def reply_status(reply):
@@ -546,14 +745,18 @@ def serve_request(body):
     # retired-format frame before serving any verb - the guest surfaces
     # FS_ERR_AUTH. A denial is unsealed (the client's reply-verify fails ->
     # auth error anyway).
+    global LAST_REFUSAL, LAST_REQUEST
+    LAST_REQUEST = body
     verified = verify(body)
     if verified is None:
+        LAST_REFUSAL = f"denied: {_DENIED}"
         return frame_reply(FS_ERR_AUTH)
-    body, nonce, name, peer = verified
-    if squashed(name, peer):
+    body, nonce, name, peer, caller_key, cred = verified
+    why = LAST_REFUSAL = admit(body, nonce, name, peer, caller_key, cred)
+    if why is not None:
         # SIGNED, as netd's is: the peer proved it holds an authorized key, so
         # it gets an authenticated answer, refusal included.
-        print(f"  [root squash: {peer} claimed {claimed(name)!r}, refused]", flush=True)
+        print(f"  [{why}: refused]", flush=True)
         return seal(nonce, FS_ERR_AUTH)
     return serve_np(body, name, lambda status, data=b"": seal(nonce, status, data))
 
@@ -865,7 +1068,10 @@ def self_test(quiet=True):
     real_verify = verify
     # Signed as `host`: the dispatch table is not about root squash, which the
     # keyed self-test below and the impersonation gate exercise.
-    verify = lambda body: (body, b"\0" * NP_NONCE_LEN, b"self-test", "host")  # noqa: E731
+    # The machine half's six fields; `self-test` is no account, so it is
+    # unregistered and `admit` serves it on the machine's word.
+    verify = lambda body: (body, b"\0" * NP_NONCE_LEN, b"self-test", "host",  # noqa: E731
+                           b"\0" * NP_PUBKEY_LEN, None)
     bad = []
     try:
         FIDS.clear()
@@ -980,16 +1186,20 @@ def self_test(quiet=True):
         verify = real_verify
         FIDS.clear()
     keyed_bad = keyed_self_test(quiet)
-    if bad or keyed_bad:
+    cred_bad = credential_self_test(quiet)
+    if bad or keyed_bad or cred_bad:
         print("np9p_server --self-test: DISPATCH DISAGREES WITH THE TABLE")
-        print("\n".join(bad + keyed_bad))
+        print("\n".join(bad + keyed_bad + cred_bad))
         return 1
     print(f"np9p_server: {len(SELF_TEST_VERBS)} verb(s) dispatch as documented, "
           f"and a fid round trip reads the file back byte-for-byte; a KEYED "
           f"session with np9p_client.py serves every verb, the client refuses "
           f"all {len(MISBEHAVE_MODES)} misbehaving replies, a key offered to an "
           f"unkeyed export falls back to a signed session, and the export "
-          f"closes on a skipped seq and a tampered tag")
+          f"closes on a skipped seq and a tampered tag; user credentials are "
+          f"served and refused as Decisions 5 and 6 say, each of the client's "
+          f"misbehaving credentials refused for its own reason and witnessed wrong in "
+          f"that one way, and the registry read by clusterkeys' rules")
     return 0
 
 
@@ -1204,10 +1414,225 @@ def keyed_self_test(quiet=True):
         if got != want or ended.startswith("CRASHED"):
             shown = got if isinstance(got, (str, tuple)) else classify(got)
             bad.append(f"  - root squash: {label} was not refused FS_ERR_AUTH ({shown}; server: {ended})")
-    got, ended = run(None, one_op_as(b"user"))
+    # The control claims `guest`, not `user`: since user-keys step 6 `user`
+    # is registered, so an uncredentialed claim of it is refused for a reason
+    # that has nothing to do with root.
+    got, ended = run(None, one_op_as(b"guest"))
     if isinstance(got, str) or got >= (1 << 64) - 64:
         shown = got if isinstance(got, str) else classify(got)
-        bad.append(f"  - root squash control: the unflagged peer claiming `user` was not served ({shown})")
+        bad.append(f"  - root squash control: the unflagged peer claiming `guest` was not served ({shown})")
+    return bad
+
+
+def credential_self_test(quiet=True):
+    """Step 6's check (docs/roadmap/roadmap-user-keys.md): np9p_client.py's
+    credentials against this server's policy, two implementations of the
+    derivation, the signed input and the block, over a real socket. Every
+    request is signed as `intruder`, which has no root flag, unless a check
+    says otherwise, so no claim is served by the flag by accident. Each
+    refusal is checked for its REASON (LAST_REFUSAL), not only its status: a
+    credential refused for some other cause would pass a status check while
+    proving nothing about the binding it is named for. Returns failures."""
+    global _REGISTRY, LAST_REFUSAL
+    c = _client_module()
+    bad = []
+    sink = io.StringIO()
+    intruder = c.dev_seed(c.DEV_PEER_LABELS["intruder"])
+    host = c.dev_seed(c.DEV_PEER_LABELS["host"])
+    stat = _frame(NP_BASE + 12, ("PLEN", 0, 0), b"/HELLO.TXT", 0)
+
+    def serve_one(go):
+        """One connection served while `go(port)` runs, quiet if asked: (what
+        `go` returned, why the server refused or None, the body it judged),
+        or a CRASHED status, which no check counts as a pass."""
+        global LAST_REFUSAL, LAST_REQUEST
+        LAST_REFUSAL = LAST_REQUEST = None
+        with contextlib.redirect_stdout(sink) if quiet else contextlib.nullcontext():
+            got, ended = _with_server(quiet, None, go)
+        if ended.startswith("CRASHED"):
+            return ended, None, None
+        return got, LAST_REFUSAL, LAST_REQUEST
+
+    def ask(user, password=c.FROM_FLAGS, mode=None, seed=intruder):
+        """One request; (status, why the server refused it or None, body)."""
+        def go(port):
+            s = c.Session("127.0.0.1", port)
+            try:
+                st, _ = s.op(stat, user=user, seed=seed, password=password, cred_mode=mode)
+                return st
+            except (RuntimeError, OSError) as e:
+                return f"broke: {e}"
+            finally:
+                s.close()
+        return serve_one(go)
+
+    def served(label, got):
+        st, why, _ = got
+        if isinstance(st, str) or st >= (1 << 64) - 64:
+            shown = st if isinstance(st, str) else classify(st)
+            bad.append(f"  - credentials: {label} was not served ({shown}; server: {why})")
+
+    def refused(label, got, because, mode=None):
+        st, why, body = got
+        if st != FS_ERR_AUTH or why is None or because not in why:
+            shown = st if isinstance(st, str) else classify(st)
+            bad.append(f"  - credentials: {label} was not refused for its reason "
+                       f"(status {shown}; server: {why}; wanted: {because})")
+        elif mode is not None and not witnessed(mode, body):
+            bad.append(f"  - credentials: {label} was refused, but the frame is not the honest "
+                       f"one wrong in that one way (no witness)")
+
+    user_keys = {}
+
+    def witnessed(mode, body):
+        """Whether the refused frame `body` is wrong in exactly `mode`'s way.
+        A refusal names only that the signature failed, never which of its
+        inputs was wrong, so it cannot tell `other-export` from a frame that
+        is also broken somewhere else. The witness can: the credential (or,
+        for the two machine-signature modes, the machine signature) VERIFIES
+        over the honest input with only that mode's field changed."""
+        if body is None or len(body) < NP_AUTH_HDR_SIGNED + NP_CRED_HDR_LEN:
+            return False
+        (magic,) = struct.unpack("<Q", body[:8])
+        noff = 8 + NP_NONCE_LEN
+        nonce = body[8:noff]
+        name = body[noff:noff + NP_NAME_LEN]
+        caller = body[noff + NP_NAME_LEN:noff + NP_NAME_LEN + NP_PUBKEY_LEN]
+        sig = body[noff + NP_NAME_LEN + NP_PUBKEY_LEN:NP_AUTH_HDR_SIGNED]
+        rest = body[NP_AUTH_HDR_SIGNED:]
+        if mode in ("old-tag", "relabel"):
+            want_magic, tag = ((NP_AUTH_MAGIC_USER, SIG_DOMAIN_REQUEST) if mode == "old-tag"
+                               else (NP_AUTH_MAGIC_SIGNED, SIG_DOMAIN_REQUEST_CRED))
+            return magic == want_magic and ed().verify(caller, tag + nonce + name + rest, sig)
+        at = NP_AUTH_HDR_SIGNED + NP_CRED_HDR_LEN
+        kind, clen = struct.unpack("<HH", body[NP_AUTH_HDR_SIGNED:at])
+        if magic != NP_AUTH_MAGIC_USER or kind != NP_CRED_KIND_USER_SIG or clen != NP_CRED_USER_SIG_LEN:
+            return False
+        cred, np_msg = body[at:at + clen], body[at + clen:]
+        password = b"user-wrong" if mode == "wrong-key" else b"user"
+        if password not in user_keys:
+            user_keys[password] = ed().public_key(c.user_seed(b"user", password))
+        user_key = user_keys[password]
+        other = c.other_member(caller, host_public())
+        callers, exports = [caller], [host_public()]
+        if mode == "other-name":
+            name = b"guest".ljust(NP_NAME_LEN, b"\0")
+        elif mode == "other-nonce":
+            nonce = c.other_nonce(nonce)
+        elif mode == "other-message":
+            np_msg = np_msg + b"\0"
+        elif mode == "other-machine":
+            callers = [other]
+        elif mode == "other-export":
+            exports = [other]
+        h = hashlib.sha512(np_msg).digest()
+        return any(ed().verify(user_key, SIG_DOMAIN_USER + nonce + name + k + e + h, cred)
+                   for k in callers for e in exports)
+
+    # Decision 5, with the dev registry (`user` only).
+    served("`user` with its credential", ask(b"user", b"user"))
+    refused("`user` with no credential", ask(b"user"), "carries no credential")
+    served("`guest`, unregistered, with no credential", ask(b"guest"))
+    # Unread: a credential for an unregistered name is not checked, so a
+    # wrong password there is served, as the spec says.
+    served("`guest`, unregistered, with a wrong credential", ask(b"guest", b"not-guests"))
+
+    # Every misbehaving credential, each for its own reason, and each but the
+    # two block modes (whose reasons are their own) with a witness that the
+    # frame is wrong in that mode's one way and no other.
+    reasons = {
+        "unknown-kind": "unknown kind 9",
+        "bad-length": "with length 63",
+        "old-tag": "denied: machine signature does not verify",
+        "relabel": "denied: machine signature does not verify",
+    }
+    for mode in c.CRED_MODES:
+        refused(f"a '{mode}' credential", ask(b"user", b"user", mode),
+                reasons.get(mode, "credential does not verify"),
+                mode=None if mode in ("unknown-kind", "bad-length") else mode)
+
+    # Decision 6 against the registry. Root is not registered in the dev
+    # cluster, so its own credential cannot help it there.
+    refused("root from an unflagged peer with root's credential, root unregistered",
+            ask(b"root", b"root"), "root squash")
+    saved = registry()
+    try:
+        import mkclusterkeys
+        _REGISTRY = saved + registry_bytes(mkclusterkeys.dev_registry({"root"}))
+        served("root from an unflagged peer with root's credential, root registered",
+               ask(b"root", b"root"))
+        refused("root from an unflagged peer with no credential, root registered",
+                ask(b"root"), "root squash")
+        # The flag outranks the registry.
+        served("root from a flagged peer with no credential, root registered",
+               ask(b"root", seed=host))
+        # Rule 1 as ninep-abi words it: the flag serves root "without a
+        # credential", so one that is present and wrong is not read either.
+        # Pinned here so netd (step 7) is held to the same reading.
+        served("root from a flagged peer with a wrong credential, root registered",
+               ask(b"root", b"not-roots", seed=host))
+        # A broken line is never "unregistered": the claim is refused even
+        # with the right credential.
+        _REGISTRY = b"user not-a-key\n"
+        refused("`user` with its credential, its registry line broken",
+                ask(b"user", b"user"), "is broken")
+        # A registry that is not whole is broken for every name, `user`'s line
+        # included, since a later line could contradict it.
+        _REGISTRY = saved + b"#" * USERS_MAX + b"\n"
+        refused("`user` with its credential, the registry longer than USERS_MAX",
+                ask(b"user", b"user"), "is broken")
+    finally:
+        _REGISTRY = saved
+
+    # lookup_user's transcription of clusterkeys, on the rules Python's own
+    # whitespace and hex parsing would get wrong.
+    k = "ab" * NP_PUBKEY_LEN
+    for label, text, want in (
+            ("a line padded with NULs, as from a zero-filled buffer",
+             f"user {k}\n".encode() + b"\0" * 16, "registered"),
+            ("a line with no newline and NULs after it", f"user {k}".encode() + b"\0" * 16, "registered"),
+            ("a key split from its name by \\v, not clusterkeys' whitespace",
+             f"user\v{k}\n".encode(), "unregistered"),
+            ("a note after the key that is not a comment", f"user {k} x\n".encode(), "broken"),
+            ("whitespace inside the key's hex", f"user {k[:-2]}\v\v\n".encode(), "broken"),
+            ("two lines giving different keys", f"user {k}\nuser {'cd' * NP_PUBKEY_LEN}\n".encode(),
+             "broken"),
+            ("a registry one byte past USERS_MAX", f"user {k}\n".encode().ljust(USERS_MAX + 1, b"#"),
+             "broken")):
+        got = lookup_user(text, b"user")[0]
+        if got != want:
+            bad.append(f"  - credentials: lookup_user read {label} as {got}, clusterkeys as {want}")
+
+    # A keyed session is judged once, at its NP_SESSION: credentialed, it keys
+    # and serves; uncredentialed, it is refused and never keyed.
+    def keyed(password):
+        """(how it went, the status), why the server refused or None."""
+        def go(port):
+            s = c.Session("127.0.0.1", port)
+            saved_key = c.SIGN_KEY
+            c.SIGN_KEY = intruder
+            try:
+                st, _ = s.open(keyed=True, user=b"user", password=password)
+                if st != 0 or s.keys is None:
+                    return ("not keyed", st)
+                st, _ = s.op(stat)
+                return ("keyed", st)
+            except (RuntimeError, OSError) as e:
+                return ("broke", str(e))
+            finally:
+                c.SIGN_KEY = saved_key
+                s.close()
+        got, why, _ = serve_one(go)
+        return (("crashed", got) if isinstance(got, str) else got), why
+
+    (how, st), why = keyed(b"user")
+    if how != "keyed" or isinstance(st, str) or st >= (1 << 64) - 64:
+        bad.append(f"  - credentials: a keyed session opened with `user`'s credential did not "
+                   f"key and serve ({how}, {st}; server: {why})")
+    (how, st), why = keyed(None)
+    if how != "not keyed" or st != FS_ERR_AUTH or why is None or "no credential" not in why:
+        bad.append(f"  - credentials: a keyed session opened as `user` with no credential was "
+                   f"not refused for its reason ({how}, {st}; server: {why})")
     return bad
 
 
@@ -1308,9 +1733,9 @@ class Keyed:
 
 
 def offers_key(body):
-    """Whether a signed frame is an NP_SESSION carrying an ephemeral key."""
-    return (request_verb(body) == NP_SESSION
-            and len(body) == NP_AUTH_HDR_SIGNED + HDR + NP_EPHEMERAL_LEN)
+    """Whether a signed or credentialed frame is an NP_SESSION carrying an
+    ephemeral key."""
+    return request_verb(body) == NP_SESSION and len(request_np(body)) == HDR + NP_EPHEMERAL_LEN
 
 
 def open_keyed(body):
@@ -1319,14 +1744,20 @@ def open_keyed(body):
     for a refusal to send as the unsigned denial, or "close" for an all-zero
     shared secret, which closes without a reply on both sides. A root-squashed
     claim is the signed refusal with no Keyed state: a session keyed as root
-    would run every later verb as root without the claim being seen again."""
+    would run every later verb as root without the claim being seen again.
+    The same holds for every refusal `admit` gives: a keyed session runs as
+    its opener for its whole life, so the opener's claim is judged here, once,
+    by the same policy a single request meets."""
+    global LAST_REFUSAL, LAST_REQUEST
+    LAST_REQUEST = body
     verified = verify(body)
     if verified is None:
+        LAST_REFUSAL = f"denied: {_DENIED}"
         return None
-    np_msg, nonce, name, peer = verified
-    if squashed(name, peer):
-        print(f"  [root squash: {peer} claimed {claimed(name)!r} for a keyed session, refused]",
-              flush=True)
+    np_msg, nonce, name, peer, caller_key, cred = verified
+    why = LAST_REFUSAL = admit(np_msg, nonce, name, peer, caller_key, cred)
+    if why is not None:
+        print(f"  [{why}, for a keyed session: refused]", flush=True)
         return seal(nonce, FS_ERR_AUTH), None
     eph_client = np_msg[HDR:HDR + NP_EPHEMERAL_LEN]
     secret = export_ephemeral(nonce)
@@ -1465,6 +1896,21 @@ def main():
         UNKEYED = True
         args = [a for a in args if a != "--unkeyed"]
         print("np9p_server: UNKEYED, a v0.20.0-shaped export: key offers are ignored")
+    # `--users=PATH`: the registry to require credentials by, in
+    # /etc/cluster/users's format (a guest's own copy, say), instead of the dev
+    # cluster's.
+    # Read as BYTES, the file exactly as the guest has it.
+    global _REGISTRY
+    if "--users" in args:
+        print("np9p_server: --users takes its path as --users=PATH", file=sys.stderr)
+        sys.exit(2)
+    for i, a in enumerate(list(args)):
+        if a.startswith("--users="):
+            with open(a[len("--users="):], "rb") as f:
+                _REGISTRY = f.read()
+            del args[i]
+            print(f"np9p_server: requiring credentials by the registry in {a[len('--users='):]}")
+            break
     port = int(args[0]) if args else 5641
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

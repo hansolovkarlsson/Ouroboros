@@ -104,10 +104,19 @@ def _resolve_all(sums, ors, out):
 def _resolve_ors(ors, out):
     """Evaluate `A | B | C` masks (or a lone `A`) of names already in `out`, so a mask is
     compared as the bits it holds (OPEN_FLAGS, OPEN_DIR_REFUSED: the medium
-    review of #370). A name that never resolves leaves the mask out."""
+    review of #370). A name that never resolves leaves the mask out.
+
+    A LONE name is an alias and takes its value whatever its type: the
+    client's `REALM = DEV_REALM` is bytes, and OR-ing it as an integer
+    crashed the whole check (user-keys step 6). A mask of several names is
+    resolved only when every one is an integer."""
     for name, expr in ors:
         terms = [t.strip() for t in expr.split("|")]
-        if name not in out and all(t in out for t in terms):
+        if name in out or not all(t in out for t in terms):
+            continue
+        if len(terms) == 1:
+            out[name] = out[terms[0]]
+        elif all(isinstance(out[t], int) for t in terms):
             value = 0
             for t in terms:
                 value |= out[t]
@@ -570,6 +579,26 @@ def check_userkey_count(problems):
             problems.append(f"{script}: {name} is {g.group(1)}, ninep-abi's USERKEY_ITERATIONS is {want}")
 
 
+def check_users_max(problems):
+    """The registry's size cap, clusterkeys' `USERS_MAX`, against the copy in
+    np9p_server.py. The server's `lookup_user` reads a longer registry as
+    broken for every name, as clusterkeys does; with a different cap the two
+    exports would serve and refuse the same file differently, and nothing
+    would fail until step 8 compared them."""
+    src = open(os.path.join(ROOT, "clusterkeys", "src", "users.rs")).read()
+    m = re.search(r"pub const USERS_MAX: usize = ([0-9_]+);", src)
+    if not m:
+        problems.append("clusterkeys/src/users.rs: USERS_MAX not found (renamed?)")
+        return
+    want = int(m.group(1).replace("_", ""))
+    text = open(os.path.join(HERE, "np9p_server.py")).read()
+    g = re.search(r"^USERS_MAX = ([0-9_]+)$", text, re.M)
+    if not g:
+        problems.append("np9p_server.py: USERS_MAX not found (renamed?)")
+    elif int(g.group(1).replace("_", "")) != want:
+        problems.append(f"np9p_server.py: USERS_MAX is {g.group(1)}, clusterkeys' is {want}")
+
+
 def check_dev_peer_labels(problems):
     """BOTH peers' short-name maps must match `mkclusterkeys.py`'s dev peers.
 
@@ -802,6 +831,7 @@ def main():
     check_dev_peer_labels(problems)
     check_dev_user_keys(problems)
     check_userkey_count(problems)
+    check_users_max(problems)
     check_fid_gate_budget(problems, rust)
     syscalls = check_syscall_numbers(problems, rust, origin, peers["libc/include/sys.h"])
 
