@@ -18,13 +18,13 @@ to the host). That gives every bound a check:
 
 - served: `host`, the run's machine, claims the run's user during the run
   (a read of a file only `user` may read), one-shot and on a keyed session;
-  and a session opened as `guest` in the same run, which rule 4 serves
-  anyway, is not bound to it;
+  and a session opened in the same run as `user` WITH `user`'s credential,
+  which rule 3 serves anyway, is not bound to it;
 - the machine bound: `intruder` claims the same user during the same run,
   refused;
 - the time bound: after the run ends, `host`'s one-shot claim is refused,
-  and the keyed session opened under the run is closed, while `guest`'s
-  still serves;
+  and the keyed session opened under the run is closed, while the
+  credentialed one still serves;
 - the squash: a run as root to the UNFLAGGED machine, whose callback claims
   root, refused (a run never lifts the squash); to the flagged one, served.
 
@@ -104,12 +104,13 @@ def shown(st, data):
     return f"served, {len(data)} bytes" if c.served(st) else f"refused {c.status_name(st)}"
 
 
-def keyed_as(user=b"user"):
-    """A keyed session opened by `host` as `user`: the Session, or why not."""
+def keyed_as(user=b"user", password=None):
+    """A keyed session opened by `host` as `user`, credentialed with
+    `password` if given: the Session, or why not."""
     c.SIGN_KEY = HOST
     s = c.Session("localhost", EXPORT)
     try:
-        st, _ = s.open(keyed=True, user=user, password=None)
+        st, _ = s.open(keyed=True, user=user, password=password)
         if st != 0 or s.keys is None:
             s.close()
             return None, f"not keyed (status {st})"
@@ -195,11 +196,13 @@ def user_run():
         st, why = stat_on(s) if s else (None, how)
         check("rule 2: a keyed session opened by the run's machine as the run's user serves",
               s is not None and st is not None and c.served(st), why or f"status {st}")
-        # Opened during the same run, as `guest`, whom rule 4 serves anyway:
-        # it must NOT be bound to the run, so the run's end leaves it alone.
-        g_s, how = keyed_as(b"guest")
-        state["guest"] = g_s
-        check("a keyed session as `guest` (unregistered) opens during the run",
+        # Opened during the same run as the run's OWN user, with `user`'s
+        # credential, which rule 3 serves anyway: it must NOT be bound to the
+        # run, so the run's end leaves it alone. (A claim of another user is
+        # never bound, run or not: the run binds its own user's claims only.)
+        g_s, how = keyed_as(b"user", password=b"user")
+        state["attested"] = g_s
+        check("a keyed session as `user` with its credential opens during the run",
               g_s is not None, how)
 
     def after():
@@ -228,10 +231,10 @@ def user_run():
         check("the time bound: the session opened under the run closes when it ends",
               st is None, why or f"served or answered: status {st}")
         s.close()
-        g_s = state.get("guest")
+        g_s = state.get("attested")
         if g_s is not None:
             st, why = stat_on(g_s)
-            check("a session rule 4 let in is not bound: `guest`'s still serves after the run",
+            check("a session rule 3 let in is not bound: the credentialed one still serves after the run",
                   st is not None and c.served(st), why or f"status {st}")
             g_s.close()
 
