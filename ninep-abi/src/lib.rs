@@ -1962,7 +1962,7 @@ mod tests {
         // `/`'s names are all passed through except proc and net, bound there.
         assert_eq!(ends(&MountPoints::below(&ns[..n], b"/")), ([false, true, true, false, false, false, false, false], 4));
         // In /dev, cons is where the console's binding ends: the caller stats it.
-        assert_eq!(ends(&MountPoints::below(&ns[..n], b"/dev")).0[0], true);
+        assert!(ends(&MountPoints::below(&ns[..n], b"/dev")).0[0]);
         // A name one binding ends at and another goes through is a directory.
         let (ns, n) = ns_of(&[(1, b"/x", b"/"), (2, b"/x/y", b"/")]);
         assert_eq!(ends(&MountPoints::below(&ns[..n], b"/")), ([false; 8], 1));
@@ -1970,7 +1970,7 @@ mod tests {
         assert_eq!(ends(&MountPoints::below(&ns[..n], b"/")), ([false; 8], 1));
         // A trailing `/` on a prefix does not make it go on below.
         let (ns, n) = ns_of(&[(1, b"/x/", b"/")]);
-        assert_eq!(ends(&MountPoints::below(&ns[..n], b"/")).0[0], true);
+        assert!(ends(&MountPoints::below(&ns[..n], b"/")).0[0]);
     }
 
     #[test]

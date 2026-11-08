@@ -51,8 +51,9 @@ This document is the one to update first when direction changes.
 > plan: its step 0 on Parallels and steps 6 and 7 (Pi item 3 below). Next
 > by the roadmap: per-user keys step 5 (item 1) or Pi item 1, more than one
 > partition in use, which on 2026-11-07 turned out to be mostly there
-> already (`mount <n> <path>`, seen on the card): what is left is making a
-> mount visible to `mount` and to `ls` of its parent.
+> already (`mount <n> <path>`, seen on the card). Its last part, a mount
+> visible to `mount` and to `ls` of its parent, was built on QEMU the same
+> day (`make test-mount-points`); the board run is what is left of it.
 
 > **Released 2026-10-13: v0.23.0, multi-core, and DevTools's preprocessor
 > and editor run here** (#209 to #281, recorded in [`CHANGELOG.md`](CHANGELOG.md)
@@ -737,29 +738,48 @@ keep in the pipeline before the current tests go on. Not sequenced against
 the rest of this roadmap; the dependencies between them are stated. Claims
 not yet checked on this tree are marked (predicted).
 
-- [ ] **1. More than one partition in use, on the card or a stick.**
-      **Mostly there already; corrected 2026-11-07.** Until then this item
-      said `fsd` "mounts only the first one that probes", which was false
-      when it was written on 2026-10-03: `mount <n> <path>` has mounted a
-      disk's `n`-th partition beside `/` since 2026-08-25 (`b2159609`,
-      cluster Phase 0 multi-mount, up to three more at once;
-      `shell-commands.md`). Seen on the Pi's card 2026-11-07, on `56946121`:
-      `mount 0 /mnt/boot` beside the ext2 root, then `ls /mnt/boot` listed
-      the boot partition whole (`RPI_EFI.fd`, `config.txt`, `start4.elf`,
-      the `bcm2711-*.dtb` files, `overlays/`, `firmware/`, `EFI/`), and on
-      QEMU's `disk.img` both partitions mounted at once, 0 fault lines.
-      What is left is that a mount cannot be seen except at its own path,
-      which made a working mount on the board look like a failed one:
-      - bare `mount` reports only `/` (`FSOP_MOUNT_INFO`), so it should
-        list every mount and the path it is bound at;
-      - a bind is a namespace entry, not a directory entry, so `ls /mnt`
-        does not list `boot`, and with no `/mnt` on the disk it says
-        `no such file or directory` while `ls /mnt/boot` works. A
-        parent should show the mount points below it, or at least not
-        call a path with one under it missing.
-      Both are the shell's and `fsd`'s mount reporting, built and checked on
-      QEMU first. This is still where the `/dev` namespace item under
-      "Remaining follow-ups" stops being speculative.
+- [x] **1. More than one partition in use, on the card or a stick.
+      DONE on QEMU 2026-11-07 (`feat/mount-listing`); seen on the board:
+      not yet.** Until 2026-11-07 this item said `fsd` "mounts only the
+      first one that probes", which was false when it was written on
+      2026-10-03: `mount <n> <path>` has mounted a disk's `n`-th partition
+      beside `/` since 2026-08-25 (`b2159609`, cluster Phase 0 multi-mount,
+      up to three more at once; `shell-commands.md`). Seen on the Pi's card
+      2026-11-07, on `56946121`: `mount 0 /mnt/boot` beside the ext2 root,
+      and `ls /mnt/boot` listed the boot partition whole. What was left was
+      that a mount could not be seen except at its own path, which made a
+      working mount on the board look like a failed one. Both halves are
+      built, and `make test-mount-points` checks them on `disk.img` (a
+      control first: `ls /mnt` refused before anything is bound; three
+      wiring mutants caught):
+      - bare `mount` lists every mount and the path it is bound at, `/`
+        first as before (its line gains ` on /`), then each binding in the
+        shell's namespace. `FSOP_MOUNT_INFO` takes the tree in `params[0]`,
+        0 the root as every client sent before.
+      - a parent shows the mount points below it, the union in the client
+        as in Plan 9: `ninep_abi::MountPoints` names each binding's first
+        component below a directory, and `ulib::fs_list_dir`/`fs_stat`
+        and the shell's own walk and `cd` use it. `ls /` gains `mnt/`,
+        `dev/`, `net/`, `proc/` when they are bound; a name where a
+        binding ends is statted, so `/dev/cons` lists as a file. Chosen by
+        Hans on 2026-11-07 over refusing a mount point that is not an
+        existing directory (Unix's rule), which would have needed every
+        image and rig to grow the directories and could not mount on a
+        read-only root.
+      Still open from it:
+      - [ ] **The board**: `mount 0 /mnt/boot`, then bare `mount` and `ls
+            /mnt` on the Pi's card, after a `make bootstick` (the shell and
+            `/bin/ls` are both new, and `make sdcard` does not reach the
+            root's `/bin`, D5).
+      - [ ] **C programs**: `libc/src/file.c`'s `stat` of a mounts' parent
+            is still `ENOENT`. `nsresolve` would export the same walk;
+            wanted when a C program first walks a tree across a mount.
+      - [ ] **The export**: another machine listing this one through
+            `netd`'s export sees `netd`'s own namespace, not a shell's, so
+            not the mounts a shell made. Per-task namespaces make that
+            correct as it stands; noted so it is not taken for a bug.
+      This is still where the `/dev` namespace item under "Remaining
+      follow-ups" stops being speculative.
 - [x] **2. The SD card as a runtime disk. DONE 2026-11-06 (#412), moved to
       [`roadmap-completed.md`](roadmap-completed.md)**; the plan is
       [`roadmap-sd-card.md`](roadmap/roadmap-sd-card.md). Its open tail
