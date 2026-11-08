@@ -48,12 +48,10 @@ This document is the one to update first when direction changes.
 > **Released 2026-11-07: v0.24.0, one disk, and the Pi 4 on its SD card
 > alone** (#284 to #414, recorded in [`CHANGELOG.md`](CHANGELOG.md) and
 > [`roadmap-completed.md`](roadmap-completed.md)). Open from the one-disk
-> plan: its step 0 on Parallels and steps 6 and 7 (Pi item 3 below). Next
-> by the roadmap: per-user keys step 5 (item 1) or Pi item 1, more than one
-> partition in use, which on 2026-11-07 turned out to be mostly there
-> already (`mount <n> <path>`, seen on the card). Its last part, a mount
-> visible to `mount` and to `ls` of its parent, was built on QEMU the same
-> day (`make test-mount-points`) and seen on the Pi's card on 2026-11-08.
+> plan: its step 0 on Parallels and steps 6 and 7 (Pi item 3 below). Pi
+> item 1, more than one partition in use, was finished on 2026-11-08 (#422,
+> #423, seen on the card) and moved to `roadmap-completed.md`. Next by the
+> roadmap: per-user keys step 5 (item 1), or the next Pi item.
 
 > **Released 2026-10-13: v0.23.0, multi-core, and DevTools's preprocessor
 > and editor run here** (#209 to #281, recorded in [`CHANGELOG.md`](CHANGELOG.md)
@@ -738,79 +736,16 @@ keep in the pipeline before the current tests go on. Not sequenced against
 the rest of this roadmap; the dependencies between them are stated. Claims
 not yet checked on this tree are marked (predicted).
 
-- [x] **1. More than one partition in use, on the card or a stick.
-      DONE on QEMU 2026-11-07 (#422), seen on the board 2026-11-08.** Until 2026-11-07 this item said `fsd` "mounts only the
-      first one that probes", which was false when it was written on
-      2026-10-03: `mount <n> <path>` has mounted a disk's `n`-th partition
-      beside `/` since 2026-08-25 (`b2159609`, cluster Phase 0 multi-mount,
-      up to three more at once; `shell-commands.md`). Seen on the Pi's card
-      2026-11-07, on `56946121`: `mount 0 /mnt/boot` beside the ext2 root,
-      and `ls /mnt/boot` listed the boot partition whole. What was left was
-      that a mount could not be seen except at its own path, which made a
-      working mount on the board look like a failed one. Both halves are
-      built, and `make test-mount-points` checks them on `disk.img` (a
-      control first: `ls /mnt` refused before anything is bound; eight
-      wiring mutants caught):
-      - bare `mount` lists every mount and the path it is bound at, `/`
-        first as before (its line gains ` on /`), then each binding in the
-        shell's namespace. `FSOP_MOUNT_INFO` takes the tree in `params[0]`,
-        0 the root as every client sent before.
-      - a parent shows the mount points below it, the union in the client
-        as in Plan 9: `ninep_abi::MountPoints` names each binding's first
-        component below a directory, and `ulib::fs_list_dir`/`fs_stat`
-        and the shell's own walk and `cd` use it. `ls /` gains `mnt/`,
-        `dev/`, `net/`, `proc/` when they are bound, as what is bound
-        there (`/dev/cons` a file; only a `bind` of a subtree is statted,
-        so a dead remote peer is never asked), in place of any disk entry
-        of the same name, and with `/` unmounted too. Names compare by
-        bytes, as `resolve_ns` does, so on FAT32 a disk's `MNT/` and a
-        binding's `mnt/` both list (two paths in the namespace). The high
-        review of the branch found five of these; the rig also found the
-        shell's glob of `/b*` from below the root searching the cwd, fixed.
-        Chosen by
-        Hans on 2026-11-07 over refusing a mount point that is not an
-        existing directory (Unix's rule), which would have needed every
-        image and rig to grow the directories and could not mount on a
-        read-only root.
-      Still open from it:
-      - [x] **The board**, 2026-11-08, on `af89de6b` (the branch tip,
-            clean): after `mount 0 /mnt/boot`, bare `mount` printed the
-            ext2 root `on /` and `FAT32 mounted at partition LBA 2048 on
-            /mnt/boot`, `ls mnt` printed `boot/`, and `cd mnt` worked.
-            `write test something` in `/mnt` was refused, as it should be,
-            since `/mnt` is a name in the namespace and not a directory on
-            the root; from `/` the same command made `test`.
-      - [x] **The refusal's message**: built 2026-11-08 on QEMU (#423),
-            seen on the board the same day on `68c9a04c` (the merge,
-            clean): `write test hello` in `/mnt` printed `write: its
-            directory holds only mount points, so nothing can be made in
-            it`. The same run in `/mnt/boot` was refused by the SD driver,
-            as designed (the firmware partition is never written), but
-            said only `write: device I/O error`, the kernel's log line the
-            one place that says why: the same kind of message, noted
-            under item 2's open tail. That `write` in `/mnt` said `write: no such file or
-            directory`, which is true of the disk but reads as if `/mnt`
-            were missing, right after `ls` listed it. Hans, on the board:
-            the message could be more informative. It now says `write: its
-            directory holds only mount points, so nothing can be made in
-            it`: a new client-side code, `FS_ERR_MOUNTS_ONLY` (`MAX-45`,
-            the floor to `MAX-46` with `sys.h`), given for a "not found" or
-            "not a directory" when a binding lies below the path's directory
-            (`ninep_abi::mounts_parent`) and that directory's own server,
-            asked for its stat, has none. The high review of the branch
-            found the first version asking the namespace alone, so
-            `writeat /nofile` said it too (`/` has bindings below it on
-            every boot); the server's stat is the fix, with that as a
-            control. `ulib`'s `fs_write_bulk`, `fs_write_at` and
-            `fs_op_path` (mkdir, touch) and the shell's redirect give it;
-            `make test-mount-points` checks each, `cp` too, and two
-            controls. Left as they were: `NO_FS` (`/` answers it while
-            `fsd` restarts), `mv` into such a directory (its "not found"
-            may be the source's, so it would need a stat to tell) and C
-            programs (`ENOENT`, as the C `stat` item below).
+- [x] **1. More than one partition in use, on the card or a stick. DONE
+      2026-11-08 (#422, #423, seen on the board), moved to
+      [`roadmap-completed.md`](roadmap-completed.md)**: bare `mount` names
+      every mount at its path, a parent lists the mounts below it (the
+      union in the client, `ninep_abi::MountPoints`), and making something
+      in a directory of mount points only says so. Still open from it:
       - [ ] **C programs**: `libc/src/file.c`'s `stat` of a mounts' parent
-            is still `ENOENT`. `nsresolve` would export the same walk;
-            wanted when a C program first walks a tree across a mount.
+            is still `ENOENT`, and a refusal there is `ENOENT` too.
+            `nsresolve` would export the same walk; wanted when a C program
+            first walks a tree across a mount.
       - [ ] **The export**: another machine listing this one through
             `netd`'s export sees `netd`'s own namespace, not a shell's, so
             not the mounts a shell made. Per-task namespaces make that

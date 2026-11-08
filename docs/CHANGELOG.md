@@ -11,6 +11,25 @@ here actually works today, see [`architecture.md`](architecture.md) and
 
 **Not yet released.** Changes since v0.24.0, drafted as they land.
 
+**A mount can be seen from its parent, and bare `mount` names every mount
+(2026-11-08, #422, #423).** `mount <n> <path>` has mounted a second
+partition beside `/` since 2026-08-25, but on the Pi the mount looked like
+a failure: a mount is a binding in the shell's namespace, not a directory
+entry, so `ls /mnt` said "no such file or directory" and bare `mount` named
+only `/`. Now bare `mount` lists every mount and binding with the path it
+is bound at, the root's own partition by its format. A directory lists the
+mount points below it, the way Plan 9's union does it, in `ls`, globs,
+completion and `cd`, even where the disk has no such directory and with `/`
+unmounted. `FSOP_MOUNT_INFO` takes the tree to report in its first
+parameter. Making something in a directory that exists only because of
+mounts now says `its directory holds only mount points, so nothing can be
+made in it` (`FS_ERR_MOUNTS_ONLY`, a client-side code that moved the error
+floor to `MAX-46`, mirrored in `sys.h`), not "no such file or directory".
+Seen on the Pi's card on 2026-11-08, both parts. `make test-mount-points`
+grades them on `disk.img`. The same change fixed a glob of the root from
+below it (`echo /b*` from `/etc`), which had searched the current
+directory.
+
 **`make sdcard` keeps a card's boot counter (2026-11-07, #417).** D5 of
 the SD-card arc was taken the same day: `make bootstick PI=1` is how a Pi
 card is staged, and `make sdcard` stays as the way to re-stage the boot
