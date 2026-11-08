@@ -2051,8 +2051,21 @@ pub const FS_ERR_BUSY: u64 = u64::MAX - 40;
 /// stepping down with it. `MAX-44` is [`SPAWN_ERR_STAGING_BUSY`]
 /// (2026-10-11), the same kind once more: a staging call's answer to its
 /// own caller, never a 9P reply (`cpu` turns it into a text line), with
-/// the same two steps in `sys.h`.
-pub const FS_ERR_MIN: u64 = u64::MAX - 45;
+/// the same two steps in `sys.h`. `MAX-45` is [`FS_ERR_MOUNTS_ONLY`]
+/// (2026-11-08), the same kind again: a client's own reading of a
+/// server's "not found", never sent by any server.
+pub const FS_ERR_MIN: u64 = u64::MAX - 46;
+/// **Nothing can be made here: the directory is made of mount points
+/// only.** A server answered [`FS_ERR_NOT_FOUND`] or
+/// [`FS_ERR_NOT_A_DIRECTORY`] for making (or writing into) a path whose
+/// directory has a binding below it in the caller's namespace
+/// (`ninep_abi::mounts_parent`), and that directory's own server, asked for
+/// its stat, has no directory there. So it lists (as `/mnt` lists `boot/`)
+/// but is no directory on any server. Synthesized by the client (`ulib`'s
+/// `mounts_only`, behind its create and write paths, and the shell's copy
+/// behind its redirect), never on the wire. Reserved 2026-11-08, after `write test something` in `/mnt`
+/// on the Pi said "no such file or directory" right after `ls` listed it.
+pub const FS_ERR_MOUNTS_ONLY: u64 = u64::MAX - 45;
 /// The kernel's spawn staging is held by another task, mid-spawn: its first
 /// staging call claimed it and its [`SPAWN`] or end has not released it
 /// yet. Try again later; nothing of the caller's was staged. A staging call

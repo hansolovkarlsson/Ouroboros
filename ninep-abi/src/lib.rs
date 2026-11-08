@@ -1372,6 +1372,36 @@ pub fn mount_point_stat(info: &mut [u8]) {
     info[STAT_FLAGS_OFF..STAT_FLAGS_OFF + 4].copy_from_slice(&STAT_FLAG_DIR.to_le_bytes());
 }
 
+/// The directory `path` would be made in, when a binding lies below it in
+/// `ns`; `None` otherwise. Only then can a server's refusal to make `path`
+/// mean that the directory is made of mount points only (see
+/// [`MountPoints`]): listed, but no directory on any server, so nothing can
+/// be made in it. Whether it is so is the server's to say, not the
+/// namespace's: `/` has bindings below it on every boot and is a real
+/// directory. So a client asks the server for the directory's stat and
+/// answers `syscall_abi::FS_ERR_MOUNTS_ONLY` only when the server has no
+/// directory there. On the Pi on 2026-11-08, `write test something` in
+/// `/mnt`, just listed with its `boot/`, said "no such file or directory".
+/// Trailing `/`s are dropped first, and repeated ones count as one, as
+/// [`MountPoints::below`] reads them; a path with no `/` answers `None`.
+pub fn mounts_parent<'p>(ns: &[u8], path: &'p [u8]) -> Option<&'p [u8]> {
+    let mut end = path.len();
+    while end > 1 && path[end - 1] == b'/' {
+        end -= 1;
+    }
+    let path = &path[..end];
+    let slash = path.iter().rposition(|&b| b == b'/')?;
+    let mut cut = slash;
+    while cut > 0 && path[cut - 1] == b'/' {
+        cut -= 1;
+    }
+    let dir = if cut == 0 { &path[..1] } else { &path[..cut] };
+    if slash + 1 == path.len() || MountPoints::below(ns, dir).is_empty() {
+        return None; // the path is `/` itself, or nothing is bound below
+    }
+    Some(dir)
+}
+
 /// The most components [`is_within`] reads from one path: a path of at most
 /// `FS_DATA_MAX` (512) bytes, the longest an `NP_*` request carries, has at
 /// most 256 non-empty ones.
@@ -2055,5 +2085,30 @@ mod tests {
         assert_eq!(info[STAT_TIMEVALID_OFF], 0);
         assert_eq!(info[STAT_MODEVALID_OFF], 0);
         assert!(info[..STAT_FLAGS_OFF].iter().all(|&b| b == 0), "size 0");
+    }
+
+    #[test]
+    fn mounts_parent_names_the_directory_with_a_binding_below() {
+        let (ns, n) = ns_of(&PI);
+        let ns = &ns[..n];
+        // The board's case: /mnt holds boot and a.
+        assert_eq!(mounts_parent(ns, b"/mnt/test"), Some(&b"/mnt"[..]));
+        assert_eq!(mounts_parent(ns, b"/mnt/test/"), Some(&b"/mnt"[..]));
+        assert_eq!(mounts_parent(ns, b"/mnt/test//"), Some(&b"/mnt"[..]));
+        assert_eq!(mounts_parent(ns, b"/mnt//test"), Some(&b"/mnt"[..]));
+        assert_eq!(mounts_parent(ns, b"/dev/x"), Some(&b"/dev"[..]));
+        // `/` has bindings below it: named, and the server decides.
+        assert_eq!(mounts_parent(ns, b"/x"), Some(&b"/"[..]));
+        // Inside a mount, or where nothing is bound below: nothing to ask.
+        assert_eq!(mounts_parent(ns, b"/mnt/boot/nope/x"), None);
+        assert_eq!(mounts_parent(ns, b"/nope/x"), None);
+        assert_eq!(mounts_parent(ns, b"/mnt/a/x"), None);
+        // Component-aligned: /mn is not /mnt.
+        assert_eq!(mounts_parent(ns, b"/mn/x"), None);
+        // No directory to ask of, `/` itself, and nothing bound at all.
+        assert_eq!(mounts_parent(ns, b"x"), None);
+        assert_eq!(mounts_parent(ns, b"/"), None);
+        assert_eq!(mounts_parent(ns, b"//"), None);
+        assert_eq!(mounts_parent(&[], b"/mnt/test"), None);
     }
 }
