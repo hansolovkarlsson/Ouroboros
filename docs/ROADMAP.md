@@ -780,22 +780,28 @@ not yet checked on this tree are marked (predicted).
             `write test something` in `/mnt` was refused, as it should be,
             since `/mnt` is a name in the namespace and not a directory on
             the root; from `/` the same command made `test`.
-      - [x] **The refusal's message**, built 2026-11-08 on QEMU, the board
-            not yet: that `write` in `/mnt` said `write: no such file or
+      - [ ] **The refusal's message**: built 2026-11-08 on QEMU, the board
+            not yet. That `write` in `/mnt` said `write: no such file or
             directory`, which is true of the disk but reads as if `/mnt`
             were missing, right after `ls` listed it. Hans, on the board:
             the message could be more informative. It now says `write: its
             directory holds only mount points, so nothing can be made in
             it`: a new client-side code, `FS_ERR_MOUNTS_ONLY` (`MAX-45`,
-            the floor to `MAX-46` with `sys.h`), given for a server's "not
-            found" when the path's directory has a binding below it
-            (`ninep_abi::made_among_mounts`). `ulib`'s `fs_write_bulk`,
-            `fs_write_at` and `fs_op_path` (mkdir, touch) and the shell's
-            redirect give it; `make test-mount-points` checks each of these,
-            `cp` too, and a control, two mutants caught. Left as they were: `mv`
-            into such a directory (its "not found" may be the source's, so
-            it would need a stat to tell) and C programs (`ENOENT`, as the
-            C `stat` item below).
+            the floor to `MAX-46` with `sys.h`), given for a "not found" or
+            "not a directory" when a binding lies below the path's directory
+            (`ninep_abi::mounts_parent`) and that directory's own server,
+            asked for its stat, has none. The high review of the branch
+            found the first version asking the namespace alone, so
+            `writeat /nofile` said it too (`/` has bindings below it on
+            every boot); the server's stat is the fix, with that as a
+            control. `ulib`'s `fs_write_bulk`, `fs_write_at` and
+            `fs_op_path` (mkdir, touch) and the shell's redirect give it;
+            `make test-mount-points` checks each, `cp` too, and two
+            controls. Left as they were: `NO_FS` (`/` answers it while
+            `fsd` restarts), `mv` into such a directory (its "not found"
+            may be the source's, so it would need a stat to tell) and C
+            programs (`ENOENT`, as the C `stat` item below). Done when the
+            board shows the message.
       - [ ] **C programs**: `libc/src/file.c`'s `stat` of a mounts' parent
             is still `ENOENT`. `nsresolve` would export the same walk;
             wanted when a C program first walks a tree across a mount.

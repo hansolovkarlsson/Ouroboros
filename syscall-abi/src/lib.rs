@@ -2056,12 +2056,14 @@ pub const FS_ERR_BUSY: u64 = u64::MAX - 40;
 /// server's "not found", never sent by any server.
 pub const FS_ERR_MIN: u64 = u64::MAX - 46;
 /// **Nothing can be made here: the directory is made of mount points
-/// only.** A server answered [`FS_ERR_NOT_FOUND`] for making a file or
-/// directory, and the path's directory has a binding below it in the
-/// caller's namespace (`ninep_abi::made_among_mounts`), so it lists (as
-/// `/mnt` lists `boot/`) but is no directory on any server. Synthesized by
-/// the client (`ulib`'s create paths and the shell's redirect), never on
-/// the wire. Reserved 2026-11-08, after `write test something` in `/mnt`
+/// only.** A server answered [`FS_ERR_NOT_FOUND`] or
+/// [`FS_ERR_NOT_A_DIRECTORY`] for making (or writing into) a path whose
+/// directory has a binding below it in the caller's namespace
+/// (`ninep_abi::mounts_parent`), and that directory's own server, asked for
+/// its stat, has no directory there. So it lists (as `/mnt` lists `boot/`)
+/// but is no directory on any server. Synthesized by the client (`ulib`'s
+/// `mounts_only`, behind its create and write paths, and the shell's copy
+/// behind its redirect), never on the wire. Reserved 2026-11-08, after `write test something` in `/mnt`
 /// on the Pi said "no such file or directory" right after `ls` listed it.
 pub const FS_ERR_MOUNTS_ONLY: u64 = u64::MAX - 45;
 /// The kernel's spawn staging is held by another task, mid-spawn: its first

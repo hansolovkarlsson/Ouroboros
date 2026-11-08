@@ -1649,26 +1649,41 @@ fn finish_redirect(captured: &[u8], overflowed: bool, target: &str, append: bool
     };
     match result {
         NO_FS => print_no_fs(),
-        code if code >= FS_ERR_MIN => print_fs_error("redirect", made_among_mounts(path, code)),
+        code if code >= FS_ERR_MIN => print_fs_error("redirect", mounts_only(path, code)),
         _ => {}
     }
 }
 
-/// `code` from making `path`, a "not found" turned into
-/// `FS_ERR_MOUNTS_ONLY` when `path`'s directory exists only as the parent of
-/// mount points. As `ulib`'s `made_among_mounts` (the shell keeps its own fs
-/// layer).
-fn made_among_mounts(path: &str, code: u64) -> u64 {
-    if code != FS_ERR_NOT_FOUND {
+/// `code` from making `path`, turned into `FS_ERR_MOUNTS_ONLY` when the
+/// path's directory is made of mount points only: a binding lies below it
+/// (`ninep_abi::mounts_parent`) and its own server has no directory there,
+/// which is how a listing came to show it. Only a "not found" or "not a
+/// directory" is turned, the two answers a server gives for a directory it
+/// lacks (as `mounts_stand_in`); not `NO_FS`, which `/` also answers while
+/// `fsd` restarts. Every other code, and any path whose directory the server
+/// has, comes back as it was: `writeat /nofile` is still "no such file".
+///
+/// As `ulib`'s `mounts_only`: the shell keeps its own fs layer.
+fn mounts_only(path: &str, code: u64) -> u64 {
+    if code != syscall_abi::FS_ERR_NOT_FOUND && code != syscall_abi::FS_ERR_NOT_A_DIRECTORY {
         return code;
     }
     let mut ns = [0u8; syscall_abi::NS_MAX as usize];
     let nlen = get_ns(&mut ns);
-    if ninep_abi::made_among_mounts(&ns[..nlen], path.as_bytes()) {
-        syscall_abi::FS_ERR_MOUNTS_ONLY
+    let Some(dir) = ninep_abi::mounts_parent(&ns[..nlen], path.as_bytes()) else { return code };
+    let Ok(dir) = core::str::from_utf8(dir) else { return code };
+    // The directory's own server, not the union: `fs_stat` would answer the
+    // mount point's stand-in record.
+    let mut fsp = [0u8; FSP_MAX];
+    let r = mount_resolve(dir, &mut fsp);
+    let mut info = [0u8; ninep_abi::STAT_INFO_LEN];
+    let st = np_dispatch(&r, ninep_abi::NP_STAT, [r.len as u64, 0, 0, 0], &fsp[..r.len], &[], &mut info);
+    let lacks_dir = if st >= FS_ERR_MIN {
+        st == syscall_abi::FS_ERR_NOT_FOUND || st == syscall_abi::FS_ERR_NOT_A_DIRECTORY
     } else {
-        code
-    }
+        u32::from_le_bytes([info[ninep_abi::STAT_FLAGS_OFF], info[ninep_abi::STAT_FLAGS_OFF + 1], info[ninep_abi::STAT_FLAGS_OFF + 2], info[ninep_abi::STAT_FLAGS_OFF + 3]]) & ninep_abi::STAT_FLAG_DIR == 0
+    };
+    if lacks_dir { syscall_abi::FS_ERR_MOUNTS_ONLY } else { code }
 }
 
 /// Write `data` to `path` starting at `start_offset`, chunked at
