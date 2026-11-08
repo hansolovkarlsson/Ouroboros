@@ -315,7 +315,7 @@ modes are enforced; on FAT32 it fails and says why:
 ```sh
 make image-ext2
 IMAGE=build/espext2.img NO_BUILD=1 scripts/run-guest.sh -- \
-    python3 scripts/np9p_client.py localhost 5640 keyed-gate /man/grep user
+    python3 scripts/np9p_client.py localhost 5640 keyed-gate /man/grep guest
 # expected: 13 PASS, "keyed-gate: 0 check(s) failed", guest alive, 0 restarts
 ```
 

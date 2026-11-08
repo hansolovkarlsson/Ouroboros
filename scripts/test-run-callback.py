@@ -25,6 +25,12 @@ to the host). That gives every bound a check:
 - the squash: a run as root to the UNFLAGGED machine, whose callback claims
   root, refused (a run never lifts the squash); to the flagged one, served.
 
+And, since netd reads `/etc/cluster/users` per claim rather than once at
+boot, the registry edited live from the guest's root shell: a broken line for
+`user` refuses `user` even with a valid credential, while `guest`, whose line
+is not the broken one, is still served; with the file removed, nobody is
+registered and an uncredentialed `user` is served.
+
 The guest's registry is the dev one, which lists `user`: without rule 2 every
 callback claiming `user` would be refused for carrying no credential, which is
 what makes the served checks evidence of the rule.
@@ -73,11 +79,15 @@ def check(what, ok, detail):
     print(f"[{'PASS' if ok else 'FAIL'}] {what}: {detail}", flush=True)
 
 
-def read(path, seed, user):
+def read(path, seed, user, password=None):
     """One signed read of `path` at the guest's export, as `user`, signed by
-    `seed`: (status, data), or (None, why) for a dead connection, which is
-    never a refusal."""
-    frame, nonce = c.signed_frame(c.build_frame(c.NP_READ, 0, [len(path), 0, 4096], path), seed, user=user)
+    `seed`, credentialed with `password` if given: (status, data), or (None,
+    why) for a dead connection, which is never a refusal."""
+    np_msg = c.build_frame(c.NP_READ, 0, [len(path), 0, 4096], path)
+    if password is None:
+        frame, nonce = c.signed_frame(np_msg, seed, user=user)
+    else:
+        frame, nonce = c.credentialed_frame(np_msg, seed, password, user=user)
     try:
         with socket.create_connection(("localhost", EXPORT), timeout=15) as s:
             s.sendall(frame)
@@ -202,6 +212,26 @@ def root_run(flagged):
     return during, lambda: None
 
 
+def registry_checks(g, prompt):
+    """Edit the guest's registry from its root shell and see each claim met
+    as the edit says, at the very next request."""
+    if not g.run([("", "echo user not-a-key > /etc/cluster/users"), (prompt, "")]):
+        check("the registry edited", False, "timed out")
+        return
+    st, data = read(PRIVATE, INTRUDER, b"user", password=b"user")
+    check("the registry: `user` with a valid credential, its line broken, refused",
+          st == c.FS_ERR_AUTH, shown(st, data))
+    st, data = read(b"/HELLO.TXT", INTRUDER, b"guest")
+    check("the registry: `guest`, the broken line not its own, still served",
+          st is not None and c.served(st), shown(st, data))
+    if not g.run([("", "rm /etc/cluster/users"), (prompt, "")]):
+        check("the registry removed", False, "timed out")
+        return
+    st, data = read(PRIVATE, INTRUDER, b"user")
+    check("the registry: removed, nobody is registered, `user` uncredentialed served",
+          st is not None and c.served(st) and data == PRIVATE_TEXT, shown(st, data))
+
+
 def cpu(g, port_addr, prompt, what):
     """Type one `cpu` at the guest and wait for its prompt to come back."""
     if not g.run([("", f"cpu {port_addr} id"), (prompt, "")]):
@@ -234,6 +264,8 @@ def main():
                 ready.wait(10)
                 cpu(g, f"{addr}:{port}", prompt, f"{user} to {addr}")
                 t.join(timeout=90)
+            if user == "root":
+                registry_checks(g, prompt)
             g.run([("", "exit")])
         alive = g.proc.poll() is None
         check("the guest is alive at the end", alive, "alive" if alive else "died")

@@ -1674,10 +1674,10 @@ def do_fid_gate(host, port, path, data_path):
         st_open, _ = d.op(open_r)
         if not served(st_open):
             raise RuntimeError(f"open -> {status_name(st_open)}")
-        st_u, _ = d.op(fstat(st_open), user=b"user")
+        st_u, _ = d.op(fstat(st_open), user=b"guest")
         st_r, _ = d.op(fstat(st_open))
         ok = st_u == FS_ERR_PERM and st_r == STAT_INFO_LEN
-        detail = f"fid {st_open} opened as root: fstat as user -> {status_name(st_u)}, then as root -> {status_name(st_r) if not served(st_r) else 'served'}"
+        detail = f"fid {st_open} opened as root: fstat as guest -> {status_name(st_u)}, then as root -> {status_name(st_r) if not served(st_r) else 'served'}"
     except (RuntimeError, OSError) as exc:
         ok, detail = False, f"{exc}"
     check("another user on the same session is refused the fid, and the owner still has it", ok, detail)
@@ -1687,11 +1687,11 @@ def do_fid_gate(host, port, path, data_path):
     try:
         if d is None or not served(st_open):
             raise RuntimeError("no fid to probe")
-        st_c, _ = d.op(clunk(st_open), user=b"user")
+        st_c, _ = d.op(clunk(st_open), user=b"guest")
         st_r2, _ = d.op(fstat(st_open))
         st_own, _ = d.op(clunk(st_open))
         ok = st_c == FS_ERR_PERM and st_r2 == STAT_INFO_LEN and st_own == 0
-        detail = f"clunk as user -> {status_name(st_c)}, owner's fstat -> {status_name(st_r2) if not served(st_r2) else 'served'}, owner's clunk -> {status_name(st_own) if not served(st_own) else '0'}"
+        detail = f"clunk as guest -> {status_name(st_c)}, owner's fstat -> {status_name(st_r2) if not served(st_r2) else 'served'}, owner's clunk -> {status_name(st_own) if not served(st_own) else '0'}"
     except (RuntimeError, OSError) as exc:
         ok, detail = False, f"{exc}"
     check("another user's clunk is refused and the owner still holds the fid, then closes it", ok, detail)
@@ -1716,10 +1716,10 @@ def do_fid_gate(host, port, path, data_path):
         if not served(st_open):
             raise RuntimeError(f"open {data_path} -> {status_name(st_open)}")
         data_fid = st_open
-        st_u, _ = d.op(pread(data_fid, 0, NP_REMOTE_CHUNK), user=b"user")
+        st_u, _ = d.op(pread(data_fid, 0, NP_REMOTE_CHUNK), user=b"guest")
         st_r, chunk_r = d.op(pread(data_fid, 0, NP_REMOTE_CHUNK))
         ok = st_u == FS_ERR_PERM and served(st_r) and st_r == len(chunk_r) and st_r > 0
-        detail = (f"fid {data_fid} opened as root: pread as user -> {status_name(st_u)}, "
+        detail = (f"fid {data_fid} opened as root: pread as guest -> {status_name(st_u)}, "
                   f"then as root -> {status_name(st_r) if not served(st_r) else f'{st_r} bytes'}")
     except (RuntimeError, OSError) as exc:
         ok, detail = False, f"{exc}"
@@ -2527,7 +2527,11 @@ def main():
         # A file LONGER than NP_REMOTE_CHUNK, and a non-root account the
         # image's /etc/passwd has (the ext2 image's is `user`).
         data_path = args[3] if len(args) > 3 else "/man/grep"
-        low_user = args[4] if len(args) > 4 else "user"
+        # `guest`, not `user`: since user-keys step 7 the dev registry makes an
+        # uncredentialed claim of `user` FS_ERR_AUTH before the session's user
+        # is ever consulted, and check 5 needs a claim that is SERVED as a
+        # non-root user. `guest` is the unregistered one.
+        low_user = args[4] if len(args) > 4 else "guest"
         sys.exit(min(do_keyed_gate(host, port, data_path, low_user), 125))
 
     if op == "path-gate":
