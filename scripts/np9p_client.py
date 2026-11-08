@@ -36,6 +36,8 @@ e.g. after `make run-image-9p`:
     python3 scripts/np9p_client.py localhost 5640 readdir / --sign=nobody      # -> refused (unauthorized key)
     python3 scripts/np9p_client.py localhost 5640 readdir / --legacy-mac       # -> refused (retired format)
     python3 scripts/np9p_client.py localhost 5640 read /etc/shadow --user user # -> refused (permissions)
+    python3 scripts/np9p_client.py localhost 5641 stat /HELLO.TXT --user user --password=user  # AUTHNP05, a user credential
+    python3 scripts/np9p_client.py localhost 5641 stat /HELLO.TXT --user user --password=user --cred-misbehave=other-export  # -> refused
     python3 scripts/np9p_client.py localhost 5640 noverb /                     # -> FS_ERR_NO_SUCH_VERB (NP_PWRITE)
     python3 scripts/np9p_client.py localhost 5640 noverb / 0x10c               # -> served: NP_STAT (the control)
 """
@@ -357,6 +359,116 @@ def signed_frame(np_msg, seed, user=None):
     return struct.pack("<I", len(body)) + body, nonce
 
 
+# USER CREDENTIALS (step 6 of docs/roadmap/roadmap-user-keys.md), transcribed
+# from ninep-abi's normative block, "User credentials". The key derivation is
+# written HERE, from the spec, and not borrowed from mkclusterkeys.py: this
+# client is the third implementation of it (Risk 5), and only an independent
+# one can disagree with the other two.
+#
+# `--password=<pw>` makes every request AUTHNP05, credentialed for `--user` in
+# `--realm` (the public dev realm by default).
+DEV_REALM = b"ouroboros-dev"
+REALM = DEV_REALM
+PASSWORD = None
+_USER_SEEDS = {}
+
+
+def user_seed(name, password, realm=None):
+    """A user's Ed25519 seed: the first 32 bytes of PBKDF2-HMAC-SHA-512 over
+    SIG_DOMAIN_USERKEY || len(realm):1 || realm || len(name):1 || name, at
+    USERKEY_ITERATIONS. Memoized, since one is about 0.2s here."""
+    realm = REALM if realm is None else realm
+    if not 1 <= len(realm) <= REALM_MAX or not all(0x21 <= c <= 0x7e for c in realm):
+        sys.exit(f"realm {realm!r} breaks the realm rule (1 to {REALM_MAX} bytes, 0x21 to 0x7e)")
+    if not 1 <= len(name) <= NP_NAME_LEN:
+        sys.exit(f"user name {name!r} cannot carry a user key (1 to {NP_NAME_LEN} bytes)")
+    k = (name, password, realm)
+    if k not in _USER_SEEDS:
+        salt = SIG_DOMAIN_USERKEY + bytes([len(realm)]) + realm + bytes([len(name)]) + name
+        _USER_SEEDS[k] = hashlib.pbkdf2_hmac("sha512", password, salt, USERKEY_ITERATIONS, 64)[:32]
+    return _USER_SEEDS[k]
+
+
+# `--cred-misbehave=<mode>`: send a credential a correct export must REFUSE,
+# each mode wrong in exactly ONE way, so each is a check that the export binds
+# that one thing (the server's self-test runs every one, and step 8 aims them
+# at netd's export). The plan's four (Decision 8, step 6) are wrong-key,
+# other-name, other-machine and other-nonce/other-message (a credential lifted
+# from another request); other-export is the review's amendment; the last four
+# are the block's and the machine signature's own rules.
+#   wrong-key      the right bytes, signed with the key of another password
+#   other-name     the signed input names `guest`, the header the real user
+#   other-machine  the signed input carries another dev machine's key
+#   other-export   the signed input carries another export's key
+#   other-nonce    the signed input carries another nonce (lifted)
+#   other-message  the signed input hashes another message (lifted)
+#   unknown-kind   kind 9, a kind no implementation knows
+#   bad-length     kind 1 with a 63-byte credential
+#   old-tag        the MACHINE signature made under AUTHNP03's tag
+#   relabel        an honest AUTHNP05 frame with its magic changed to AUTHNP03
+CRED_MODES = ("wrong-key", "other-name", "other-machine", "other-export", "other-nonce",
+              "other-message", "unknown-kind", "bad-length", "old-tag", "relabel")
+CRED_MISBEHAVE = None
+
+
+def user_sig_input(nonce, name, caller, export, msg_hash):
+    """SIG_DOMAIN_USER || nonce || name || caller's key || export's key ||
+    SHA-512(NP message), the bytes a kind-1 credential signs."""
+    prefix = nonce + name + caller + export + msg_hash
+    assert len(prefix) == NP_USER_SIG_PREFIX_LEN, "user signature input is not NP_USER_SIG_PREFIX_LEN"
+    return SIG_DOMAIN_USER + prefix
+
+
+def credentialed_frame(np_msg, seed, password, user=None, mode=None):
+    """[u32 len][magic:8][nonce:16][name:32][pubkey:32][sig:64]
+    [kind:2][clen:2][credential][np]
+
+    The credential is the USER's signature (a key derived from `password`)
+    over user_sig_input, where the export's key is the key expected for the
+    host dialled (`peer_key()`, the one the reply is checked against). The
+    machine signature covers SIG_DOMAIN_REQUEST_CRED || nonce || name || the
+    block || np. `mode` is one of CRED_MODES, or None for an honest frame."""
+    ed = load_ed_reference()
+    user = USER if user is None else user
+    if len(user) > NP_NAME_LEN:
+        sys.exit(f"user name too long (max {NP_NAME_LEN})")
+    nonce = os.urandom(NP_NONCE_LEN)
+    name = user.ljust(NP_NAME_LEN, b"\0")
+    public = ed.public_key(seed)
+    export = peer_key()
+    in_nonce, in_name, in_caller, in_export, in_msg = nonce, name, public, export, np_msg
+    if mode in ("other-machine", "other-export"):
+        # A dev machine that is neither end, so the field is wrong and still a
+        # real cluster member's key.
+        other = next(k for k in (ed.public_key(dev_seed(l)) for l in DEV_PEER_LABELS.values())
+                     if k not in (public, export))
+        if mode == "other-machine":
+            in_caller = other
+        else:
+            in_export = other
+    elif mode == "other-name":
+        in_name = b"guest".ljust(NP_NAME_LEN, b"\0")
+    elif mode == "other-nonce":
+        in_nonce = os.urandom(NP_NONCE_LEN)
+    elif mode == "other-message":
+        in_msg = np_msg + b"\0"
+    useed = user_seed(user, password + b"-wrong" if mode == "wrong-key" else password)
+    cred = ed.sign(useed, user_sig_input(in_nonce, in_name, in_caller, in_export,
+                                         hashlib.sha512(in_msg).digest()))
+    assert len(cred) == NP_CRED_USER_SIG_LEN, "credential is not NP_CRED_USER_SIG_LEN bytes"
+    kind = 9 if mode == "unknown-kind" else NP_CRED_KIND_USER_SIG
+    if mode == "bad-length":
+        cred = cred[:NP_CRED_USER_SIG_LEN - 1]
+    block = struct.pack("<HH", kind, len(cred)) + cred
+    assert len(block) - len(cred) == NP_CRED_HDR_LEN
+    rest = block + np_msg
+    tag = SIG_DOMAIN_REQUEST if mode == "old-tag" else SIG_DOMAIN_REQUEST_CRED
+    sig = ed.sign(seed, tag + nonce + name + rest)
+    magic = NP_AUTH_MAGIC_SIGNED if mode == "relabel" else NP_AUTH_MAGIC_USER
+    body = struct.pack("<Q", magic) + nonce + name + public + sig + rest
+    return struct.pack("<I", len(body)) + body, nonce
+
+
 def legacy_mac_frame(np_msg, key, user=None):
     """Build a frame in the RETIRED shared-key MAC format (`AUTHNP02`).
 
@@ -452,7 +564,7 @@ def recv_reply(sock, nonce, peer_key=None):
     return status, np[8:]
 
 
-def request_frame(np_msg, user=None, seed=None):
+def request_frame(np_msg, user=None, seed=None, password=None, cred_mode=None):
     """The frame EVERY request goes out as: signed, or - when `--legacy-mac`
     asked for the negative control - the retired MAC format the export must
     refuse. One builder, because `Session.op` grew its own send path with only
@@ -462,7 +574,13 @@ def request_frame(np_msg, user=None, seed=None):
         return legacy_mac_frame(np_msg, LEGACY_MAC_KEY, user=user)
     # `seed`: sign as a DIFFERENT machine, for the one check that must reach
     # the export's unauthorized-key refusal on a session.
-    return signed_frame(np_msg, SIGN_KEY if seed is None else seed, user=user)
+    seed = SIGN_KEY if seed is None else seed
+    # A password, given here or by `--password`, makes the request AUTHNP05.
+    password = PASSWORD if password is None else password
+    if password is not None:
+        return credentialed_frame(np_msg, seed, password, user=user,
+                                  mode=CRED_MISBEHAVE if cred_mode is None else cred_mode)
+    return signed_frame(np_msg, seed, user=user)
 
 
 def one_op(host, port, np_msg, timeout=10):
@@ -565,14 +683,15 @@ class Session:
         self.keys = None
         self.seq = 0
 
-    def op(self, np_msg, user=None, seed=None):
+    def op(self, np_msg, user=None, seed=None, password=None, cred_mode=None):
         if self.keys is not None:
             return self._keyed_op(np_msg)
-        frame, nonce = request_frame(np_msg, user=user, seed=seed)
+        frame, nonce = request_frame(np_msg, user=user, seed=seed, password=password,
+                                     cred_mode=cred_mode)
         self.sock.sendall(frame)
         return recv_reply(self.sock, nonce, peer_key=peer_key())
 
-    def open(self, keyed=False, user=None):
+    def open(self, keyed=False, user=None, password=None):
         """Send NP_SESSION. With `keyed`, offer an ephemeral X25519 key as its
         payload: an export that keys answers with its own in the SIGNED reply,
         and every later op is AUTHNP04; one that does not answers an empty
@@ -580,10 +699,11 @@ class Session:
         answer came in a reply whose signature was checked, so an attacker
         cannot strip the offer or swap a key."""
         if not keyed:
-            return self.op(build_frame(NP_SESSION, 0, [], b""), user=user)
+            return self.op(build_frame(NP_SESSION, 0, [], b""), user=user, password=password)
         secret = client_ephemeral(SIGN_KEY)
         eph_client = x25519_ref.public(secret)
-        frame, nonce = request_frame(build_frame(NP_SESSION, 0, [], eph_client), user=user)
+        frame, nonce = request_frame(build_frame(NP_SESSION, 0, [], eph_client), user=user,
+                                     password=password)
         self.sock.sendall(frame)
         status, data = recv_reply(self.sock, nonce, peer_key=peer_key())
         if status != 0 or not data:
@@ -2206,6 +2326,27 @@ def main():
             PEER_LABEL = a[len("--peer-label="):]
             del args[i]
             break
+    # `--password=<pw>`: credential every request for `--user` (AUTHNP05), with
+    # a key derived from it in `--realm=<realm>` (the dev realm by default).
+    # `--cred-misbehave=<mode>`: one of CRED_MODES, a credential a correct
+    # export refuses. Written `=` form only, for the reason `--sign=` is.
+    global PASSWORD, REALM, CRED_MISBEHAVE
+    for flag in ("--password=", "--realm=", "--cred-misbehave="):
+        for i, a in enumerate(list(args)):
+            if a.startswith(flag):
+                v = a[len(flag):]
+                if flag == "--password=":
+                    PASSWORD = v.encode()
+                elif flag == "--realm=":
+                    REALM = v.encode()
+                else:
+                    if v not in CRED_MODES:
+                        sys.exit(f"--cred-misbehave={v}: one of {', '.join(CRED_MODES)}")
+                    CRED_MISBEHAVE = v
+                del args[i]
+                break
+    if CRED_MISBEHAVE is not None and PASSWORD is None:
+        sys.exit("--cred-misbehave needs --password: it misbehaves in a credential")
     if "--user" in args:
         global USER
         i = args.index("--user")

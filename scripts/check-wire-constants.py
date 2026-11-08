@@ -104,10 +104,19 @@ def _resolve_all(sums, ors, out):
 def _resolve_ors(ors, out):
     """Evaluate `A | B | C` masks (or a lone `A`) of names already in `out`, so a mask is
     compared as the bits it holds (OPEN_FLAGS, OPEN_DIR_REFUSED: the medium
-    review of #370). A name that never resolves leaves the mask out."""
+    review of #370). A name that never resolves leaves the mask out.
+
+    A LONE name is an alias and takes its value whatever its type: the
+    client's `REALM = DEV_REALM` is bytes, and OR-ing it as an integer
+    crashed the whole check (user-keys step 6). A mask of several names is
+    resolved only when every one is an integer."""
     for name, expr in ors:
         terms = [t.strip() for t in expr.split("|")]
-        if name not in out and all(t in out for t in terms):
+        if name in out or not all(t in out for t in terms):
+            continue
+        if len(terms) == 1:
+            out[name] = out[terms[0]]
+        elif all(isinstance(out[t], int) for t in terms):
             value = 0
             for t in terms:
                 value |= out[t]

@@ -111,6 +111,16 @@ def dev_user_keys():
     return [(n, edref.public_key(user_seed(n, pw))) for n, pw, _ in dev_users()]
 
 
+def dev_registry(names=None):
+    """The dev registry's lines, `<name> <pubkey-hex>`, for `names` (default
+    REGISTERED). The ONE source of the dev `/etc/cluster/users`: this script
+    stages it, and np9p_server.py serves the dev cluster from it, so the host
+    peer and a guest built from this tree require a credential of the same
+    users without a second copy to drift."""
+    names = REGISTERED if names is None else set(names)
+    return [f"{name} {pub.hex()}" for name, pub in dev_user_keys() if name in names]
+
+
 def seed_from(label):
     """A fixed 32-byte seed for a dev identity, from a printable label."""
     return hashlib.sha256(label.encode()).digest()
@@ -216,9 +226,8 @@ def main():
             f.write("# per user: <name> <public-key-hex>. A user not listed is served as\n")
             f.write("# today, on the machine's word. DEV KEYS: derived from the public dev\n")
             f.write("# passwords and realm. Not for real use.\n")
-            for name, pub in dev_user_keys():
-                if name in REGISTERED:
-                    f.write(f"{name} {pub.hex()}\n")
+            for line in dev_registry():
+                f.write(line + "\n")
 
     print(f"mkclusterkeys: {out_dir} identity={me} peers={len(keys)}"
           f"{' (RANDOM keys)' if random_keys else ' (fixed dev keys)'}")
