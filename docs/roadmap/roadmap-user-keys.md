@@ -871,6 +871,42 @@ before the change). Steps 7 and 8 belong in one release.
   instead of `park_run` patching the park afterwards; the boot warning logs
   `USERS_MAX` and says what it means.
 
+**The medium review** (`/code-review medium`, nine findings, seven acted on):
+
+- *A session was bound to a run it did not need.* `admit` asked rule 2
+  before the registry, so a session that rule 3 or 4 would have served (an
+  unregistered user's, or one opened with a credential that verifies) was
+  bound to a run in flight and torn down when the run ended. Rules 3 and 4
+  are asked first now; the set of claims served is the same, since rule 2
+  serves whatever the registry says, but only a claim nothing but the run
+  lets in is bound. The normative block says so. `test-run-callback` opens a
+  keyed session as `user` with `user`'s credential during the run, and it
+  must still serve after; with rule 2 first, it is closed. (The first cut of
+  that check opened the session as `guest`, which no run as `user` can bind,
+  so the control passed it; it was the check that was wrong.)
+- *A bound session outlived its run until its next frame.* Its fids stayed
+  open as the run's user until a frame arrived or the idle reap. `run_ended`
+  now RSTs and drops it (releasing its fids) in the loop pass after
+  `service_remotes` frees the run's park. The rig checks the guest closes it
+  unprompted, before the host sends anything; with the sweep removed, it is
+  still open after 5 s.
+- *Smaller:* rule 1 asks the flag before reading the registry; `np_offset`
+  bounds its peek by the declared length; `test-no-identity` leaves no
+  image behind on a failure and says when it needs e2fsprogs; the gate's
+  stages 0 and 1 are marked as describing trees before step 7.
+- *Not acted on:* two runs as one user to one machine binding a session to
+  the wrong one cannot happen, since `park_run` refuses a second run while
+  one is in flight (`run_in_flight` says so now). And the per-claim read's
+  cost, at least two `fsd` reads a claim on top of the `/etc/passwd` scan, is
+  the price of the stack measured above; a cache would have to answer when
+  it goes stale, the question `find_account` declines for the same reason.
+
+Every control re-run on the final tree, each caught: the four of the gate
+and seven of `test-run-callback` (rule 2 removed, any machine, no close at
+all, no sweep, rule 2 first, rule 2 above the squash, a broken line read as
+unregistered). The gate, `keyed-gate`, `test-run-callback` (18),
+`test-no-identity` and `test-async-rmount` pass.
+
 ## Decisions
 
 Scored on the project's standing order: **stable, safe, and not blocking
