@@ -212,9 +212,16 @@ fn main() -> ! {
 /// invisible, and invisible is the half worth fixing.
 const AUTHORIZED_MAX: usize = clusterkeys::AUTHORIZED_MAX;
 
-/// Bytes of `/etc/cluster/users` netd keeps: clusterkeys' `USERS_MAX`, the
-/// bound its `lookup_user` judges wholeness by. Beside `authorized` in `Auth`
-/// for the same reason, and measured on the same stack.
+/// Bytes of `/etc/cluster/users` netd reads: clusterkeys' `USERS_MAX`, the
+/// bound its `lookup_user` judges wholeness by.
+///
+/// READ PER CLAIM, NOT HELD. It sat in `Auth` beside `authorized` first, and
+/// the whole-run low-water mark (user-keys step 7) showed that resident KB on
+/// `serve`'s frame cost every path, the client's park path during
+/// `test-async-rmount` included: 3,088 bytes of headroom on `main`, 1,936
+/// with it. Read in [`registry_lookup`]'s own frame, it is transient and on
+/// the export path alone, and an edit takes effect at the next claim, as an
+/// edit of `/etc/passwd` already does.
 const USERS_MAX: usize = clusterkeys::USERS_MAX;
 
 /// The cluster authentication config, loaded once from disk at boot (see
@@ -241,16 +248,6 @@ struct Auth {
     /// unaffected.
     authorized: [u8; AUTHORIZED_MAX],
     authorized_len: usize,
-    /// `/etc/cluster/users` (Decision 9 of docs/roadmap/roadmap-user-keys.md):
-    /// the users whose claims need their own credential here. An absent file
-    /// registers nobody, which is today's behaviour for every user.
-    users: [u8; USERS_MAX],
-    users_len: usize,
-    /// Whether `users` holds the WHOLE file. A file that did not fit, or one
-    /// that could not be read, is not whole, and clusterkeys then answers
-    /// "broken" for every name: no non-root claim is served on the machine's
-    /// word because its line might lie past the cut.
-    users_whole: bool,
 }
 
 /// A machine identity: the expanded signing key, and the seed it came from.
@@ -298,11 +295,6 @@ impl Auth {
     /// The peers this machine accepts, as `clusterkeys` expects them.
     fn authorized(&self) -> &[u8] {
         &self.authorized[..self.authorized_len]
-    }
-
-    /// What the registry says of a claimed name (NUL-trimmed).
-    fn lookup_user(&self, name: &[u8]) -> clusterkeys::UserLookup {
-        clusterkeys::lookup_user(&self.users[..self.users_len], name, self.users_whole)
     }
 
 }
@@ -398,9 +390,6 @@ fn load_auth() -> Auth {
         signing: None,
         authorized: [0u8; AUTHORIZED_MAX],
         authorized_len: 0,
-        users: [0u8; USERS_MAX],
-        users_len: 0,
-        users_whole: false,
     };
     // ONE retry budget across all three reads, not one each.
     //
@@ -547,45 +536,21 @@ fn load_auth() -> Auth {
         log_dec(u64::MAX - n);
         log(b" below the error ceiling); no peer can be verified by signature\r\n");
     }
-    // The users registry, read like `authorized` and sharing its budget. Only
-    // two outcomes leave it usable: the whole file read, or a definitive "no
-    // such file" (nobody registered). Anything else, a read error, a file past
-    // USERS_MAX, a probe that could not say, leaves it NOT WHOLE, which
-    // refuses every claim of a non-root user (clusterkeys reads it as broken),
-    // because serving one on the machine's word could switch attestation off
-    // for exactly the user whose line was not read. Said at boot, once, as the
-    // other two reads are.
-    let mut u;
-    loop {
-        u = read_file_chunk(As::FirstParty, USERS_PATH, 0, 0, &mut auth.users);
-        if transient_fs_failure(u) && budget > 0 {
-            budget -= 1;
-            syscall(syscall_abi::NET_WAIT, 40);
-            continue;
+    // The users registry: read per claim (`registry_lookup`), and once here
+    // only to SAY its state at boot, as the two reads above do. Not retried:
+    // a claim reads it again, so a disk mounting late costs nothing here.
+    {
+        let mut buf = [0u8; USERS_MAX + 1];
+        match read_registry(&mut buf) {
+            Registry::Absent => {}
+            Registry::Read(n, true) => {
+                log(b"netd: cluster identity: users registry, ");
+                log_dec(n as u64);
+                log(b" bytes\r\n");
+            }
+            Registry::Read(_, false) => log(b"netd: WARNING /etc/cluster/users is larger than netd can read (1024 bytes);\r\n      every claim of a non-root user will be REFUSED\r\n"),
+            Registry::Unreadable => log(b"netd: WARNING could not read /etc/cluster/users now; a claim of a non-root user is refused while that lasts\r\n"),
         }
-        break;
-    }
-    if u < syscall_abi::FS_ERR_MIN {
-        auth.users_len = (u as usize).min(USERS_MAX);
-        let mut probe = [0u8; 1];
-        let more = read_file_chunk(As::FirstParty, USERS_PATH, 0, USERS_MAX as u64, &mut probe);
-        // ZERO, and nothing else, is "nothing past the cut": an error from
-        // the probe is not knowing, and not knowing is not whole.
-        auth.users_whole = more == 0;
-        if !auth.users_whole {
-            log(b"netd: WARNING /etc/cluster/users is larger than netd can read (");
-            log_dec(USERS_MAX as u64);
-            log(b" bytes), or its end could not be read;\r\n      every claim of a non-root user will be REFUSED\r\n");
-        }
-        log(b"netd: cluster identity: users registry, ");
-        log_dec(auth.users_len as u64);
-        log(b" bytes\r\n");
-    } else if u == syscall_abi::FS_ERR_NOT_FOUND {
-        auth.users_whole = true;
-    } else {
-        log(b"netd: WARNING could not read /etc/cluster/users (error ");
-        log_dec(u64::MAX - u);
-        log(b" below the error ceiling); every claim of a non-root user will be REFUSED\r\n");
     }
     // REPORTED PER DIRECTION: they have different preconditions, and a machine
     // can be able to do one and not the other. Naming WHICH half is missing
@@ -6937,12 +6902,13 @@ fn admit(auth: &Auth, a: &Authenticated, runs: &[Option<RemoteConn>; MAX_REMOTE]
         _ => false,
     };
     if p.uid == 0 || p.gid == 0 {
-        return if a.peer_root || attested(auth.lookup_user(name)) { Ok((p, None)) } else { Err(Refused::RootSquash) };
+        // The flag first, so a flagged peer's root claim costs no read.
+        return if a.peer_root || attested(registry_lookup(name)) { Ok((p, None)) } else { Err(Refused::RootSquash) };
     }
     if let Some(run) = run_in_flight(runs, &a.caller_key, &a.name) {
         return Ok((p, Some(run)));
     }
-    match auth.lookup_user(name) {
+    match registry_lookup(name) {
         clusterkeys::UserLookup::Broken => Err(Refused::Registry),
         clusterkeys::UserLookup::Unregistered => Ok((p, None)),
         look @ clusterkeys::UserLookup::Registered(_) => match a.cred {
@@ -6951,6 +6917,52 @@ fn admit(auth: &Auth, a: &Authenticated, runs: &[Option<RemoteConn>; MAX_REMOTE]
             _ => Err(Refused::BadCredential),
         },
     }
+}
+
+/// What `/etc/cluster/users` says of `name`, read NOW (see `USERS_MAX` for
+/// why it is not held), by clusterkeys' `lookup_user`: an absent file
+/// registers nobody; a file that cannot be read, or is past `USERS_MAX`, is
+/// broken for every name, never "unregistered". Its own frame, so the read
+/// buffer is transient and below `admit` alone.
+#[inline(never)]
+fn registry_lookup(name: &[u8]) -> clusterkeys::UserLookup {
+    let mut buf = [0u8; USERS_MAX + 1];
+    match read_registry(&mut buf) {
+        Registry::Absent => clusterkeys::UserLookup::Unregistered,
+        Registry::Read(n, whole) => clusterkeys::lookup_user(&buf[..n], name, whole),
+        Registry::Unreadable => clusterkeys::UserLookup::Broken,
+    }
+}
+
+/// One read of the registry, as clusterkeys needs it judged.
+enum Registry {
+    /// `FS_ERR_NOT_FOUND`: no file, so nobody is registered.
+    Absent,
+    /// `n` bytes read, and whether that is the whole file.
+    Read(usize, bool),
+    /// Any other failure. Not knowing is not "nobody registered".
+    Unreadable,
+}
+
+/// Read `/etc/cluster/users` into `buf` (`USERS_MAX + 1` bytes). WHOLE only
+/// when the read stopped short of the buffer AND a read at that offset
+/// answers 0: fsd may deliver fewer bytes than asked without being at the
+/// end (`read_file_chunk`), and a probe that fails is not knowing.
+fn read_registry(buf: &mut [u8; USERS_MAX + 1]) -> Registry {
+    let r = read_file_chunk(As::FirstParty, USERS_PATH, 0, 0, buf);
+    if r == syscall_abi::FS_ERR_NOT_FOUND {
+        return Registry::Absent;
+    }
+    if r >= syscall_abi::FS_ERR_MIN {
+        return Registry::Unreadable;
+    }
+    let n = (r as usize).min(USERS_MAX);
+    if r as usize > USERS_MAX {
+        return Registry::Read(n, false);
+    }
+    let mut probe = [0u8; 1];
+    let more = read_file_chunk(As::FirstParty, USERS_PATH, 0, n as u64, &mut probe);
+    Registry::Read(n, more == 0)
 }
 
 /// Whether `sig` is `key`'s kind-1 signature over this request:
