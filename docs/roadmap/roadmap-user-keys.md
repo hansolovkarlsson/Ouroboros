@@ -727,6 +727,119 @@ Two more controls, both caught: `other-machine` and `other-export` built on a
 different member than `other_member` names (no witness), and a flagged root
 claim reading its credential (the pinned case refused).
 
+### Step 7's results (2026-11-08): the export, in `netd`
+
+**What went in.** `netd`'s export verifies both signed formats, each under its
+own tag (`request_sig_domain`), and reads an `AUTHNP05` frame's block with
+ninep-abi's `credentialed`, on the frame cut to its declared length. Every
+claim, a single request or a keyed session's opener, is decided by one
+function, `admit`, by the normative block's rules in order. `map_user` is now
+`find_account`, which only looks the name up, and `admit` is its one caller.
+That keeps what the required parameter used to guarantee: no inbound path can
+resolve a name without the decision. The refusals each say their cause to a
+`cpu` caller, and each is a signed `FS_ERR_AUTH`.
+
+**Decision 7's anchor.** `park_run` resolves the address it dials through
+`authorized` (as `handle_rmount` does for a reply's key) and records that
+line's key in the run's park. A claim of the run's user signed by that key is
+served while the park lives, which is until the run ends. A run to an address
+no line names has no anchor and lets nothing in. A keyed session opened under
+the rule carries the run's tag (its caller and call) and is closed at its
+first frame after the run ends, before that frame is verified. The plan said
+"when the run ends"; closing at the next frame serves nothing the plan's
+wording would not, and needs no hook from the run's end into the export's
+connections. **The narrowing the step 5 review left for this step is not
+taken:** a `cpu` child's `/host` reads arrive on fresh connections from the
+executing machine's `netd`, not on the run's own, so nothing but a token could
+tell them from that machine's other claims of the same user, and Decision 7
+rejected a token. The rule is as planned: the run, the pair of machines, the
+user.
+
+**The registry is read per claim, not held.** It went into `Auth` first, a
+`USERS_MAX` buffer beside `authorized`, and the stack measurement below found
+that kilobyte on every path. So `registry_lookup` reads `/etc/cluster/users`
+whole into a buffer in its own frame, below `admit` alone, and judges it by
+clusterkeys' `lookup_user`: an absent file registers nobody; a file that
+cannot be read, or that is past `USERS_MAX` (one read short of the buffer, and
+a probe at that offset answering 0), is broken for every name. An edit
+takes effect at the next claim, as an edit of `/etc/passwd` already does. The
+boot still reads it once, only to say its state. `for_each_line`, the
+streaming reader `/etc/passwd` uses, was not reused: it skips a line too long
+for its buffer, and a skipped line naming a registered user would read as
+unregistered, which fails open.
+
+**The stack**, the whole-run low-water mark (the probe of `8429d38f`, painted
+at `serve`'s start), headroom in bytes, the same three rigs on each tree:
+
+| rig | `main` | `Auth` holding the registry | read per claim |
+|---|---|---|---|
+| `test-async-rmount` (the client's park path, the deepest) | 3,088 | 1,936 | 2,976 |
+| `test-run-callback` | 3,424 | 2,272 | 3,312 |
+| `impersonate-gate 7` (the export, both verifies) | 5,840 | 4,688 | 5,728 |
+
+Every column moves by a constant: the cost is resident state, not depth.
+Holding the registry cost 1,152 bytes on every path; read per claim, the step
+costs 112, the run tag each `MAX_CONNS` keyed session carries. The export's
+second verify and the transient registry buffer reach no deeper than the
+export's existing peak. (With the probe in, two of `test-async-rmount`'s six
+checks fail on both trees, timing ones; without it the rig passes six of six
+on this branch.)
+
+**The checks.**
+
+- `impersonate-gate 7`, on the ext2 image, every row as the table's
+  right-hand column: rows 1 to 3 refused `FS_ERR_AUTH` exactly (an
+  `FS_ERR_PERM` would mean the claim was served and a mode stopped it), rows 4
+  and 5 served. Row 4 is a credential made by `np9p_client.py`, the
+  independent implementation, verified by `netd`. The stage also aims each of
+  step 6's ten misbehaving credentials at `netd`, every one refused, and pins
+  rule 1 both ways: a flagged peer is served root with a wrong credential, and
+  an unflagged one is refused with root's own while root is unregistered. Its
+  two controls that need a served non-root claim claim `guest`, unregistered,
+  at every stage.
+- `make test-run-callback`, new: one boot of the ext2 image as the
+  dispatcher, the host playing the executing machine at two dev addresses,
+  `host` at 10.0.2.2 (flagged) and `intruder` at 10.0.2.20 by a guestfwd (not
+  flagged). Fifteen checks: the run's user served to the run's machine during
+  the run, one-shot and on a keyed session; another machine refused (the
+  machine bound); after the run, the one-shot refused and the session closed,
+  its log line naming the run (the time bound); a run as root to the unflagged
+  machine, its callback claiming root, refused, and to the flagged one served
+  (a run never lifts the squash); and the registry edited from the guest's
+  root shell, a broken `user` line refusing `user`'s valid credential while
+  `guest` is served, and the file removed serving `user` uncredentialed.
+- `fid-gate` and `keyed-gate` claim `guest` for their different-user checks:
+  an uncredentialed claim of the registered `user` is now refused before a
+  fid's owner or a session's user is consulted, so the checks would have
+  failed for a reason that proves nothing. Both pass.
+- `make test-async-rmount` passes.
+
+**The controls**, each one mutation of `netd` on the committed tree, rebuilt
+and booted, each failing named checks:
+
+- skip the credential check: rows 2 and 3 served, and every signature mode;
+- read any kind as kind 1 (`netd` and ninep-abi's reader both): the kind-9
+  credential served;
+- one tag for both formats: `old-tag` served and row 4 refused;
+- the flag reading the credential: the pinned rule-1 case refused;
+- rule 2 removed: the callback and the keyed session refused;
+- any machine while a run is in flight: `intruder`'s claim served;
+- a session outliving its run: served after the run ended;
+- rule 2 above the squash: root's callback to the unflagged machine served;
+- a broken registry line read as unregistered: `user` served past it.
+
+**Not covered by a control:** the time bound for a one-shot claim. "In flight"
+is the park's own slot, freed when the run ends, so no one-line mutation can
+"remember" a finished run; the check is there, its failure is not shown. And a
+registry that cannot be read (as against absent) is not reachable from a rig.
+
+**What this step changes for the dev cluster until step 8.** The dev registry
+lists `user`, and `netd`'s client sends no credential until step 8, so a
+`user` logged in on one guest is refused at the other guest's export: the
+hand-run two-node `user` recipes in `testing-qemu.md` refuse between the two
+steps. No automated rig claims a non-root user at a guest export (counted
+before the change). Steps 7 and 8 belong in one release.
+
 ## Decisions
 
 Scored on the project's standing order: **stable, safe, and not blocking
