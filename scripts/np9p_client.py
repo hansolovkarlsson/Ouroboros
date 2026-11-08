@@ -340,14 +340,23 @@ def signed_frame(np_msg, seed, user=None):
     key travels in the frame the way SSH offers one; the exporter decides whether
     that key is authorized BEFORE it verifies anything.
     """
-    ed = load_ed_reference()
+    nonce, name, public = header_fields(seed, user)
+    return signed_body(NP_AUTH_MAGIC_SIGNED, SIG_DOMAIN_REQUEST, seed, nonce, name, public, np_msg)
+
+
+def header_fields(seed, user=None):
+    """(nonce, NUL-padded name, public key): the fields both signed formats
+    open with, made one way."""
     user = USER if user is None else user
     if len(user) > NP_NAME_LEN:
         sys.exit(f"user name too long (max {NP_NAME_LEN})")
-    nonce = os.urandom(NP_NONCE_LEN)
-    name = user.ljust(NP_NAME_LEN, b"\0")
-    public = ed.public_key(seed)
-    sig = ed.sign(seed, SIG_DOMAIN_REQUEST + nonce + name + np_msg)
+    return os.urandom(NP_NONCE_LEN), user.ljust(NP_NAME_LEN, b"\0"), load_ed_reference().public_key(seed)
+
+
+def signed_body(magic, tag, seed, nonce, name, public, rest):
+    """[u32 len][magic:8][nonce:16][name:32][pubkey:32][sig:64][rest], the
+    signature `seed`'s over tag || nonce || name || rest; and the nonce."""
+    sig = load_ed_reference().sign(seed, tag + nonce + name + rest)
     # ASSERTED, NOT ASSUMED. `NP_PUBKEY_LEN` and `NP_SIG_LEN` are two of the
     # names check-wire-constants.py compares against ninep-abi, and until these
     # lines existed this function built its header by concatenation and consulted
@@ -355,7 +364,7 @@ def signed_frame(np_msg, seed, user=None):
     # no code reads, turning the check green over an unchanged frame.
     assert len(public) == NP_PUBKEY_LEN, "public key is not NP_PUBKEY_LEN bytes"
     assert len(sig) == NP_SIG_LEN, "signature is not NP_SIG_LEN bytes"
-    body = struct.pack("<Q", NP_AUTH_MAGIC_SIGNED) + nonce + name + public + sig + np_msg
+    body = struct.pack("<Q", magic) + nonce + name + public + sig + rest
     return struct.pack("<I", len(body)) + body, nonce
 
 
@@ -409,6 +418,17 @@ def user_seed(name, password, realm=None):
 CRED_MODES = ("wrong-key", "other-name", "other-machine", "other-export", "other-nonce",
               "other-message", "unknown-kind", "bad-length", "old-tag", "relabel")
 CRED_MISBEHAVE = None
+# The default of every `password` and `cred_mode` parameter: "as the flags
+# say". None means none: an uncredentialed request, an honest credential.
+# Were None the default, no caller could ask for either once a flag was set.
+FROM_FLAGS = object()
+
+
+def other_nonce(nonce):
+    """The nonce an `other-nonce` credential signs: the frame's own with every
+    bit flipped. Derived, not random, so the server's self-test can recompute
+    it and show the credential wrong in that one field (its witness)."""
+    return bytes(b ^ 0xFF for b in nonce)
 
 
 def user_sig_input(nonce, name, caller, export, msg_hash):
@@ -430,11 +450,7 @@ def credentialed_frame(np_msg, seed, password, user=None, mode=None):
     block || np. `mode` is one of CRED_MODES, or None for an honest frame."""
     ed = load_ed_reference()
     user = USER if user is None else user
-    if len(user) > NP_NAME_LEN:
-        sys.exit(f"user name too long (max {NP_NAME_LEN})")
-    nonce = os.urandom(NP_NONCE_LEN)
-    name = user.ljust(NP_NAME_LEN, b"\0")
-    public = ed.public_key(seed)
+    nonce, name, public = header_fields(seed, user)
     export = peer_key()
     in_nonce, in_name, in_caller, in_export, in_msg = nonce, name, public, export, np_msg
     if mode in ("other-machine", "other-export"):
@@ -449,7 +465,7 @@ def credentialed_frame(np_msg, seed, password, user=None, mode=None):
     elif mode == "other-name":
         in_name = b"guest".ljust(NP_NAME_LEN, b"\0")
     elif mode == "other-nonce":
-        in_nonce = os.urandom(NP_NONCE_LEN)
+        in_nonce = other_nonce(nonce)
     elif mode == "other-message":
         in_msg = np_msg + b"\0"
     useed = user_seed(user, password + b"-wrong" if mode == "wrong-key" else password)
@@ -461,12 +477,9 @@ def credentialed_frame(np_msg, seed, password, user=None, mode=None):
         cred = cred[:NP_CRED_USER_SIG_LEN - 1]
     block = struct.pack("<HH", kind, len(cred)) + cred
     assert len(block) - len(cred) == NP_CRED_HDR_LEN
-    rest = block + np_msg
     tag = SIG_DOMAIN_REQUEST if mode == "old-tag" else SIG_DOMAIN_REQUEST_CRED
-    sig = ed.sign(seed, tag + nonce + name + rest)
     magic = NP_AUTH_MAGIC_SIGNED if mode == "relabel" else NP_AUTH_MAGIC_USER
-    body = struct.pack("<Q", magic) + nonce + name + public + sig + rest
-    return struct.pack("<I", len(body)) + body, nonce
+    return signed_body(magic, tag, seed, nonce, name, public, block + np_msg)
 
 
 def legacy_mac_frame(np_msg, key, user=None):
@@ -564,7 +577,7 @@ def recv_reply(sock, nonce, peer_key=None):
     return status, np[8:]
 
 
-def request_frame(np_msg, user=None, seed=None, password=None, cred_mode=None):
+def request_frame(np_msg, user=None, seed=None, password=FROM_FLAGS, cred_mode=FROM_FLAGS):
     """The frame EVERY request goes out as: signed, or - when `--legacy-mac`
     asked for the negative control - the retired MAC format the export must
     refuse. One builder, because `Session.op` grew its own send path with only
@@ -576,10 +589,10 @@ def request_frame(np_msg, user=None, seed=None, password=None, cred_mode=None):
     # the export's unauthorized-key refusal on a session.
     seed = SIGN_KEY if seed is None else seed
     # A password, given here or by `--password`, makes the request AUTHNP05.
-    password = PASSWORD if password is None else password
+    password = PASSWORD if password is FROM_FLAGS else password
     if password is not None:
         return credentialed_frame(np_msg, seed, password, user=user,
-                                  mode=CRED_MISBEHAVE if cred_mode is None else cred_mode)
+                                  mode=CRED_MISBEHAVE if cred_mode is FROM_FLAGS else cred_mode)
     return signed_frame(np_msg, seed, user=user)
 
 
@@ -683,7 +696,7 @@ class Session:
         self.keys = None
         self.seq = 0
 
-    def op(self, np_msg, user=None, seed=None, password=None, cred_mode=None):
+    def op(self, np_msg, user=None, seed=None, password=FROM_FLAGS, cred_mode=FROM_FLAGS):
         if self.keys is not None:
             return self._keyed_op(np_msg)
         frame, nonce = request_frame(np_msg, user=user, seed=seed, password=password,
@@ -691,7 +704,7 @@ class Session:
         self.sock.sendall(frame)
         return recv_reply(self.sock, nonce, peer_key=peer_key())
 
-    def open(self, keyed=False, user=None, password=None):
+    def open(self, keyed=False, user=None, password=FROM_FLAGS):
         """Send NP_SESSION. With `keyed`, offer an ephemeral X25519 key as its
         payload: an export that keys answers with its own in the SIGNED reply,
         and every later op is AUTHNP04; one that does not answers an empty

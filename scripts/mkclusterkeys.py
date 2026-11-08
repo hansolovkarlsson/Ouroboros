@@ -118,7 +118,10 @@ def dev_registry(names=None):
     peer and a guest built from this tree require a credential of the same
     users without a second copy to drift."""
     names = REGISTERED if names is None else set(names)
-    return [f"{name} {pub.hex()}" for name, pub in dev_user_keys() if name in names]
+    # Filtered BEFORE deriving: a key costs a 210,000-round PBKDF2 and a
+    # scalar multiplication, paid only for the names asked for.
+    return [f"{n} {edref.public_key(user_seed(n, pw)).hex()}"
+            for n, pw, _ in dev_users() if n in names]
 
 
 def seed_from(label):

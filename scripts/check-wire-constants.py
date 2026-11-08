@@ -579,6 +579,26 @@ def check_userkey_count(problems):
             problems.append(f"{script}: {name} is {g.group(1)}, ninep-abi's USERKEY_ITERATIONS is {want}")
 
 
+def check_users_max(problems):
+    """The registry's size cap, clusterkeys' `USERS_MAX`, against the copy in
+    np9p_server.py. The server's `lookup_user` reads a longer registry as
+    broken for every name, as clusterkeys does; with a different cap the two
+    exports would serve and refuse the same file differently, and nothing
+    would fail until step 8 compared them."""
+    src = open(os.path.join(ROOT, "clusterkeys", "src", "users.rs")).read()
+    m = re.search(r"pub const USERS_MAX: usize = ([0-9_]+);", src)
+    if not m:
+        problems.append("clusterkeys/src/users.rs: USERS_MAX not found (renamed?)")
+        return
+    want = int(m.group(1).replace("_", ""))
+    text = open(os.path.join(HERE, "np9p_server.py")).read()
+    g = re.search(r"^USERS_MAX = ([0-9_]+)$", text, re.M)
+    if not g:
+        problems.append("np9p_server.py: USERS_MAX not found (renamed?)")
+    elif int(g.group(1).replace("_", "")) != want:
+        problems.append(f"np9p_server.py: USERS_MAX is {g.group(1)}, clusterkeys' is {want}")
+
+
 def check_dev_peer_labels(problems):
     """BOTH peers' short-name maps must match `mkclusterkeys.py`'s dev peers.
 
@@ -811,6 +831,7 @@ def main():
     check_dev_peer_labels(problems)
     check_dev_user_keys(problems)
     check_userkey_count(problems)
+    check_users_max(problems)
     check_fid_gate_budget(problems, rust)
     syscalls = check_syscall_numbers(problems, rust, origin, peers["libc/include/sys.h"])
 
