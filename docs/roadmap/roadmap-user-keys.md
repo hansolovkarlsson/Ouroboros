@@ -698,6 +698,35 @@ one is caught by its reason. Python's whitespace, the `USERS_MAX` rule
 removed, and loose hex are each caught by the registry cases. A server
 `USERS_MAX` of 2048 is caught by the checker. The self-test takes 51 s.
 
+**The medium review** (`/code-review medium`, nine findings, eight acted on):
+
+- *`run` ignored `--password`.* `run_op` built its frame with `signed_frame`,
+  so an `NP_RUN`, the request Decision 7 depends on, always went out as
+  `AUTHNP03`. It now uses `request_frame`, like every other request.
+- *The usage examples could not work.* They dialled the host server without
+  `--peer=host`, so the credential signed node-a's key as the export. The
+  examples were then run against a live server: the honest one is served, and
+  `other-export` is refused because its credential does not verify.
+- *`Session.open` had no `cred_mode`.* It now has one, as `op` does.
+- *`impersonate-gate` ignored `--password`.* Its rows are claims without a
+  credential by design, so it now refuses the flag instead of ignoring it.
+- *Rule 1 with a credential that is present and wrong.* ninep-abi says a
+  flagged peer is served root "without a credential" and says nothing about a
+  wrong one being sent. This server serves it without reading it, and a new
+  self-test case pins that reading so step 7's netd is held to it. **Whether
+  the spec should say so, or refuse instead, is Hans's call.**
+- *Cost and fail-open cleanups:*
+  - `other_member` is one memoized choice of the "other" machine. The client
+    builds with it and the witness checks that exact key.
+  - The witness memoizes the user keys.
+  - The self-test builds its registries from the one already derived.
+  - `dev_registry("user")` now raises. `set()` would have made it an empty
+    registry, which serves `user` without a credential.
+
+Two more controls, both caught: `other-machine` and `other-export` built on a
+different member than `other_member` names (no witness), and a flagged root
+claim reading its credential (the pinned case refused).
+
 ## Decisions
 
 Scored on the project's standing order: **stable, safe, and not blocking
