@@ -840,6 +840,37 @@ hand-run two-node `user` recipes in `testing-qemu.md` refuse between the two
 steps. No automated rig claims a non-root user at a guest export (counted
 before the change). Steps 7 and 8 belong in one release.
 
+**The high review** (`/code-review high`, nine findings, all acted on):
+
+- *A node with no identity dispatched `AUTHNP05`.* The pre-gate that
+  refuses a signed request on a node with peers and no `/etc/cluster/id`
+  tested `AUTHNP03`'s magic alone. An `AUTHNP05` frame was authenticated,
+  admitted and dispatched: on such a node `cpu ... id` ran and printed
+  `uid=1001(guest)`, and a write would have landed, before the unsignable
+  reply was refused. The gate now asks `request_sig_domain`, which names
+  every signed format. **`make test-no-identity`**, new, boots a copy of the
+  ext2 image with the identity removed (debugfs) and sends `cpu id` in both
+  formats: both denied. With the old gate put back, `AUTHNP05` runs `id`.
+- *A `cpu` caller refused for its block got a framed reply.* `np_offset`
+  used `credentialed` to find the verb, which refuses exactly the blocks
+  `Refused::Credential` is for, so the denial was framed, and a `cpu` caller
+  prints that as binary. It peeks past the block by the block's own `clen`
+  now. Stage 7 checks both block modes answered as text; with the old
+  `np_offset`, both are answered with the binary frame.
+- *A registry read that may clear was answered `FS_ERR_AUTH`.* A transient
+  failure (no disk yet, `fsd` restarting) is `Refused::RegistryUnreadable`,
+  answered `NO_FS` like an unreadable `/etc/passwd`. No rig reaches it.
+- *The callback rig could pass with its checks unrun:* a stand-in thread
+  that died recorded nothing. A thread's exception is now a failure, and the
+  rig requires all 15 checks. Its after-run checks waited a fixed 3 s; they
+  follow the guest's prompt now, which comes back only once `netd` has
+  answered the run's caller, where the run's park is freed.
+- *Smaller:* `read_registry` reads on until 0 or a full buffer, so a short
+  read from `fsd` is not "not whole"; an uncredentialed root claim from an
+  unflagged peer reads no registry; `park_remote` takes the run's anchor
+  instead of `park_run` patching the park afterwards; the boot warning logs
+  `USERS_MAX` and says what it means.
+
 ## Decisions
 
 Scored on the project's standing order: **stable, safe, and not blocking

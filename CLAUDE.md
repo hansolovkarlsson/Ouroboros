@@ -220,6 +220,7 @@ make test-async-rmount        # three driven QEMU boots against host-run 9P peer
 make test-call-interrupt      # an interrupted call's late answer goes nowhere
 make test-held-keys           # five driven QEMU boots of the held user keys
 make test-run-callback        # a `cpu` run's /host callbacks served while the run is in flight, and only then
+make test-no-identity         # an export with no /etc/cluster/id runs nothing, in either signed format
 make test-heap                # the user heap on a booted image
 make test-malloc              # picolibc's malloc on a booted image
 make test-fpsimd              # a task's FP/SIMD registers across the kernel

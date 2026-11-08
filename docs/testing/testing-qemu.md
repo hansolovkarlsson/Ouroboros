@@ -351,14 +351,15 @@ none. Rows 1 to 3 must be refused `FS_ERR_AUTH` exactly (an `FS_ERR_PERM` would
 mean the claim was served and a mode stopped it), rows 4 and 5 served. It then
 aims each of `np9p_client.py`'s ten misbehaving credentials at `netd`, each
 refused, and checks rule 1 both ways (a flagged peer served root with a wrong
-credential; an unflagged one refused with root's own, root unregistered). It
+credential; an unflagged one refused with root's own, root unregistered), and
+that a `cpu` run refused for an unreadable credential block is told so as text. It
 needs the **ext2 image**; against FAT32 the mode control fails and says why:
 
 ```sh
 make image-ext2
 IMAGE=build/espext2.img NO_BUILD=1 scripts/run-guest.sh -- \
     python3 scripts/np9p_client.py localhost 5640 impersonate-gate 7
-# expected: 21 PASS, "impersonate-gate: 0 check(s) failed"
+# expected: 23 PASS, "impersonate-gate: 0 check(s) failed"
 ```
 
 **Since step 7, and until step 8, a registered user crosses no guest
