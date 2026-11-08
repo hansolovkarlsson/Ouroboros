@@ -750,7 +750,7 @@ not yet checked on this tree are marked (predicted).
       that a mount could not be seen except at its own path, which made a
       working mount on the board look like a failed one. Both halves are
       built, and `make test-mount-points` checks them on `disk.img` (a
-      control first: `ls /mnt` refused before anything is bound; three
+      control first: `ls /mnt` refused before anything is bound; eight
       wiring mutants caught):
       - bare `mount` lists every mount and the path it is bound at, `/`
         first as before (its line gains ` on /`), then each binding in the
@@ -760,8 +760,15 @@ not yet checked on this tree are marked (predicted).
         as in Plan 9: `ninep_abi::MountPoints` names each binding's first
         component below a directory, and `ulib::fs_list_dir`/`fs_stat`
         and the shell's own walk and `cd` use it. `ls /` gains `mnt/`,
-        `dev/`, `net/`, `proc/` when they are bound; a name where a
-        binding ends is statted, so `/dev/cons` lists as a file. Chosen by
+        `dev/`, `net/`, `proc/` when they are bound, as what is bound
+        there (`/dev/cons` a file; only a `bind` of a subtree is statted,
+        so a dead remote peer is never asked), in place of any disk entry
+        of the same name, and with `/` unmounted too. Names compare by
+        bytes, as `resolve_ns` does, so on FAT32 a disk's `MNT/` and a
+        binding's `mnt/` both list (two paths in the namespace). The high
+        review of the branch found five of these; the rig also found the
+        shell's glob of `/b*` from below the root searching the cwd, fixed.
+        Chosen by
         Hans on 2026-11-07 over refusing a mount point that is not an
         existing directory (Unix's rule), which would have needed every
         image and rig to grow the directories and could not mount on a
