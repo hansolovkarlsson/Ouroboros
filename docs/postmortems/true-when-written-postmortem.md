@@ -16,7 +16,7 @@ on a premise that held for one of its paths, claims a move left behind,
 and a heuristic that one platform had already falsified and a vendor's
 update falsified loudly, and a recommendation taken from records the
 board's newest log had overtaken, and a prediction from a store the board
-never had.*
+never had, and a roadmap item asking for what was already built.*
 
 The previous day's retrospective
 ([`blind-instruments-postmortem.md`](blind-instruments-postmortem.md)) had the
@@ -1279,6 +1279,20 @@ least `BOOT_ID_NONE - 1` into no counter, and `BOOT_ID_NONE` is `u64::MAX`,
 so the add cannot wrap. It is the 2026-10-12 shape, a defect written down
 without reading the code that would have to produce it. It cost nothing,
 because the fix began by reading the function.
+
+Later that day, Pi item 1 on `ROADMAP.md` turned out to ask for what was
+already built. It said `fsd` "mounts only the first one that probes" and
+wanted a second partition mountable beside the root, but `mount <n>
+<path>` had done that since 2026-08-25. The item was written on
+2026-10-03, so it was false on arrival, and for a month it stood as one of
+the two candidates for the next arc. When the board ran the check, the
+claim nearly got a second life. A mount that succeeds prints nothing, bare
+`mount` lists only `/`, and `ls /mnt` says `no such file or directory`, so
+the first try on the card looked like the item's own premise confirmed.
+`ls /mnt/boot` settled it. **A roadmap item is a claim about the code that
+nobody runs; read the reference for the feature before planning it, and
+when a check seems to confirm a claim, look at the thing itself and not at
+the tools that report on it.**
 
 ## What actually worked
 
