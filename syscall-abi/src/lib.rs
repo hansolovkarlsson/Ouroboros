@@ -1598,9 +1598,13 @@ pub const FSOP_WRITE_BULK: u64 = 12;
 /// file of any size, one chunk at a time.
 pub const FSOP_WRITE_AT: u64 = 13;
 
-/// no params -> status `0` with an inline info block when a filesystem is
-/// mounted, or [`NO_FS`] when nothing is (a bare status reply then). The
-/// query behind `mount` with no argument (disk-tools arc, milestone 1).
+/// params: `(tree,)` -> status `0` with an inline info block when a
+/// filesystem is mounted in that tree, or [`NO_FS`] when nothing is (a bare
+/// status reply then; also for a tree past the table). Tree `0` is the root
+/// mount, which a client sending no params asks about; the others are the
+/// trees a namespace binds (`mount <n> <path>`, `/proc`). The query behind
+/// `mount` with no argument (disk-tools arc, milestone 1; every tree since
+/// 2026-11-07, tree 0 only before).
 /// On success the reply payload (from [`FS_REPLY_PAYLOAD`]) is:
 /// `partition_lba: u64` (the volume's first sector), then
 /// `capacity_sectors: u64` (the whole disk's 512-byte-sector count), then

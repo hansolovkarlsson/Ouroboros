@@ -2024,12 +2024,17 @@ fn cmd_cd(arg: &str, cwd: &mut [u8; CWD_SIZE], cwd_len: &mut usize) {
     // a page refuses an entry too long for its window, so the 8-byte buffer
     // this used would have called a directory with a long first name an
     // error.
+    //
+    // A path the server has no directory for is still one to stand in when a
+    // mount lies below it (`cd /mnt` after `mount 0 /mnt/boot`), as `ls`
+    // lists it: `ninep_abi::MountPoints`, the one walk both use.
     let mut scratch = [0u8; LIST_SIZE];
     match fs_list_dir_page(path, 0, &mut scratch) {
         NO_FS => {
             print_no_fs();
             return;
         }
+        syscall_abi::FS_ERR_NOT_FOUND if has_mount_below(path) => {}
         code if code >= FS_ERR_MIN => {
             print_fs_error("cd", code);
             return;
@@ -3357,7 +3362,15 @@ fn fs_list_dir_page(path: &str, start: u64, buf: &mut [u8]) -> u64 {
 /// `FS_ERR_*` code). One page's buffer at a time, so a directory of any size
 /// is seen whole: until 2026-10-16 the shell read one reply, and a glob or a
 /// completion in a directory longer than it missed names with no sign.
+///
+/// The mount points below `dir` in this shell's namespace come after the
+/// server's entries, as directories, the union `ulib::fs_list_dir` lists
+/// (`ninep_abi::MountPoints`); a `dir` the server lacks, with a mount below
+/// it, gives those names alone.
 fn for_each_dir_entry(dir: &str, mut f: impl FnMut(&[u8], bool)) -> u64 {
+    let mut ns = [0u8; syscall_abi::NS_MAX as usize];
+    let nlen = get_ns(&mut ns);
+    let mut points = ninep_abi::MountPoints::below(&ns[..nlen], dir.as_bytes());
     let mut page = [0u8; ninep_abi::READDIR_PAGE];
     let mut spare = [0u8; ninep_abi::READDIR_PAGE];
     let fetch = |start: u64, page: &mut [u8]| {
@@ -3367,13 +3380,51 @@ fn for_each_dir_entry(dir: &str, mut f: impl FnMut(&[u8], bool)) -> u64 {
     // ninep_abi::readdir_pages is the one paging loop; a server from before
     // paging (an older peer's export) ends the listing at page one, as it
     // did before paging, and a broken page ends it where it broke.
-    match ninep_abi::readdir_pages(&mut page, &mut spare, fetch, |line| {
+    let status = match ninep_abi::readdir_pages(&mut page, &mut spare, fetch, |line| {
+        points.note(line);
         for_each_entry(line, &mut f);
         true
     }) {
         Ok(_) => 0,
-        Err(code) => code,
+        Err(syscall_abi::FS_ERR_NOT_FOUND) if !points.is_empty() => 0,
+        Err(code) => return code,
+    };
+    points.for_each_unseen(|name, ends_here| f(name, !ends_here || child_is_dir(dir, name)));
+    status
+}
+
+/// Whether `dir`'s entry `name` is a directory, by an `NP_STAT` of the joined
+/// path: what a mount point is when a binding ends there. `false` when the
+/// stat fails. As `ulib`'s `child_is_dir` (the shell keeps its own fs layer).
+fn child_is_dir(dir: &str, name: &[u8]) -> bool {
+    let d = dir.as_bytes();
+    let d = if d.last() == Some(&b'/') { &d[..d.len() - 1] } else { d };
+    let mut joined = [0u8; PATH_SIZE];
+    let len = d.len() + 1 + name.len();
+    if len > joined.len() {
+        return false;
     }
+    joined[..d.len()].copy_from_slice(d);
+    joined[d.len()] = b'/';
+    joined[d.len() + 1..len].copy_from_slice(name);
+    let Ok(path) = core::str::from_utf8(&joined[..len]) else { return false };
+    let mut fsp = [0u8; FSP_MAX];
+    let r = mount_resolve(path, &mut fsp);
+    let mut info = [0u8; ninep_abi::STAT_INFO_LEN];
+    let status = np_dispatch(&r, ninep_abi::NP_STAT, [r.len as u64, 0, 0, 0], &fsp[..r.len], &[], &mut info);
+    if status >= FS_ERR_MIN {
+        return false;
+    }
+    let off = ninep_abi::STAT_FLAGS_OFF;
+    u32::from_le_bytes([info[off], info[off + 1], info[off + 2], info[off + 3]]) & ninep_abi::STAT_FLAG_DIR != 0
+}
+
+/// Whether a mount lies below `path` in this shell's namespace, so a `path`
+/// the server lacks is still the mounts' parent (`ninep_abi::MountPoints`).
+fn has_mount_below(path: &str) -> bool {
+    let mut ns = [0u8; syscall_abi::NS_MAX as usize];
+    let nlen = get_ns(&mut ns);
+    !ninep_abi::MountPoints::below(&ns[..nlen], path.as_bytes()).is_empty()
 }
 
 /// Reads `path`'s contents into `buf`. Returns the file's *real* size
@@ -4173,7 +4224,6 @@ fn cmd_mount_at(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut Outp
     }
 }
 
-/// `mount` with no argument: ask the filesystem server what's mounted
 /// Whether the mounted filesystem cannot model permissions - anything but ext2
 /// today. Used by `login` to say out loud that the account database is
 /// unprotected here (FAT32/exFAT record no mode, so `fsd` lets every access
@@ -4211,25 +4261,29 @@ pub(crate) fn mounted_fs_unprotected() -> bool {
     flags & syscall_abi::MOUNT_FLAG_ENFORCES_MODES == 0
 }
 
-/// (FSOP_MOUNT_INFO) and print the format, its partition's first sector,
-/// and the disk's capacity - or that nothing is mounted.
+/// `mount` with no argument: every mount this shell can see, one line each.
+/// First `/`, the root mount (tree 0, `FSOP_MOUNT_INFO`): its format, its
+/// partition's first sector and the disk's capacity, or that nothing is
+/// mounted. Then each binding in this shell's namespace, in the order it was
+/// made, with the path it is bound at. Until 2026-11-07 this printed the root
+/// alone, so on the Pi a working `mount 0 /mnt/boot` could not be seen except
+/// at its own path (`docs/ROADMAP.md`, Pi item 1).
+///
+/// The root line keeps its words up to the disk's size, which the rigs read
+/// (`scripts/test-sd.py`, `test-blank-disk.py`, `test-probe-ioerr.py`,
+/// `test-volume-bound.py`); ` on /` follows.
 fn mount_info(out: &mut Output) {
-    // Reply payload: partition_lba (u64), capacity_sectors (u64), then the
-    // format name as ASCII to the end. Zero-init so the name's end is a 0.
-    let mut info = [0u8; 48];
-    match fs_call(syscall_abi::FSOP_MOUNT_INFO, [0; 4], &[], &[], &mut info) {
-        NO_FS => print_line("nothing mounted (run `mount -a` to mount the disk)"),
-        0 => {
+    match mount_info_of(0) {
+        None => print_line("nothing mounted (run `mount -a` to mount the disk)"),
+        Some(Err(())) => print_line("mount: unexpected return"),
+        Some(Ok(info)) => {
             let part_lba = u64::from_le_bytes([
                 info[0], info[1], info[2], info[3], info[4], info[5], info[6], info[7],
             ]);
             let capacity = u64::from_le_bytes([
                 info[8], info[9], info[10], info[11], info[12], info[13], info[14], info[15],
             ]);
-            // The name now starts at 24: 16..24 is the flags word.
-            let name_end = info[24..].iter().position(|&b| b == 0).unwrap_or(info.len() - 24) + 24;
-            let name = core::str::from_utf8(&info[24..name_end]).unwrap_or("?");
-            out.put_str(name);
+            out_bytes(out, mount_info_name(&info));
             out.put_str(" mounted at partition LBA ");
             out.put_u64_decimal(part_lba);
             // 512-byte sectors -> MiB is sectors / 2048.
@@ -4237,9 +4291,87 @@ fn mount_info(out: &mut Output) {
             out.put_u64_decimal(capacity);
             out.put_str(" sectors, ");
             out.put_u64_decimal(capacity / 2048);
-            out.put_line(" MiB)");
+            out.put_line(" MiB) on /");
         }
-        _ => print_line("mount: unexpected return"),
+    }
+    let mut ns = [0u8; syscall_abi::NS_MAX as usize];
+    let nlen = get_ns(&mut ns);
+    let ns = &ns[..nlen];
+    let mut i = 0;
+    while i + 3 <= ns.len() {
+        let tree = ns[i];
+        let pstart = i + 3;
+        let tstart = pstart + ns[i + 1] as usize;
+        let tend = tstart + ns[i + 2] as usize;
+        if tend > ns.len() {
+            break; // malformed, as ninep_abi::resolve_ns stops
+        }
+        i = tend;
+        let (prefix, target) = (&ns[pstart..tstart], &ns[tstart..tend]);
+        match tree {
+            ninep_abi::NS_NET_TREE => out.put_str("the network server's /net"),
+            ninep_abi::NS_CON_TREE => out.put_str("the console"),
+            ninep_abi::NS_REMOTE_TREE if target.len() >= ninep_abi::NS_ENDPOINT_LEN => {
+                out.put_str("remote ");
+                for (k, &octet) in target[..4].iter().enumerate() {
+                    if k > 0 {
+                        out.put(b'.');
+                    }
+                    out.put_u64_decimal(octet as u64);
+                }
+                out.put(b':');
+                out.put_u64_decimal(u16::from_le_bytes([target[4], target[5]]) as u64);
+                out_bytes(out, &target[ninep_abi::NS_ENDPOINT_LEN..]);
+            }
+            // A `bind` within the root mount: tree 0, the subtree it stands for.
+            0 => {
+                out.put_str("bind of ");
+                out_bytes(out, target);
+            }
+            _ => match mount_info_of(tree as u64) {
+                Some(Ok(info)) => {
+                    out_bytes(out, mount_info_name(&info));
+                    if tree != ninep_abi::NS_PROC_TREE {
+                        out.put_str(" mounted at partition LBA ");
+                        out.put_u64_decimal(u64::from_le_bytes([
+                            info[0], info[1], info[2], info[3], info[4], info[5], info[6], info[7],
+                        ]));
+                    }
+                }
+                // Another shell's `unmount` emptied the tree under this binding.
+                None => out.put_str("nothing (unmounted since it was bound)"),
+                Some(Err(())) => out.put_str("mount: unexpected return"),
+            },
+        }
+        out.put_str(" on ");
+        out_bytes(out, prefix);
+        out.put_line("");
+    }
+}
+
+/// `FSOP_MOUNT_INFO` for `tree`: the reply payload, `None` when nothing is
+/// mounted there, `Err` for any other answer. Payload: partition_lba (u64),
+/// capacity_sectors (u64), flags (u64), then the format name as ASCII to the
+/// end. Zero-initialised, so the name ends at a 0.
+fn mount_info_of(tree: u64) -> Option<Result<[u8; 48], ()>> {
+    let mut info = [0u8; 48];
+    match fs_call(syscall_abi::FSOP_MOUNT_INFO, [tree, 0, 0, 0], &[], &[], &mut info) {
+        0 => Some(Ok(info)),
+        NO_FS => None,
+        _ => Some(Err(())),
+    }
+}
+
+/// The format name in a [`mount_info_of`] payload (from byte 24, after the
+/// flags word).
+fn mount_info_name(info: &[u8; 48]) -> &[u8] {
+    let end = info[24..].iter().position(|&b| b == 0).map_or(info.len(), |e| e + 24);
+    &info[24..end]
+}
+
+fn out_bytes(out: &mut Output, bytes: &[u8]) {
+    for &b in bytes {
+        out.put(b);
     }
 }
 

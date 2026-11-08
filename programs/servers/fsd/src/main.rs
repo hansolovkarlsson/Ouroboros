@@ -735,9 +735,12 @@ fn handle(device: &disk::Device, mounts: &mut [Option<vfs::Mount>; MAX_MOUNTS], 
         mounts[tree] = Some(mount);
         status_reply(reply, tree as u64)
     } else if op == syscall_abi::FSOP_MOUNT_INFO {
-        // Report tree 0 (the primary mount), as ever. Handles the not-mounted
-        // case itself (NO_FS).
-        let Some(mounted) = mounts[0].as_mut().map(vfs::Mount::fs_mut) else {
+        // Report the tree `p[0]` names: 0 (the root mount), which every
+        // client asked for until 2026-11-07, or one a namespace binds, for
+        // bare `mount` to list each mount and not only `/`. A tree with
+        // nothing in it, or past the table, is NO_FS.
+        let tree = p[0] as usize;
+        let Some(mounted) = mounts.get_mut(tree).and_then(Option::as_mut).map(vfs::Mount::fs_mut) else {
             return status_reply(reply, syscall_abi::NO_FS);
         };
         let part_lba = mounted.partition_lba() as u64;

@@ -1183,7 +1183,16 @@ pub fn fs_list_dir_page(path: &str, start: u64, buf: &mut [u8]) -> u64 {
 /// one, and that is called complete, as every listing was until 2026-10-16,
 /// when each went through one reply, holes and all: such a server says no
 /// more than that, so a mixed cluster lists as it did.
+///
+/// The listing is the union with this task's namespace
+/// ([`ninep_abi::MountPoints`]): a mount point below `path` is listed as a
+/// directory after the server's own entries, and a `path` the server has no
+/// directory for, with a mount below it, lists those names alone (`/mnt`
+/// after `mount 0 /mnt/boot`).
 pub fn fs_list_dir(path: &str, buf: &mut [u8]) -> Result<(usize, bool), u64> {
+    let mut ns = [0u8; syscall_abi::NS_MAX as usize];
+    let nlen = get_ns(&mut ns);
+    let mut points = ninep_abi::MountPoints::below(&ns[..nlen], path.as_bytes());
     let mut page = [0u8; ninep_abi::READDIR_PAGE];
     let mut spare = [0u8; ninep_abi::READDIR_PAGE];
     let mut written = 0usize;
@@ -1195,13 +1204,54 @@ pub fn fs_list_dir(path: &str, buf: &mut [u8]) -> Result<(usize, bool), u64> {
         if written + line.len() + 1 > buf.len() {
             return false;
         }
+        points.note(line);
         buf[written..written + line.len()].copy_from_slice(line);
         buf[written + line.len()] = b'\n';
         written += line.len() + 1;
         true
-    })?;
-    let complete = matches!(end, ninep_abi::ReaddirEnd::Complete | ninep_abi::ReaddirEnd::OldServer);
+    });
+    let mut complete = match end {
+        Ok(end) => matches!(end, ninep_abi::ReaddirEnd::Complete | ninep_abi::ReaddirEnd::OldServer),
+        // No such directory, but a mount below it: it is the mounts' parent.
+        Err(syscall_abi::FS_ERR_NOT_FOUND) if !points.is_empty() => true,
+        Err(code) => return Err(code),
+    };
+    complete &= !points.full();
+    points.for_each_unseen(|name, ends_here| {
+        let slash = !ends_here || child_is_dir(path, name);
+        let len = name.len() + slash as usize;
+        if written + len + 1 > buf.len() {
+            complete = false;
+            return;
+        }
+        buf[written..written + name.len()].copy_from_slice(name);
+        if slash {
+            buf[written + name.len()] = b'/';
+        }
+        buf[written + len] = b'\n';
+        written += len + 1;
+    });
     Ok((written, complete))
+}
+
+/// Whether `dir`'s entry `name` is a directory, by a stat of the joined path:
+/// what a mount point is when a binding ends there (a partition's root, or
+/// the console, a file). `false` when the stat fails, so an entry nobody can
+/// stat is listed as a name and not claimed a directory.
+fn child_is_dir(dir: &str, name: &[u8]) -> bool {
+    let d = dir.as_bytes();
+    let d = if d.last() == Some(&b'/') { &d[..d.len() - 1] } else { d };
+    let mut joined = [0u8; PATH_MAX];
+    let len = d.len() + 1 + name.len();
+    if len > joined.len() {
+        return false;
+    }
+    joined[..d.len()].copy_from_slice(d);
+    joined[d.len()] = b'/';
+    joined[d.len() + 1..len].copy_from_slice(name);
+    let Ok(path) = core::str::from_utf8(&joined[..len]) else { return false };
+    let mut info = [0u8; ninep_abi::STAT_INFO_LEN];
+    !is_fs_error(fs_stat(path, &mut info)) && stat_is_dir(&info)
 }
 
 /// Invoke a single path-only filesystem op (`FSOP_MKDIR`/`RMDIR`/`TOUCH`/`RM`):
@@ -1366,17 +1416,31 @@ pub fn fs_read_file(path: &str, buf: &mut [u8]) -> u64 {
 /// bytes) with the fixed metadata record. Returns [`ninep_abi::STAT_INFO_LEN`]
 /// on success, or [`NO_FS`]/an `FS_ERR_*` code (test with [`is_fs_error`]). The
 /// record is decoded with the `stat_*` accessors below.
+///
+/// A path the server does not have, with a mount below it in this task's
+/// namespace, is a directory ([`ninep_abi::mount_point_stat`]): `/mnt` after
+/// `mount 0 /mnt/boot`, as [`fs_list_dir`] lists it.
 pub fn fs_stat(path: &str, info: &mut [u8]) -> u64 {
+    let mut ns = [0u8; syscall_abi::NS_MAX as usize];
+    let nlen = get_ns(&mut ns);
     let mut fsp = [0u8; FSP_MAX];
-    let r = mount_resolve(path, &mut fsp);
-    np_dispatch(
+    let r = resolve_ns(&ns[..nlen], path, &mut fsp);
+    let status = np_dispatch(
         &r,
         ninep_abi::NP_STAT,
         [r.len as u64, 0, 0, 0],
         &fsp[..r.len],
         &[],
         info,
-    )
+    );
+    if status == syscall_abi::FS_ERR_NOT_FOUND
+        && info.len() >= ninep_abi::STAT_INFO_LEN
+        && !ninep_abi::MountPoints::below(&ns[..nlen], path.as_bytes()).is_empty()
+    {
+        ninep_abi::mount_point_stat(info);
+        return ninep_abi::STAT_INFO_LEN as u64;
+    }
+    status
 }
 
 /// What [`fs_presence`] could determine about a path.
