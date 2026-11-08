@@ -490,6 +490,107 @@ in `ROADMAP.md`.
 goes. There are no attested sessions until step 8, so there is nothing to
 close yet; the table is exercised here, as the step says.
 
+### Step 5's results (2026-11-08): the wire, `AUTHNP05`
+
+**What went in.** `ninep-abi`'s normative block gains "User credentials": the
+`AUTHNP05` frame, which is `AUTHNP03`'s header at the same offsets, then a
+credential block `[kind:2][clen:2][credential]` (little-endian), then the NP
+message. Kind 1 is the user's Ed25519 signature over `SIG_DOMAIN_USER ‖
+nonce:16 ‖ name:32 ‖ pubkey:32 ‖ export:32 ‖ SHA-512(NP message):64`, as
+Decision 8 says since its amendment (the review, below).
+The block also states the user key's derivation and the realm rule (1 to 32
+bytes, `0x21` to `0x7e`, whitespace trimmed, no realm means no credential),
+and the export's order: the machine half first, then the block, then policy.
+A block that runs past the frame, a kind the export does not know, or a known
+kind with any other length refuses the request; an unknown kind is never
+skipped. New constants: `NP_AUTH_MAGIC_USER`, the block's field lengths and
+offset, `NP_CRED_KIND_USER_SIG`, `NP_CRED_USER_SIG_LEN`, `NP_CRED_MAX`,
+`NP_AUTH_HDR_USER_MAX` (220), `NP_MSG_HASH_LEN`, `NP_USER_SIG_PREFIX_LEN` (176),
+and two tags. Three functions for steps 7 and 8 to call, so the Rust side reads
+the rules once: `credentialed` takes a frame from its length prefix and
+returns the kind, the credential and the NP message as slices, cut to the
+declared length (no caller adds an offset or cuts the frame);
+`user_sig_input` lays out the user signature's bytes; and `request_sig_domain`
+names the machine signature's tag by magic, so no site can sign a credentialed
+frame under the old tag.
+
+**One decision the plan left open.** Decision 8 says the credential block is
+"covered by the machine signature" but not under which tag. It is **its own,
+`SIG_DOMAIN_REQUEST_CRED`**, not `AUTHNP03`'s `SIG_DOMAIN_REQUEST`. Under one
+tag, a captured `AUTHNP05` frame reframed as `AUTHNP03`, its credential block
+read as the head of the NP message, would carry a machine signature that
+still verifies. Today the reframed message's verb would be garbage, but that
+is the incidental barrier the request tag's own doc says not to rely on. Both
+new tags fit in 29 bytes, so `SIG_DOMAIN_MAX`, and every `netd` buffer sized
+from it, is unchanged.
+
+**The review (high, nine findings, all acted on).** Three were contradictions
+inside the normative block, each of which an implementation transcribed from
+it would have carried: the keyed-session text still said one-shot requests and
+`NP_RUN` "stay `AUTHNP03`"; the policy let a registered root through only with
+root's credential, against Decision 6's "the flag outranks the registry"; and
+it left out Decision 7, so `cpu` with `/host` would have stopped working for
+every registered user. The policy is now Decisions 6, 7 and 5 in precedence,
+for both formats. One was a hole in Decision 8 itself, the relay above, closed
+by binding the export's key. One was an API hazard: the block reader returned
+an offset into the slice it was given, which a caller would have used as an
+offset into the frame; it now takes the frame and returns the message. The
+rest: no helper for the machine signature's tag (now `request_sig_domain`),
+`NP_FRAME_MAX`'s doc claiming buffers are sized from it, the Rust side of the
+wire check without the fixpoint loop added to the Python side (now one
+function for both), and a miscount in a comment this step rewrote.
+
+**What steps 7 and 8 inherit.** `NP_FRAME_MAX` is now sized from the
+credentialed header (2320, was 2252). Nothing outside `ninep-abi` uses it.
+`netd` sizes its own frames from `NP_AUTH_HDR_SIGNED` (`REMOTE_SBUF`,
+`NP_SIGNED_NP_OFF`, and the receive paths), and those grow by
+`NP_CRED_HDR_LEN + NP_CRED_MAX` (68 bytes) only where `AUTHNP05` is built or
+read, which is the stack measurement Risk 3 names.
+
+**The check and its controls.** `check-wire-constants.py` pins all fifteen new
+names: the twelve wire names on both Python peers, and the three derivation
+constants (`SIG_DOMAIN_USERKEY`, `USERKEY_ITERATIONS`, `REALM_MAX`, which no
+peer spelled before) on the client alone, since the server verifies against a
+registered public key and never derives. Both declare them ahead of step 6, as
+session-auth's wire step did. 199 constants agree, up from 171. To see them, the script had to learn
+three things: a `u16`, a literal with `_` separators (`USERKEY_ITERATIONS` is
+`210_000`, so it had been invisible in Rust), and sums and bare aliases
+resolved together until neither adds a name (`NP_AUTH_HDR_USER_MAX` sums
+`NP_CRED_MAX`, an alias the sum pass ran before, and the script refused it as
+"no peer spells it"). The per-peer floors were raised to the counts as run,
+which found the server's and `sys.h`'s floors each already one behind on
+`main`. Controls, each one constant on one side and each caught by name: the
+client's credentialed tag, its magic and its iteration count (`210_001`); the
+server's kind and its `NP_CRED_MAX` alias; the Rust kind (`u16`), user tag
+and hash length; and a server name misspelled, caught by the floor. In the
+Rust tests: a short credential accepted, an unknown kind skipped, and name
+and pubkey swapped in the signed input, each failing one test. After the
+review, five more, each caught: `AUTHNP05` given the old tag, the export left
+out of the signed input, the message slice started at the block, an
+`AUTHNP03` frame read as credentialed, and a peer's signed-input length
+without the export's key (the check names it, 176 against 144).
+
+**The second review (medium, nine findings, six acted on).** A keyed session
+opened under Decision 7's rule would have outlived the run that let it open,
+since its keyed frames carry no credential to re-check; the block now binds it
+to the run, closed when the run ends. `credentialed` takes the frame from its
+length prefix and cuts it to the declared length itself, so a receive buffer
+passed whole cannot put stale bytes into the hashed message (a test passes
+one). Two restatements of the signed input had missed the export key (the
+`SIG_DOMAIN_USER` doc, which now points at `user_sig_input` instead of
+listing the bytes, and this section's first paragraph), and so had a claim
+that both peers pin all fifteen names, and a size in a comment. **Not acted on,
+and why:** Decision 7's rule serves any claim of the run's user from the
+executing machine while the run is in flight, not only the run's own `/host`
+traffic. That is the decision as planned ("bounded by the run and by the pair
+of machines"), and narrowing it, for instance to the connection the run opened,
+is a decision for step 7, recorded here so it is made there. The Rust
+resolver's fixpoint still has no control, as above. The credential block
+copied into both peers is by design: each peer is an independent spelling,
+and the check compares each with Rust. The Rust
+resolver's fixpoint has no control: no Rust constant needs it today, so
+removing the loop changes nothing the check can see.
+
 ## Decisions
 
 Scored on the project's standing order: **stable, safe, and not blocking
@@ -683,8 +784,12 @@ is never a way around the squash. Step 7 tests both halves.
 `[kind:2][len:2][credential]`, all covered by the machine signature, then the
 NP message. Kind 1 is a user signature: Ed25519 by the user's key over
 `SIG_DOMAIN_USER ‖ nonce:16 ‖ name:32 ‖ calling machine's public key:32 ‖
-SHA-512(NP message):64`, every field fixed-width (the name NUL-padded, as in
-`AUTHNP03`). This is the one definition: the client's `netd` builds and signs
+export's public key:32 ‖ SHA-512(NP message):64`, every field fixed-width (the
+name NUL-padded, as in `AUTHNP03`). *(The export's key was added at step 5, by
+its review: without it, an export that received a credentialed one-shot
+request could relay the whole frame to a third machine that authorizes the
+caller, and act there as the user. The client already knows the key, by the
+address it dialled, to verify the reply.)* This is the one definition: the client's `netd` builds and signs
 exactly these bytes with the held key (Decision 4), `netd`'s export and
 `np9p_server.py` verify exactly these bytes, and `np9p_client.py` builds and
 signs them the same way. Each side computes the SHA-512 of the NP message

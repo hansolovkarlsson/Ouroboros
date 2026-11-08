@@ -123,12 +123,11 @@ NP_PUBKEY_LEN = 32
 NP_SIG_LEN = 64
 # A sanity ceiling on a DECLARED reply length, so recv_reply cannot be made to
 # allocate on a number the peer chose. Deliberately NOT a mirror of ninep-abi's
-# NP_FRAME_MAX (~2.2 KB): a defensive bound only has to be finite and
+# NP_FRAME_MAX (a little over 2 KB): a defensive bound only has to be finite and
 # comfortably above real traffic, and mirroring the exact constant would add
-# three more hand-copied ABI values - NP_NET_MAX, NP_AUTH_HDR_SIGNED and
-# NP_FRAME_MAX are all defined as SUMS in Rust, which check-wire-constants
-# cannot parse, so the copies would be pinned by nothing. A round 64 KiB
-# couples to nothing and still refuses the 4 GiB case this exists for.
+# two more hand-copied ABI values (NP_NET_MAX and NP_FRAME_MAX) for no gain:
+# a round 64 KiB couples to nothing and still refuses the 4 GiB case this
+# exists for.
 MAX_DECLARED_REPLY = 64 * 1024
 # Signature DOMAIN TAGS - must match ninep-abi's SIG_DOMAIN_* byte for byte.
 # They keep a signature made in one role from verifying in the other: without
@@ -152,6 +151,28 @@ SIG_DOMAIN_EPHEMERAL_E = b"ouroboros-cluster-eph-e-v1\0"
 
 NP_NONCE_LEN = 16
 NP_NAME_LEN = 32  # requesting user's name, NUL-padded - ninep-abi NP_NAME_LEN
+NP_AUTH_HDR_SIGNED = 8 + NP_NONCE_LEN + NP_NAME_LEN + NP_PUBKEY_LEN + NP_SIG_LEN
+
+# User credentials (ninep-abi's normative block, "User credentials"; step 5 of
+# docs/roadmap/roadmap-user-keys.md). Declared here ahead of step 6, which
+# uses them, so check-wire-constants.py pins them from the step that defines them.
+NP_AUTH_MAGIC_USER = int.from_bytes(b"AUTHNP05", "big")
+NP_CRED_KIND_LEN = 2
+NP_CRED_LEN_LEN = 2
+NP_CRED_HDR_LEN = NP_CRED_KIND_LEN + NP_CRED_LEN_LEN
+NP_CRED_KIND_USER_SIG = 1
+NP_CRED_USER_SIG_LEN = 64
+NP_CRED_MAX = NP_CRED_USER_SIG_LEN
+NP_AUTH_HDR_USER_MAX = NP_AUTH_HDR_SIGNED + NP_CRED_HDR_LEN + NP_CRED_MAX
+NP_MSG_HASH_LEN = 64
+NP_USER_SIG_PREFIX_LEN = NP_NONCE_LEN + NP_NAME_LEN + NP_PUBKEY_LEN + NP_PUBKEY_LEN + NP_MSG_HASH_LEN  # caller, then export
+SIG_DOMAIN_USER = b"ouroboros-cluster-user-v1\0"
+SIG_DOMAIN_REQUEST_CRED = b"ouroboros-cluster-credreq-v1\0"
+# The user key's derivation. The client alone derives one (from --password);
+# the server only verifies against a registered public key.
+SIG_DOMAIN_USERKEY = b"ouroboros-cluster-userkey-v1\0"
+USERKEY_ITERATIONS = 210_000
+REALM_MAX = 32
 
 # The seed this client signs with. Signing is no longer opt-in: it is the only
 # format the guest accepts.
