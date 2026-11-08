@@ -1372,6 +1372,27 @@ pub fn mount_point_stat(info: &mut [u8]) {
     info[STAT_FLAGS_OFF..STAT_FLAGS_OFF + 4].copy_from_slice(&STAT_FLAG_DIR.to_le_bytes());
 }
 
+/// Whether `path`'s directory has a binding below it in `ns`: the case in
+/// which a server's "not found" for making `path` means that the directory
+/// is made of mount points only (see [`MountPoints`]), so nothing can be
+/// made in it, and not that it is missing. Clients turn that "not found"
+/// into `syscall_abi::FS_ERR_MOUNTS_ONLY`, whose message says so: on the Pi
+/// on 2026-11-08, `write test something` in `/mnt`, just listed with its
+/// `boot/`, said "no such file or directory". A trailing `/` is dropped
+/// first; a path with no `/` has no directory here and answers `false`.
+pub fn made_among_mounts(ns: &[u8], path: &[u8]) -> bool {
+    let path = match path {
+        [rest @ .., b'/'] if !rest.is_empty() => rest,
+        _ => path,
+    };
+    let dir = match path.iter().rposition(|&b| b == b'/') {
+        Some(0) => &b"/"[..],
+        Some(i) => &path[..i],
+        None => return false,
+    };
+    !MountPoints::below(ns, dir).is_empty()
+}
+
 /// The most components [`is_within`] reads from one path: a path of at most
 /// `FS_DATA_MAX` (512) bytes, the longest an `NP_*` request carries, has at
 /// most 256 non-empty ones.
@@ -2055,5 +2076,26 @@ mod tests {
         assert_eq!(info[STAT_TIMEVALID_OFF], 0);
         assert_eq!(info[STAT_MODEVALID_OFF], 0);
         assert!(info[..STAT_FLAGS_OFF].iter().all(|&b| b == 0), "size 0");
+    }
+
+    #[test]
+    fn made_among_mounts_asks_of_the_directory_alone() {
+        let (ns, n) = ns_of(&PI);
+        let ns = &ns[..n];
+        // The board's case: /mnt holds boot and a, nothing on the disk.
+        assert!(made_among_mounts(ns, b"/mnt/test"));
+        assert!(made_among_mounts(ns, b"/mnt/test/"));
+        assert!(made_among_mounts(ns, b"/dev/x"));
+        // Inside a mount, or where nothing is bound below: a real "not found".
+        assert!(!made_among_mounts(ns, b"/mnt/boot/nope/x"));
+        assert!(!made_among_mounts(ns, b"/nope/x"));
+        // The path itself, not its directory: /mnt/a/x's directory is the
+        // remote root, with nothing bound below it.
+        assert!(!made_among_mounts(ns, b"/mnt/a/x"));
+        // Component-aligned: /mn is not /mnt's directory.
+        assert!(!made_among_mounts(ns, b"/mn/x"));
+        // No directory to ask of; and nothing bound at all.
+        assert!(!made_among_mounts(ns, b"x"));
+        assert!(!made_among_mounts(&[], b"/mnt/test"));
     }
 }

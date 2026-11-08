@@ -1649,8 +1649,25 @@ fn finish_redirect(captured: &[u8], overflowed: bool, target: &str, append: bool
     };
     match result {
         NO_FS => print_no_fs(),
-        code if code >= FS_ERR_MIN => print_fs_error("redirect", code),
+        code if code >= FS_ERR_MIN => print_fs_error("redirect", made_among_mounts(path, code)),
         _ => {}
+    }
+}
+
+/// `code` from making `path`, a "not found" turned into
+/// `FS_ERR_MOUNTS_ONLY` when `path`'s directory exists only as the parent of
+/// mount points. As `ulib`'s `made_among_mounts` (the shell keeps its own fs
+/// layer).
+fn made_among_mounts(path: &str, code: u64) -> u64 {
+    if code != FS_ERR_NOT_FOUND {
+        return code;
+    }
+    let mut ns = [0u8; syscall_abi::NS_MAX as usize];
+    let nlen = get_ns(&mut ns);
+    if ninep_abi::made_among_mounts(&ns[..nlen], path.as_bytes()) {
+        syscall_abi::FS_ERR_MOUNTS_ONLY
+    } else {
+        code
     }
 }
 
@@ -1983,6 +2000,7 @@ fn print_fs_error(cmd: &str, code: u64) {
         syscall_abi::FS_ERR_NOT_SUPPORTED => "not supported by this filesystem (mode/owner need ext2)",
         syscall_abi::FS_ERR_NO_SUCH_VERB => "that server does not implement this request, or not on this kind of connection (its log names the verb)",
         syscall_abi::FS_ERR_BUSY => "that server is out of room for this right now (try again later)",
+        syscall_abi::FS_ERR_MOUNTS_ONLY => "its directory holds only mount points, so nothing can be made in it",
         syscall_abi::FS_ERR_AUTH => "cluster authentication failed (peer not authorized, or bad key/signature)",
         syscall_abi::FS_ERR_CROSS_DEVICE => "cannot move across mounts (copy it, then remove the original)",
         syscall_abi::MSG_ERR_FULL => "mailbox full",

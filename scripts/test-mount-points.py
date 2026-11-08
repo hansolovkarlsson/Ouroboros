@@ -26,9 +26,14 @@ is `b/`; the shell's own walk agrees (`echo /mnt/*`); `cd /mnt` works and
 `pwd` says so; a path with nothing bound below it is still missing to `ls`
 and `cd`; and after `unmount`, bare `mount` says nothing is mounted and still
 lists the bindings that are left, and `cd` and the glob still reach the
-mounts' parents with `/` unmounted. About forty seconds. Run it whenever
+mounts' parents with `/` unmounted. About fifty seconds. Run it whenever
 `MountPoints`, `ulib::fs_list_dir`/`fs_stat`, the shell's `for_each_dir_entry`,
-`cmd_cd` or `mount_info`, or `FSOP_MOUNT_INFO` changes.
+`cmd_cd` or `mount_info`, or `FSOP_MOUNT_INFO` changes. Since 2026-11-08 also
+`write`, `mkdir`, `touch`, `writeat` and a redirect into `/mnt`, each refused
+as a directory of mount points only (`FS_ERR_MOUNTS_ONLY`), and a missing
+directory inside a mount still "no such file": run it too whenever
+`ninep_abi::made_among_mounts` or a create path in `ulib` or the shell
+changes.
 """
 import importlib.util
 import os
@@ -47,6 +52,7 @@ SOURCE = os.path.join(ROOT, "build", "disk.img")
 IMAGE = os.path.join(ROOT, "build", "test-mount-points.img")
 TRANSCRIPT = os.path.join(ROOT, "build", "test-mount-points.txt")
 PROMPT = "# "
+MOUNTS_ONLY = "its directory holds only mount points, so nothing can be made in it"
 
 COMMANDS = [
     "ls /mnt",                      # 0: the control, before any binding
@@ -69,18 +75,27 @@ COMMANDS = [
     "ls /nope",                     # 17
     "cd /nope",                     # 18
     "ls /mnt/boot/EFI",             # 19
-    "unmount",                      # 20
-    "mount",                        # 21
+    # Making something in /mnt, a directory of mount points only: refused,
+    # and saying so (Hans on the Pi, 2026-11-08: the old "no such file or
+    # directory" read as if /mnt were missing). One per create path.
+    "write /mnt/test something",    # 20: ulib's fs_write_bulk
+    "mkdir /mnt/new",               # 21: fs_op_path's NP_MKDIR
+    "touch /mnt/t",                 # 22: fs_op_path's NP_TOUCH
+    "writeat /mnt/w 0 x",           # 23: fs_write_at
+    "echo hi > /mnt/e",             # 24: the shell's own redirect
+    "write /mnt/boot/nope/x y",     # 25: the control, inside a mount: still missing
+    "unmount",                      # 26
+    "mount",                        # 27
     # With / unmounted /bin is gone, so builtins only: an empty answer from
     # `cd` is success, and the control below shows it is not always empty.
-    "cd /deep/a",                   # 22
-    "cd /de*",                      # 23: the shell's glob expands it, to /dev
-    "cd /nope",                     # 24: the control, still refused
-    "cd /",                         # 25
-    "mount -a",                     # 26
-    "cd /etc",                      # 27
-    "echo /b*",                     # 28: a glob of the root from below it
-    "cd /",                         # 29
+    "cd /deep/a",                   # 28
+    "cd /de*",                      # 29: the shell's glob expands it, to /dev
+    "cd /nope",                     # 30: the control, still refused
+    "cd /",                         # 31
+    "mount -a",                     # 32
+    "cd /etc",                      # 33
+    "echo /b*",                     # 34: a glob of the root from below it
+    "cd /",                         # 35
 ]
 
 
@@ -144,12 +159,18 @@ def main() -> int:
         ("`ls /nope` is still no such file", any("no such file" in l for l in a[17])),
         ("`cd /nope` is still no such file", any("no such file" in l for l in a[18])),
         ("the mount itself still lists", "BOOT/" in names(a[19])),
-        ("after `unmount`, `mount` says nothing is mounted", bool(a[21]) and a[21][0].startswith("nothing mounted")),
-        ("after `unmount`, `mount` keeps the bindings left", "the console on /dev/cons" in a[21] and "bind of /etc on /deep/a/b" in a[21]),
-        ("with / unmounted, `cd /deep/a` works", a[22] == []),
-        ("with / unmounted, the glob finds /dev: `cd /de*` works", a[23] == []),
-        ("with / unmounted, control: `cd /nope` is still refused", bool(a[24])),
-        ("from /etc, `echo /b*` globs the root: /bin", a[28] == ["/bin"]),
+        ("`write` in /mnt says it holds only mount points", a[20] == ["write: " + MOUNTS_ONLY]),
+        ("`mkdir` in /mnt says so", a[21] == ["mkdir: " + MOUNTS_ONLY]),
+        ("`touch` in /mnt says so", a[22] == ["touch: " + MOUNTS_ONLY]),
+        ("`writeat` in /mnt says so", a[23] == ["writeat: " + MOUNTS_ONLY]),
+        ("a redirect into /mnt says so", a[24] == ["redirect: " + MOUNTS_ONLY]),
+        ("control: a missing directory inside a mount is still no such file", a[25] == ["write: no such file or directory"]),
+        ("after `unmount`, `mount` says nothing is mounted", bool(a[27]) and a[27][0].startswith("nothing mounted")),
+        ("after `unmount`, `mount` keeps the bindings left", "the console on /dev/cons" in a[27] and "bind of /etc on /deep/a/b" in a[27]),
+        ("with / unmounted, `cd /deep/a` works", a[28] == []),
+        ("with / unmounted, the glob finds /dev: `cd /de*` works", a[29] == []),
+        ("with / unmounted, control: `cd /nope` is still refused", bool(a[30])),
+        ("from /etc, `echo /b*` globs the root: /bin", a[34] == ["/bin"]),
         ("no fault lines", faults == 0),
     ]
     print(f"     mount -> {mount}")

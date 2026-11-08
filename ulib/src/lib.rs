@@ -1286,7 +1286,31 @@ pub fn fs_op_path(op: u64, path: &str) -> u64 {
     };
     let mut fsp = [0u8; FSP_MAX];
     let r = mount_resolve(path, &mut fsp);
-    np_dispatch(&r, verb, [r.len as u64, 0, 0, 0], &fsp[..r.len], &[], &mut [])
+    let code = np_dispatch(&r, verb, [r.len as u64, 0, 0, 0], &fsp[..r.len], &[], &mut []);
+    match verb {
+        ninep_abi::NP_MKDIR | ninep_abi::NP_TOUCH => made_among_mounts(path, code),
+        _ => code,
+    }
+}
+
+/// `code` from making `path`, with a "not found" turned into
+/// [`FS_ERR_MOUNTS_ONLY`] when `path`'s directory exists only as the parent
+/// of mount points (`ninep_abi::made_among_mounts`): the server has no such
+/// directory, but the caller has just seen it listed. Every other code is
+/// returned as it came.
+///
+/// [`FS_ERR_MOUNTS_ONLY`]: syscall_abi::FS_ERR_MOUNTS_ONLY
+fn made_among_mounts(path: &str, code: u64) -> u64 {
+    if code != syscall_abi::FS_ERR_NOT_FOUND {
+        return code;
+    }
+    let mut ns = [0u8; syscall_abi::NS_MAX as usize];
+    let nlen = get_ns(&mut ns);
+    if ninep_abi::made_among_mounts(&ns[..nlen], path.as_bytes()) {
+        syscall_abi::FS_ERR_MOUNTS_ONLY
+    } else {
+        code
+    }
 }
 
 /// Set `path`'s permission bits (the low 12 of the POSIX mode). Returns `0`,
@@ -1580,6 +1604,10 @@ pub fn stat_mode(info: &[u8]) -> Option<(u16, u16, u16)> {
 /// `data.len()` must be `<= SAFECOPY_MAX`; empty `data` truncates to empty and
 /// skips the grant.
 pub fn fs_write_bulk(path: &str, data: &[u8]) -> u64 {
+    made_among_mounts(path, write_bulk(path, data))
+}
+
+fn write_bulk(path: &str, data: &[u8]) -> u64 {
     let mut fsp = [0u8; FSP_MAX];
     let r = mount_resolve(path, &mut fsp);
     if r.server == syscall_abi::CON_TASK {
@@ -1746,6 +1774,10 @@ pub fn fs_write_inline(path: &str, data: &[u8]) -> u64 {
 /// `offset` to write a file of any size one chunk at a time. Empty `data` is a
 /// no-op.
 pub fn fs_write_at(path: &str, offset: u64, data: &[u8]) -> u64 {
+    made_among_mounts(path, write_at(path, offset, data))
+}
+
+fn write_at(path: &str, offset: u64, data: &[u8]) -> u64 {
     if data.is_empty() {
         return 0;
     }
@@ -1897,6 +1929,7 @@ pub fn fs_error_msg(code: u64) -> &'static [u8] {
         syscall_abi::FS_ERR_IO => b"device I/O error",
         syscall_abi::FS_ERR_AUTH => b"cluster authentication failed (peer not authorized, or bad key/signature)",
         syscall_abi::FS_ERR_CROSS_DEVICE => b"cannot move across mounts (copy it, then remove the original)",
+        syscall_abi::FS_ERR_MOUNTS_ONLY => b"its directory holds only mount points, so nothing can be made in it",
         _ => b"failed",
     }
 }
