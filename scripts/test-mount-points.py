@@ -29,7 +29,7 @@ lists the bindings that are left, and `cd` and the glob still reach the
 mounts' parents with `/` unmounted. About fifty seconds. Run it whenever
 `MountPoints`, `ulib::fs_list_dir`/`fs_stat`, the shell's `for_each_dir_entry`,
 `cmd_cd` or `mount_info`, or `FSOP_MOUNT_INFO` changes. Since 2026-11-08 also
-`write`, `mkdir`, `touch`, `writeat` and a redirect into `/mnt`, each refused
+`write`, `mkdir`, `touch`, `writeat`, `cp` and a redirect into `/mnt`, each refused
 as a directory of mount points only (`FS_ERR_MOUNTS_ONLY`), and a missing
 directory inside a mount still "no such file": run it too whenever
 `ninep_abi::made_among_mounts` or a create path in `ulib` or the shell
@@ -83,19 +83,20 @@ COMMANDS = [
     "touch /mnt/t",                 # 22: fs_op_path's NP_TOUCH
     "writeat /mnt/w 0 x",           # 23: fs_write_at
     "echo hi > /mnt/e",             # 24: the shell's own redirect
-    "write /mnt/boot/nope/x y",     # 25: the control, inside a mount: still missing
-    "unmount",                      # 26
-    "mount",                        # 27
+    "cp /README.TXT /mnt/c",        # 25: cp, past its overwrite guard
+    "write /mnt/boot/nope/x y",     # 26: the control, inside a mount: still missing
+    "unmount",                      # 27
+    "mount",                        # 28
     # With / unmounted /bin is gone, so builtins only: an empty answer from
     # `cd` is success, and the control below shows it is not always empty.
-    "cd /deep/a",                   # 28
-    "cd /de*",                      # 29: the shell's glob expands it, to /dev
-    "cd /nope",                     # 30: the control, still refused
-    "cd /",                         # 31
-    "mount -a",                     # 32
-    "cd /etc",                      # 33
-    "echo /b*",                     # 34: a glob of the root from below it
-    "cd /",                         # 35
+    "cd /deep/a",                   # 29
+    "cd /de*",                      # 30: the shell's glob expands it, to /dev
+    "cd /nope",                     # 31: the control, still refused
+    "cd /",                         # 32
+    "mount -a",                     # 33
+    "cd /etc",                      # 34
+    "echo /b*",                     # 35: a glob of the root from below it
+    "cd /",                         # 36
 ]
 
 
@@ -164,13 +165,14 @@ def main() -> int:
         ("`touch` in /mnt says so", a[22] == ["touch: " + MOUNTS_ONLY]),
         ("`writeat` in /mnt says so", a[23] == ["writeat: " + MOUNTS_ONLY]),
         ("a redirect into /mnt says so", a[24] == ["redirect: " + MOUNTS_ONLY]),
-        ("control: a missing directory inside a mount is still no such file", a[25] == ["write: no such file or directory"]),
-        ("after `unmount`, `mount` says nothing is mounted", bool(a[27]) and a[27][0].startswith("nothing mounted")),
-        ("after `unmount`, `mount` keeps the bindings left", "the console on /dev/cons" in a[27] and "bind of /etc on /deep/a/b" in a[27]),
-        ("with / unmounted, `cd /deep/a` works", a[28] == []),
-        ("with / unmounted, the glob finds /dev: `cd /de*` works", a[29] == []),
-        ("with / unmounted, control: `cd /nope` is still refused", bool(a[30])),
-        ("from /etc, `echo /b*` globs the root: /bin", a[34] == ["/bin"]),
+        ("`cp` into /mnt says so", a[25] == ["cp: " + MOUNTS_ONLY]),
+        ("control: a missing directory inside a mount is still no such file", a[26] == ["write: no such file or directory"]),
+        ("after `unmount`, `mount` says nothing is mounted", bool(a[28]) and a[28][0].startswith("nothing mounted")),
+        ("after `unmount`, `mount` keeps the bindings left", "the console on /dev/cons" in a[28] and "bind of /etc on /deep/a/b" in a[28]),
+        ("with / unmounted, `cd /deep/a` works", a[29] == []),
+        ("with / unmounted, the glob finds /dev: `cd /de*` works", a[30] == []),
+        ("with / unmounted, control: `cd /nope` is still refused", bool(a[31])),
+        ("from /etc, `echo /b*` globs the root: /bin", a[35] == ["/bin"]),
         ("no fault lines", faults == 0),
     ]
     print(f"     mount -> {mount}")

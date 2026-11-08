@@ -780,13 +780,22 @@ not yet checked on this tree are marked (predicted).
             `write test something` in `/mnt` was refused, as it should be,
             since `/mnt` is a name in the namespace and not a directory on
             the root; from `/` the same command made `test`.
-      - [ ] **The refusal's message**: that `write` in `/mnt` said `write:
-            no such file or directory`, which is true of the disk but reads
-            as if `/mnt` were missing, right after `ls` listed it. Hans, on
-            the board: the message could be more informative. Something
-            like "/mnt holds only mount points" when the parent of the path
-            being made has a mount below it and the server has no such
-            directory (`MountPoints::below` already answers that).
+      - [x] **The refusal's message**, built 2026-11-08 on QEMU, the board
+            not yet: that `write` in `/mnt` said `write: no such file or
+            directory`, which is true of the disk but reads as if `/mnt`
+            were missing, right after `ls` listed it. Hans, on the board:
+            the message could be more informative. It now says `write: its
+            directory holds only mount points, so nothing can be made in
+            it`: a new client-side code, `FS_ERR_MOUNTS_ONLY` (`MAX-45`,
+            the floor to `MAX-46` with `sys.h`), given for a server's "not
+            found" when the path's directory has a binding below it
+            (`ninep_abi::made_among_mounts`). `ulib`'s `fs_write_bulk`,
+            `fs_write_at` and `fs_op_path` (mkdir, touch) and the shell's
+            redirect give it; `make test-mount-points` checks each of these,
+            `cp` too, and a control, two mutants caught. Left as they were: `mv`
+            into such a directory (its "not found" may be the source's, so
+            it would need a stat to tell) and C programs (`ENOENT`, as the
+            C `stat` item below).
       - [ ] **C programs**: `libc/src/file.c`'s `stat` of a mounts' parent
             is still `ENOENT`. `nsresolve` would export the same walk;
             wanted when a C program first walks a tree across a mount.
