@@ -83,9 +83,22 @@ def rust_consts(path):
     # name another sum; a term that never resolves leaves the constant out
     # rather than guessed at.
     sums = re.findall(r"pub const (\w+): usize =\s*([\w\s+]+?);", src)
-    _resolve_sums(sums, out)
-    _resolve_ors(re.findall(r"pub const (\w+): u64 = ([A-Z_]+(?: \| [A-Z_]+)*);", src), out)
-    return out
+    ors = re.findall(r"pub const (\w+): u64 = ([A-Z_]+(?: \| [A-Z_]+)*);", src)
+    return _resolve_all(sums, ors, out)
+
+
+def _resolve_all(sums, ors, out):
+    """Resolve sums and masks together until neither adds a name, for BOTH
+    languages. Once each in a fixed order left out any sum naming a name only
+    the other pass resolves: in Python a bare alias (`NP_CRED_MAX =
+    NP_CRED_USER_SIG_LEN`) is read by the mask pass, so NP_AUTH_HDR_USER_MAX,
+    which sums it, was refused as "no peer spells it" (user-keys step 5)."""
+    while True:
+        before = len(out)
+        _resolve_sums(sums, out)
+        _resolve_ors(ors, out)
+        if len(out) == before:
+            return out
 
 
 def _resolve_ors(ors, out):
@@ -170,15 +183,7 @@ def py_consts(path):
     # NP_NONCE_LEN + ...`), the peers' spelling of the header lengths.
     sums = re.findall(r"^(\w+) = ((?:\w+\s*\+\s*)+\w+)\s*(?:#.*)?$", src, re.M)
     ors = re.findall(r"^(\w+) = ([A-Z_]+(?: \| [A-Z_]+)*)\s*(?:#.*)?$", src, re.M)
-    # Until neither adds a name: a bare alias (`NP_CRED_MAX =
-    # NP_CRED_USER_SIG_LEN`) is read by the mask resolver, and a sum naming it
-    # (NP_AUTH_HDR_USER_MAX) resolved before it, once each, was left out.
-    while True:
-        before = len(out)
-        _resolve_sums(sums, out)
-        _resolve_ors(ors, out)
-        if len(out) == before:
-            return out
+    return _resolve_all(sums, ors, out)
 
 
 def c_consts(path):
