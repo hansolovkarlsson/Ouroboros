@@ -7,6 +7,25 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/pos
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Unreleased
+
+**Not yet released.** Changes since v0.24.0, drafted as they land.
+
+**`make sdcard` keeps a card's boot counter (2026-11-07, #417).** D5 of
+the SD-card arc was taken the same day: `make bootstick PI=1` is how a Pi
+card is staged, and `make sdcard` stays as the way to re-stage the boot
+partition alone. It never writes the ext2 root, so the root's files
+survive a new kernel. Its first board run as that showed the counter
+rolled back from boot 6 to boot 1, because on the Pi
+`EFI/ORBS/BOOTID.TXT` is the counter's only store and the script replaced
+it with the build's 0. The script now keeps the larger of the card's value
+and the build's. It finishes a swap an earlier run left cut off before
+re-staging, and it stops on a build record that is no record. The rule is
+`scripts/bootcounter.py`, the one host-side copy of the kernel's, which
+`bootstick.py` shares, and `make test-sdcard` grades it on an image file.
+On the board, the re-stage from `56946121` went from boot 1 to boot 2
+(#418).
+
 ## v0.24.0: one disk, and the Pi 4 on its SD card alone (2026-11-07)
 
 A hundred and thirty-one pull requests over twenty-six days, 2026-10-13 to

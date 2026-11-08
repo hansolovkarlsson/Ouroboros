@@ -1,7 +1,7 @@
 # True when written
 
 *A process retrospective, the twenty-ninth, covering 2026-09-03 and extended
-through 2026-11-05. Five PRs, no new subsystem, and four defects that were all
+through 2026-11-07. Five PRs, no new subsystem, and four defects that were all
 the same defect: a statement that was correct on the day someone typed it, and
 stopped being correct without anyone touching the file it lived in. The later
 sections, each dated, add the variants found since: claims false on arrival, a
@@ -15,7 +15,8 @@ the code that would have produced it, a guard deleted as doing nothing
 on a premise that held for one of its paths, claims a move left behind,
 and a heuristic that one platform had already falsified and a vendor's
 update falsified loudly, and a recommendation taken from records the
-board's newest log had overtaken.*
+board's newest log had overtaken, and a prediction from a store the board
+never had.*
 
 The previous day's retrospective
 ([`blind-instruments-postmortem.md`](blind-instruments-postmortem.md)) had the
@@ -1255,6 +1256,29 @@ was gone. Nothing broke, because step 0 was built to read both sources and
 let the board choose, which is the one thing the recommendation got right.
 **A claim about hardware is about its configuration on the day it was
 read; read the newest log of the board before a summary of an older one.**
+
+## A store the summary named and the board never had (2026-11-07)
+
+Before the first board run of `make sdcard` as a boot-partition-only
+re-stage, I predicted that the boot counter would survive it.
+`testing-pi4.md` section 4 said the counter's preferred store was the UEFI
+variable, kept in `RPI_EFI.fd`, and the script keeps that file. The run
+read boot 1 after boot 6. The variable had read absent on every Pi boot
+since 2026-10-01, and every `bootid` line in the board's logs said
+`variable no, file yes`, so the file the script replaced was the only
+store. The section was true of the design, which writes both stores. It was
+never true of this board. This is the 2026-11-05 entry again, one day
+later, with the newest log a few hundred lines above the summary I read.
+**A claim about which store holds a value is a claim about one firmware;
+check it against the line the board prints, which here said so on every
+boot.**
+
+The same day I wrote down an unchecked add in `bootid.rs` (`v + 1`) after
+seeing that one line. The match arm above it already turns any `v` of at
+least `BOOT_ID_NONE - 1` into no counter, and `BOOT_ID_NONE` is `u64::MAX`,
+so the add cannot wrap. It is the 2026-10-12 shape, a defect written down
+without reading the code that would have to produce it. It cost nothing,
+because the fix began by reading the function.
 
 ## What actually worked
 
