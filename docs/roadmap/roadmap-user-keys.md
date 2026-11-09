@@ -928,17 +928,17 @@ the credential is signed with the key held for that uid; `SENDER_ID` is never
 read at sign time, when the last message received is whoever's arrived since.
 
 **A session closes when its user's last key goes.** A session whose opening
-carried a credential is marked `attested`; `park_session`'s lookup finds it
-only while a live login holds a key for its uid (`Held::holds_live`, the
-guard, since the high review below), and `close_unheld` closes every
-attested session whose uid has no key held any more: politely (a FIN once
-anything already sent is acked), its fids gone with it, so the next verb from
-that uid opens a fresh session, uncredentialed, which the far side judges
-afresh. A verb parked on it and not yet sent is refused `FS_ERR_AUTH`; one
-already on the wire was signed while the key was held and is left to finish.
-It runs after each key op and after the idle pass's `reap_dead`; the lookup
-is what guarantees a verb never rides such a session. This is step 4's
-deferred item, done.
+carried a credential is marked `attested`, and is used only while a live
+login holds a key for its uid (`Held::holds_live`): `park_session` closes
+one for the uid it parks that fails the test, before its lookup, and
+`sign_parked` sends nothing keyed on one (the guards, since the reviews
+below). `close_unheld` closes every attested session whose uid fails it:
+politely (a FIN once anything already sent is acked), its fids gone with it,
+so the next verb from that uid opens a fresh session, uncredentialed, which
+the far side judges afresh. A verb parked on it is refused `FS_ERR_AUTH`,
+sent or not (since the medium review). It runs after each key op and after
+the idle pass's `reap_dead`; the guards are what guarantee a verb never
+rides such a session. This is step 4's deferred item, done.
 
 **The send buffers, and what they cost.** The credential block is 68 bytes,
 and every remote slot's send buffer grew by it first. The probe of
@@ -1068,6 +1068,57 @@ Ten findings.
   whether a run should end with them is Hans's to decide.
 
 On the final tree `test-cred-client` passes 17 of 17, every control as above.
+
+### Step 8's medium review (2026-11-09)
+
+Ten findings.
+
+- *Fixed, one predicate:* a killed login's key went on signing new sessions
+  until the idle pass reaped it, because `Held::seed_for` did not ask whether
+  the login lived, while the lookup's guard did; and `close_unheld` asked a
+  third question, any key at all. A key now counts only while its login
+  lives: `seed_for` skips a dead one, and `holds_live`, the one test every
+  caller asks, is `seed_for(uid).is_some()`. `Held::holds` is gone.
+- *Fixed:* the lookup passed over an attested session whose user was not
+  held and opened a fresh one beside it; a later login of the same user made
+  the old one usable again, first in slot order, so the fresh session's fids
+  were sent down it. `park_session` now closes such a session for the
+  endpoint and uid it parks, then looks up, asking liveness once.
+- *Fixed:* `sign_parked` refuses a keyed verb on an attested session whose
+  user is not held, at the send, so no path that loses a key between the
+  park and the send has to have closed the session first.
+- *Fixed:* a close for a user who has gone left a verb already on the wire
+  to finish, but the FIN follows once the request is acked, and the far
+  export drops a connection on its peer's FIN with the reply unsent; the
+  caller waited out the deadline. Every parked verb is now answered
+  `FS_ERR_AUTH` at the close, sent or not. That removes the high review's
+  open rewrite, and with it a fid the rewritten open still counted.
+- *Not changed:* a session opened before its user logged in never becomes
+  attested; as the high review found, for a registered user such an opening
+  is refused.
+- *Not changed, a limit:* `scrub_stack` zeroes the stack, not the vector
+  registers, and its 6 KB is a measured cover, not a checked one (about
+  3.5 KB of frames, from `objdump`). A register is overwritten by netd's next
+  work, and is saved only into the kernel's `Context` for this task.
+- *Asked, not changed:* a fid verb over 684 bytes framed with a credential
+  is refused `FS_ERR_AUTH`, and so only while its user is logged in (the
+  results above). Nothing sends one; whether the limit stands is Hans's.
+
+The controls on the final tree, each a mutation of netd that the rig must
+fail:
+
+| Mutation | Result |
+|---|---|
+| No credential sent | caught, 12 checks fail |
+| `close_unheld` removed, the guards kept | caught by the FIN within an idle period of the kill; the FIN at the logout now also comes from `park_session`'s close, when the `su`'d request parks |
+| Every close and the lookup term removed, `sign_parked`'s check kept | uid 1000 still refused after the logout: the send-time check alone holds (only the kill's FIN fails) |
+| All three removed | caught, 6 checks fail: uid 1000 reads the file on the old session |
+| A dead login's key still signs (`seed_for` without `alive`) | **not caught**: no verb from the uid falls between the kill and the idle pass's reap. Recorded as not covered, beside the uid-at-sign-time mutation |
+
+`test-cred-client` passes 17 of 17, `test-async-rmount` 6 of 6, and `make
+test` exits 0. The probe's headroom: async 2,656, run-callback 2,992, gate
+5,360, cred-client 2,656 on both nodes, 48 bytes below the high review's
+tree on the client paths (the close loop in `park_session`).
 
 ## Decisions
 
