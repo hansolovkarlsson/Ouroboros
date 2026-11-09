@@ -176,6 +176,9 @@ AUTH_FORMATS = (
     # step 0's measurement trustworthy goes blind to the frames that replaced
     # the signed ones: the observer is the check nobody updates.
     ("keyed", b"AUTHNP04"[::-1]),
+    # A CREDENTIALED request (user-keys step 8): a user logged in on the
+    # client. Learned before step 8's measurement, for the reason above.
+    ("credentialed", b"AUTHNP05"[::-1]),
     ("MAC'd", b"AUTHNP02"[::-1]),
 )
 

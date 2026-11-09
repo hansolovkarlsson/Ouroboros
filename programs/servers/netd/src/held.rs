@@ -3,8 +3,10 @@
 //!
 //! `login` derives a user's cluster key from the password and hands the seed to
 //! `netd` with `NETOP_KEY_HOLD`, then wipes its own copy. `netd` holds it while
-//! the user is logged in; from step 7 it signs that user's credentials with it,
-//! inside its own event loop, so the key never leaves this task again.
+//! the user is logged in, and since step 8 signs that user's credentials with
+//! it (`sign_parked`), inside its own event loop, so the key never leaves this
+//! task again. A session opened under a credential is closed when its uid's
+//! last key goes (`close_unheld`).
 //!
 //! The rules, each one a line below:
 //!
@@ -30,12 +32,14 @@ use syscall_abi::NET_KEY_MAX;
 
 use crate::syscall;
 
-/// One held key: the uid it signs for, the Ed25519 seed, and the packed task
-/// identity of the login that holds it.
+/// One held key: the uid it signs for, the Ed25519 seed, the packed task
+/// identity of the login that holds it, and when it was held (`Held::next`),
+/// so the newest of a uid's keys is the one that signs.
 struct HeldKey {
     uid: u32,
     seed: [u8; 32],
     owner: u64,
+    seq: u64,
 }
 
 impl Drop for HeldKey {
@@ -53,11 +57,13 @@ impl Drop for HeldKey {
 /// `netd` restart loses every key, and users log in again to have one held.
 pub struct Held {
     slots: [Option<HeldKey>; NET_KEY_MAX],
+    /// The next hold's `seq`: holds in the order they were made.
+    next: u64,
 }
 
 impl Held {
     pub fn new() -> Self {
-        Held { slots: core::array::from_fn(|_| None) }
+        Held { slots: core::array::from_fn(|_| None), next: 0 }
     }
 
     /// Hold `seed` for `uid` on behalf of `owner`, replacing any key `owner`
@@ -66,7 +72,8 @@ impl Held {
     pub fn hold(&mut self, uid: u32, seed: &[u8; 32], owner: u64) -> Option<usize> {
         self.drop_mine(owner);
         let i = self.slots.iter().position(|s| s.is_none())?;
-        self.slots[i] = Some(HeldKey { uid, seed: *seed, owner });
+        self.slots[i] = Some(HeldKey { uid, seed: *seed, owner, seq: self.next });
+        self.next += 1;
         Some(i)
     }
 
@@ -104,6 +111,30 @@ impl Held {
                 *slot = None;
             }
         }
+    }
+
+    /// The seed held for `uid` by a login that is still alive, for signing
+    /// that user's credential (step 8): the NEWEST of those keys. Two logins
+    /// of one user hold the same key, derived from the same name, realm and
+    /// password, unless the password changed between them; then only the
+    /// later login's key matches the registry the password change rewrote,
+    /// and the slot order says nothing about which that is (high review of
+    /// step 8). A dead login's key is not used, though the idle pass has not
+    /// reaped it yet: a killed login's user is not attested by it (medium
+    /// review of step 8).
+    pub fn seed_for(&self, uid: u32) -> Option<&[u8; 32]> {
+        self.slots.iter().flatten().filter(|k| k.uid == uid && alive(k.owner)).max_by_key(|k| k.seq).map(|k| &k.seed)
+    }
+
+    /// Whether a key is held for `uid` by a login that is still alive, asked
+    /// without waiting for the idle pass to reap a dead one. The one test of
+    /// "this user is held" every caller asks: what signs the credential
+    /// (`seed_for`), what lets a session opened under it be used
+    /// (`park_session`, `sign_parked`) and what keeps it open
+    /// (`close_unheld`), so no two of them disagree in the window between a
+    /// login's death and its reap (medium review of step 8).
+    pub fn holds_live(&self, uid: u32) -> bool {
+        self.seed_for(uid).is_some()
     }
 
     /// The uids with a key held, into `out`; returns how many (the diagnostic

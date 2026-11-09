@@ -362,11 +362,13 @@ IMAGE=build/espext2.img NO_BUILD=1 scripts/run-guest.sh -- \
 # expected: 23 PASS, "impersonate-gate: 0 check(s) failed"
 ```
 
-**Since step 7, and until step 8, a registered user crosses no guest
-export.** The dev registry lists `user`, and `netd`'s client sends no
-credential until step 8, so a `user` logged in on one guest is refused
-(`FS_ERR_AUTH`) at another guest's export. The two-node recipes below that
-log in as `user` on B refuse at A until then; as root they are unchanged.
+**A registered user crosses a guest export with a credential.** The dev
+registry lists `user`, so since user-keys step 7 a claim of `user` at a
+guest's export is served only with `user`'s credential, and since step 8 the
+other guest's `netd` sends one for every request of a uid whose key it holds:
+a `user` logged in on B is served at A, and once logged out (or with root's
+`su user`) is refused `FS_ERR_AUTH`. `make test-cred-client` drives exactly
+that on the ext2 pair.
 
 **The session gate** (step 4 of `docs/roadmap/roadmap-fid-verbs.md`, 2026-09-07):
 `session-gate` runs the plan's checks and negative controls against the live
@@ -558,8 +560,10 @@ python3 scripts/np9p_server.py 5641 --misbehave bad-tag   # keyed replies a corr
 python3 scripts/np9p_server.py 5641 --unkeyed       # a v0.20.0-shaped export: ignores a key offer
 python3 scripts/np9p_server.py 5641 --users=PATH    # require credentials by that registry, not the dev one
 #   (the dev registry lists `user`: an uncredentialed claim of `user` here is
-#   refused, so a guest logged in as `user` reads nothing until step 8 of
-#   docs/roadmap/roadmap-user-keys.md; every rig here logs in as root)
+#   refused. A guest logged in as `user` sends `user`'s credential, since step 8
+#   of docs/roadmap/roadmap-user-keys.md, and is served; after the logout,
+#   root's `su user` is refused, the server logging "user is registered and the
+#   request carries no credential". Every rig here logs in as root)
 #   ...then in the guest shell:
 #   mount -r 10.0.2.2:5641 /mnt/a ; ls /mnt/a ; cat /mnt/a/HELLO.TXT
 ```

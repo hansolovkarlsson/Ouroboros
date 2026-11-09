@@ -657,6 +657,8 @@ fn serve(packed_mac: u64) -> ! {
         // long that can be. Outside the NIC block below, since a node with no
         // NIC still has logins.
         held.reap_dead();
+        // And the sessions that spoke for a user whose last key just went.
+        close_unheld(&mut sessions, &held);
 
         // 2. Incoming frames: ARP replies, parked remote mounts, dial-out
         // connections, and the TCP server.
@@ -672,8 +674,8 @@ fn serve(packed_mac: u64) -> ! {
             // that dies unanswered says NO_FS (an unreachable peer); a session
             // that dies under its fids says FS_ERROR (fail-dead, the word
             // `client_exchange` used for the same event before step 2).
-            service_remotes(&mut remotes, &auth, syscall_abi::NO_FS, Some(&mut pending));
-            service_remotes(&mut sessions, &auth, syscall_abi::FS_ERROR, None);
+            service_remotes(&mut remotes, &auth, &held, syscall_abi::NO_FS, Some(&mut pending));
+            service_remotes(&mut sessions, &auth, &held, syscall_abi::FS_ERROR, None);
             pump_dials(&mac, &mut remotes, DIAL_IDLE_TICKS);
             // A held session idles for the far side's reap plus a margin (the
             // backstop for a client that crashed without clunking, Decision 4)
@@ -966,7 +968,7 @@ fn handle_client(packed_mac: u64, buf: &[u8], len: usize, dials: &mut [Option<Di
             // or a chained-cpu child) before this frame. So a mount reaching
             // here is top-level, and its park is driven by the serve loop.
             let mut r = [0u8; syscall_abi::MSG_MAX_LEN as usize];
-            if let Some(rlen) = handle_rmount(packed_mac, call, buf, len, sessions, remotes, &mut r, auth) {
+            if let Some(rlen) = handle_rmount(packed_mac, call, buf, len, sessions, remotes, &mut r, auth, held) {
                 reply(call, &r[..rlen]);
             }
         }
@@ -990,6 +992,7 @@ fn handle_client(packed_mac: u64, buf: &[u8], len: usize, dials: &mut [Option<Di
             let mut r = [0u8; 8 + 8 + 8 * syscall_abi::NET_KEY_MAX];
             let rlen = key_op(&buf[..len.min(buf.len())], held, &mut r);
             reply(call, &r[..rlen]);
+            close_unheld(sessions, held);
         }
         syscall_abi::NETOP_RUN_MORE => {
             // The shell pulls the next chunk of its last cpu run's output; an
@@ -1576,6 +1579,9 @@ fn park_run(packed_mac: u64, call: u64, buf: &[u8], len: usize, out: &mut [u8], 
     // last. Nothing here receives any more, but the ordering rule stands and
     // is cheaper to keep than to re-derive.
     let owner = syscall(syscall_abi::SENDER_TASK, 0);
+    // And its uid, whose held key (if any) signs the run's credential (step 8),
+    // read in the same handler for the same reason.
+    let uid = syscall4(syscall_abi::SENDER_ID, 0, 0, 0, 0) as u32;
     let fail = |out: &mut [u8], msg: &[u8]| -> Option<usize> {
         let n = msg.len().min(out.len());
         out[..n].copy_from_slice(&msg[..n]);
@@ -1681,7 +1687,7 @@ fn park_run(packed_mac: u64, call: u64, buf: &[u8], len: usize, out: &mut [u8], 
     // (`run_in_flight`). No line, no anchor: zeros, which `run_in_flight`
     // reads as none.
     let anchor = clusterkeys::find_by_ip(auth.authorized(), &ip).map_or([0u8; clusterkeys::KEY_LEN], |peer| peer.key);
-    match park_remote(&dst_mac, ip, port, ninep_abi::NP_RUN, owner, call, &who, &np[..hdr + clen], anchor, remotes) {
+    match park_remote(&dst_mac, ip, port, ninep_abi::NP_RUN, owner, call, &who, uid, &np[..hdr + clen], anchor, remotes) {
         Ok(()) => None,
         Err(msg) => fail(out, msg),
     }
@@ -1692,7 +1698,7 @@ fn park_run(packed_mac: u64, call: u64, buf: &[u8], len: usize, out: &mut [u8], 
 /// already refused a machine that cannot sign. `Err` is the text to answer the
 /// caller with.
 #[allow(clippy::too_many_arguments)]
-fn park_remote(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, verb: u64, caller: u64, call: u64, who: &[u8; ninep_abi::NP_NAME_LEN], np: &[u8], anchor: [u8; clusterkeys::KEY_LEN], remotes: &mut [Option<RemoteConn>; MAX_REMOTE]) -> Result<(), &'static [u8]> {
+fn park_remote(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, verb: u64, caller: u64, call: u64, who: &[u8; ninep_abi::NP_NAME_LEN], uid: u32, np: &[u8], anchor: [u8; clusterkeys::KEY_LEN], remotes: &mut [Option<RemoteConn>; MAX_REMOTE]) -> Result<(), &'static [u8]> {
     let Some(slot) = remotes.iter().position(|r| r.is_none()) else {
         return Err(b"cpu: no free connection for the run (try again)\r\n");
     };
@@ -1712,7 +1718,7 @@ fn park_remote(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, verb: u64, caller: u64
     // `service_remotes` both of those things; no extra field is needed.
     // `since: 0` for the reason `park_rmount` gives: the clock starts at the
     // first send, never at the park.
-    wire.parked = Some(Parked { caller, call, nonce: [0; ninep_abi::NP_NONCE_LEN], expect_key: anchor, since: 0, who: *who, verb, opening: false, raw });
+    wire.parked = Some(Parked { caller, call, nonce: [0; ninep_abi::NP_NONCE_LEN], expect_key: anchor, since: 0, who: *who, uid, verb, opening: false, raw });
     Ok(())
 }
 
@@ -1793,7 +1799,7 @@ fn verify_sealed(resp: &[u8], got: usize, nonce: &[u8; ninep_abi::NP_NONCE_LEN],
 /// Not inlined: its own frame, for the reason `park_rmount` gives.
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn park_session(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, uid: u32, verb: u64, caller: u64, call: u64, who: &[u8; ninep_abi::NP_NAME_LEN], expect_key: Option<[u8; clusterkeys::KEY_LEN]>, auth: &Auth, msg: &[u8], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS]) -> Result<(), u64> {
+fn park_session(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, uid: u32, verb: u64, caller: u64, call: u64, who: &[u8; ninep_abi::NP_NAME_LEN], expect_key: Option<[u8; clusterkeys::KEY_LEN]>, auth: &Auth, held: &held::Held, msg: &[u8], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS]) -> Result<(), u64> {
     let Some(expect_key) = expect_key else {
         return Err(syscall_abi::FS_ERR_AUTH);
     };
@@ -1807,7 +1813,32 @@ fn park_session(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, uid: u32, verb: u64, 
     // so the verb is refused busy below) or established. A closing or closed
     // one is spent - its fids died with the connection - and is not found, so
     // the verb opens a fresh session beside it until the pump reaps it.
-    let live = sessions.iter().position(|s| matches!(s, Some(s) if s.peer_ip == ip && s.peer_port == port && s.uid == uid && matches!(s.state, DialState::Connecting | DialState::Established)));
+    //
+    // And a session opened under a user's credential is live only while that
+    // user still has a key held by a login that is alive (user-keys step 8):
+    // a keyed frame carries no credential, so riding such a session after the
+    // logout, or after the login was killed and before the idle pass reaps its
+    // key, would be served as the attested user. Asked HERE, in the one lookup
+    // every verb goes through, rather than relying on each path that loses a
+    // key to have called `close_unheld` first (high review of step 8). Such a
+    // session for this endpoint and uid is CLOSED here, not passed over: one
+    // passed over stayed Established beside the fresh session this verb
+    // opens, and a later login of the same user made it usable again, the
+    // first in slot order, so the fresh session's fids were sent down it
+    // (medium review of step 8). Liveness is asked once, for the one uid.
+    let key_live = held.holds_live(uid);
+    if !key_live {
+        for c in sessions.iter_mut().flatten() {
+            if c.peer_ip == ip && c.peer_port == port && c.uid == uid && c.keys[0].attested {
+                close_one_unheld(c);
+            }
+        }
+    }
+    let live = sessions.iter().position(|s| {
+        matches!(s, Some(s) if s.peer_ip == ip && s.peer_port == port && s.uid == uid
+            && matches!(s.state, DialState::Connecting | DialState::Established)
+            && !(s.keys[0].attested && !key_live))
+    });
     if let Some(i) = live {
         let s = sessions[i].as_mut().unwrap();
         // Pick up a re-resolved next hop. `handle_rmount` runs ARP fresh on
@@ -1845,7 +1876,7 @@ fn park_session(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, uid: u32, verb: u64, 
         // parked at `now()` would answer FS_ERROR and destroy a live session's
         // fids over a peer that was never asked (review of #152). This is the
         // same rule, and the same reason, as `park_rmount`'s.
-        s.parked = Some(Parked { caller, call, nonce: [0; ninep_abi::NP_NONCE_LEN], expect_key, since: 0, who: *who, verb, opening: false, raw });
+        s.parked = Some(Parked { caller, call, nonce: [0; ninep_abi::NP_NONCE_LEN], expect_key, since: 0, who: *who, uid, verb, opening: false, raw });
         return Ok(());
     }
     let Some(slot) = sessions.iter().position(|s| s.is_none()) else {
@@ -1872,7 +1903,7 @@ fn park_session(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, uid: u32, verb: u64, 
     s.state = DialState::Connecting; // the pump sends the SYN
     // since = 0: the deadline clock starts at the first SYN send, in
     // `pump_dials`, for the reason `park_rmount` gives.
-    s.parked = Some(Parked { caller, call, nonce: [0; ninep_abi::NP_NONCE_LEN], expect_key, since: 0, who: *who, verb, opening: true, raw: SESSION_LEN as u16 });
+    s.parked = Some(Parked { caller, call, nonce: [0; ninep_abi::NP_NONCE_LEN], expect_key, since: 0, who: *who, uid, verb, opening: true, raw: SESSION_LEN as u16 });
     Ok(())
 }
 
@@ -1888,7 +1919,7 @@ fn park_session(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, uid: u32, verb: u64, 
 /// `FS_ERR_BUSY` before `handle_client`'s frame is built.)
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn handle_rmount(packed_mac: u64, call: u64, buf: &[u8], len: usize, sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], out: &mut [u8], auth: &Auth) -> Option<usize> {
+fn handle_rmount(packed_mac: u64, call: u64, buf: &[u8], len: usize, sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], out: &mut [u8], auth: &Auth, held: &held::Held) -> Option<usize> {
     // A bare-status failure reply the shell surfaces cleanly. `st` distinguishes
     // an unreachable peer (NO_FS) from an auth failure (FS_ERR_AUTH).
     let fail = |out: &mut [u8], st: u64| -> Option<usize> {
@@ -1948,9 +1979,9 @@ fn handle_rmount(packed_mac: u64, call: u64, buf: &[u8], len: usize, sessions: &
     // is parked on its slot's own buffers; each branch is its own frame.
     let verb = if msg.len() >= 8 { read_u64(msg, 0) } else { 0 };
     let parked = if shape(verb) != Shape::Path {
-        park_session(&dst_mac, ip, port, uid, verb, caller, call, &who, expect_key, auth, msg, sessions)
+        park_session(&dst_mac, ip, port, uid, verb, caller, call, &who, expect_key, auth, held, msg, sessions)
     } else {
-        park_rmount(&dst_mac, ip, port, verb, caller, call, &who, expect_key, auth, msg, remotes)
+        park_rmount(&dst_mac, ip, port, verb, caller, call, &who, uid, expect_key, auth, msg, remotes)
     };
     match parked {
         Ok(()) => None,
@@ -1981,7 +2012,7 @@ fn handle_rmount(packed_mac: u64, call: u64, buf: &[u8], len: usize, sessions: &
 /// (their buffers live in the slots), and the attribute keeps them so.
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn park_rmount(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, verb: u64, caller: u64, call: u64, who: &[u8; ninep_abi::NP_NAME_LEN], expect_key: Option<[u8; clusterkeys::KEY_LEN]>, auth: &Auth, msg: &[u8], remotes: &mut [Option<RemoteConn>; MAX_REMOTE]) -> Result<(), u64> {
+fn park_rmount(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, verb: u64, caller: u64, call: u64, who: &[u8; ninep_abi::NP_NAME_LEN], uid: u32, expect_key: Option<[u8; clusterkeys::KEY_LEN]>, auth: &Auth, msg: &[u8], remotes: &mut [Option<RemoteConn>; MAX_REMOTE]) -> Result<(), u64> {
     // Refused before the send, as the one-shot path did: the reply's signer
     // must be known in advance (Decision 3's client-side asymmetry).
     let Some(expect_key) = expect_key else {
@@ -2022,7 +2053,7 @@ fn park_rmount(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, verb: u64, caller: u64
     // the run to return (review of #149). Once the SYN goes out, it ages
     // normally. (A park whose SYN is sent and is THEN starved by a long run can
     // still age; that residual closes at step 3, which removes the run drain.)
-    wire.parked = Some(Parked { caller, call, nonce: [0; ninep_abi::NP_NONCE_LEN], expect_key, since: 0, who: *who, verb, opening: false, raw });
+    wire.parked = Some(Parked { caller, call, nonce: [0; ninep_abi::NP_NONCE_LEN], expect_key, since: 0, who: *who, uid, verb, opening: false, raw });
     Ok(())
 }
 
@@ -2060,7 +2091,7 @@ fn park_rmount(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, verb: u64, caller: u64
 /// here is affordable because this runs at the top level of `serve`, never
 /// from the re-entrant drain (the depth that made parking there over-reach,
 /// see the plan's ledger).
-fn service_remotes<const H: usize, const K: usize>(remotes: &mut [Option<Wire<REMOTE_SBUF, REMOTE_RBUF, H, K>>], auth: &Auth, dead: u64, mut pending: Option<&mut PendingRun>) {
+fn service_remotes<const S: usize, const H: usize, const K: usize>(remotes: &mut [Option<Wire<S, REMOTE_RBUF, H, K>>], auth: &Auth, held: &held::Held, dead: u64, mut pending: Option<&mut PendingRun>) {
     let t = now();
     // ONE reply buffer for the whole pass, shared by the run arm and the
     // framed-reply arm below. Two arrays here cost ~768 bytes on `serve`'s own
@@ -2077,7 +2108,7 @@ fn service_remotes<const H: usize, const K: usize>(remotes: &mut [Option<Wire<RE
         // never reaches the wire. A slot already Closed is left to the arms
         // below, which answer its caller as a dead peer.
         if c.parked.as_ref().unwrap().raw != 0 && c.state != DialState::Closed {
-            if !sign_parked(c, auth) {
+            if !sign_parked(c, auth, held) {
                 // A request too large to frame, or on a keyed session one
                 // `frame_keyed_in_place` refused (too large, or `seq` would
                 // overflow); `can_send` was asked at the park. Answered as the
@@ -2092,11 +2123,7 @@ fn service_remotes<const H: usize, const K: usize>(remotes: &mut [Option<Wire<RE
                 };
                 reply(parked.call, &r[..n]);
                 c.held_len = 0;
-                match c.state {
-                    DialState::Established => c.state = DialState::Closing,
-                    DialState::Closing | DialState::Closed => {}
-                    _ => c.state = DialState::Closed,
-                }
+                close_politely(c);
             }
             continue;
         }
@@ -2148,11 +2175,7 @@ fn service_remotes<const H: usize, const K: usize>(remotes: &mut [Option<Wire<RE
                 msg.len()
             };
             reply(parked.call, &r[..n]);
-            match c.state {
-                DialState::Established => c.state = DialState::Closing,
-                DialState::Closing | DialState::Closed => {}
-                _ => c.state = DialState::Closed,
-            }
+            close_politely(c);
             continue;
         }
         // Complete: the frame's own length says so. A frame the buffer cannot
@@ -2210,7 +2233,7 @@ fn service_remotes<const H: usize, const K: usize>(remotes: &mut [Option<Wire<RE
             // peer that answered without acking is refused below, not trusted.
             // The keys, if the export keyed the session, come from this
             // reply's result (`r[8..n]`, after the status).
-            match phase_two(c, auth, &parked.who, &parked.nonce, &r[8..n]) {
+            match phase_two(c, auth, user_cred(held, parked.uid, &parked.expect_key), &parked.who, &parked.nonce, &r[8..n]) {
                 Ok((total, nonce)) => {
                     c.slen = total;
                     c.last_activity = t;
@@ -2262,11 +2285,72 @@ fn service_remotes<const H: usize, const K: usize>(remotes: &mut [Option<Wire<RE
         }
         // Done with the connection: a live one is closed politely. A slot
         // still connecting has nothing to FIN; it is Closed outright.
-        match c.state {
-            DialState::Established => c.state = DialState::Closing,
-            DialState::Closing | DialState::Closed => {}
-            _ => c.state = DialState::Closed,
+        close_politely(c);
+    }
+}
+
+/// Close every client session opened under a user's credential whose uid has
+/// no key held any more (user-keys step 8; Decision 4's "a uid's attested
+/// sessions close when its last key goes"). A keyed session's frames carry no
+/// name and no credential, so without this a session opened while `user` was
+/// logged in would go on serving anything running as `user`'s uid here after
+/// the logout, as `user`: a `su user` by root, or a program the user left
+/// running. Closed politely (a FIN once anything already sent is acked), and
+/// its fids are gone with it; the next verb from that uid opens a fresh
+/// session, uncredentialed, which the far side judges afresh.
+///
+/// A verb parked on it is refused now, `FS_ERR_AUTH`, sent or not. One not
+/// yet sent would otherwise be signed, or sent keyed, on a session whose user
+/// has gone. One already on the wire cannot be left to finish: the FIN goes
+/// once the request is acked, and the far export drops a connection on its
+/// peer's FIN with the reply unsent, so its caller would wait out the
+/// deadline for an `FS_ERROR` (medium review of step 8); and an open among
+/// them would hand back a fid that died with the session.
+///
+/// Called wherever the table can lose a key: after each key op
+/// (`handle_client`) and after the idle pass's `reap_dead` (`serve`). It is
+/// the prompt close, not the guard: `park_session` closes such a session for
+/// the uid it parks (`Held::holds_live`), and `sign_parked` refuses to send
+/// a keyed verb on one, so a path that drops a key without calling this
+/// leaves a session open a little longer, never usable.
+fn close_unheld(sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], held: &held::Held) {
+    for c in sessions.iter_mut().flatten() {
+        let attested = c.keys.first().is_some_and(|a| a.attested);
+        if attested && !held.holds_live(c.uid) {
+            close_one_unheld(c);
         }
+    }
+}
+
+/// Close one attested session whose user is no longer held: the body of
+/// `close_unheld`, and of `park_session`'s close of a session it will not
+/// use. A session already Closed is left as it is.
+fn close_one_unheld(c: &mut SessionConn) {
+    if c.state == DialState::Closed {
+        return;
+    }
+    if let Some(pk) = c.parked.take() {
+        let mut r = [0u8; 8];
+        let n = status_only(&mut r, syscall_abi::FS_ERR_AUTH);
+        reply(pk.call, &r[..n]);
+        c.held_len = 0;
+    }
+    if let Some(ka) = c.keys.first_mut() {
+        ka.forget();
+    }
+    c.fids = 0;
+    close_politely(c);
+}
+
+/// Done with a client connection: a live one is closed politely (a FIN once
+/// what is queued is sent and acked), and one still connecting, which has
+/// nothing to FIN, is Closed outright. The one copy of that rule for the
+/// parked tables (`service_remotes`, `close_unheld`).
+fn close_politely<const S: usize, const R: usize, const H: usize, const K: usize>(c: &mut Wire<S, R, H, K>) {
+    match c.state {
+        DialState::Established => c.state = DialState::Closing,
+        DialState::Closing | DialState::Closed => {}
+        _ => c.state = DialState::Closed,
     }
 }
 
@@ -2640,13 +2724,29 @@ const MAX_REMOTE: usize = 3;
 /// frame a remote slot sends AND the raw verb a session slot holds while its
 /// `NP_SESSION` is in flight (`Wire::held`).
 const REMOTE_NP_MAX: usize = syscall_abi::MSG_MAX_LEN as usize - syscall_abi::NETOP_RMOUNT_MSG;
-/// A remote slot's buffers. Out: a signed frame over `REMOTE_NP_MAX` (752)
-/// bytes of NP is `NP_FRAME_MAX`-shaped: 908. In: a sealed reply to a
+/// A remote slot's buffers. Out: a credentialed frame over `REMOTE_NP_MAX`
+/// (752) bytes of NP is `NP_FRAME_MAX`-shaped: 976, of which the credential
+/// block is 68 (user-keys step 8; 908 before it). In: a sealed reply to a
 /// `NP_REMOTE_CHUNK` (512) read is under 600, and to a readdir filling the
 /// client's whole 768-byte reply under 840. A framed reply that cannot fit is
 /// a protocol error, failed at once rather than waited for. Sized to the byte
 /// because every slot sits on `serve`'s fixed stack.
-const REMOTE_SBUF: usize = ninep_abi::NP_NET_LEN_PREFIX + ninep_abi::NP_AUTH_HDR_SIGNED + REMOTE_NP_MAX;
+const REMOTE_SBUF: usize = ninep_abi::NP_NET_LEN_PREFIX + ninep_abi::NP_AUTH_HDR_SIGNED + CRED_BLOCK_LEN + REMOTE_NP_MAX;
+/// A session slot's send buffer: step 7's size, WITHOUT room for the
+/// credential block beside a full `REMOTE_NP_MAX` message. A session slot
+/// carries fid verbs only, and the largest any client sends is a remote
+/// `NP_PWRITE`, 48 bytes of header and `NP_REMOTE_CHUNK` (512) of data, well
+/// inside the 684 that fit with the block (the assert below). Giving it the
+/// block's 68 bytes as well cost 912 bytes of headroom on the async rig's
+/// deepest checks, not 68 a slot: `park_session` assembles a new
+/// `SessionConn` on its own frame and copies it into the slot, and past step
+/// 7's size the send buffer was assembled there too, its frame 1,824 bytes
+/// then 2,800 (measured, user-keys step 8; building it in place by
+/// `ptr::write`, or through a constructor never inlined, did not stop the
+/// copy). A fid verb too large to frame with its credential is refused
+/// `FS_ERR_AUTH`, the answer every request too large to frame gets.
+const SESSION_SBUF: usize = ninep_abi::NP_NET_LEN_PREFIX + ninep_abi::NP_AUTH_HDR_SIGNED + REMOTE_NP_MAX;
+const _: () = assert!(SESSION_SBUF >= NP_SIGNED_NP_OFF + CRED_BLOCK_LEN + ninep_abi::NP_REQ_PAYLOAD as usize + ninep_abi::NP_REMOTE_CHUNK);
 const REMOTE_RBUF: usize = 1024;
 /// Every parking slot across BOTH tables (`remotes`, then `sessions`), indexed
 /// as `remote_src_port` numbers them. Each draws its source port from its own
@@ -2715,6 +2815,11 @@ struct Parked {
     /// The caller's name, kept for a session slot's second phase: the held verb
     /// is signed only once the far side has accepted the `NP_SESSION`.
     who: [u8; ninep_abi::NP_NAME_LEN],
+    /// The caller's uid (`SENDER_ID`), captured at the park beside `who`, the
+    /// name it resolved to: the credential is signed with the key held for
+    /// THIS uid (user-keys step 8). Never read again at sign time, when the
+    /// last message received is whoever's arrived since.
+    uid: u32,
     /// The NP verb in flight, for a session slot's fid refcount (`NP_OPEN`
     /// adds one, `NP_CLUNK` removes one). Read on a path slot too, where it is
     /// never a fid verb, so the count there stays 0 and the slot closes.
@@ -2759,11 +2864,29 @@ fn park_raw(sbuf: &mut [u8], np: &[u8]) -> Option<u16> {
 /// so the signature covers it, and the secret is kept in the slot for phase
 /// two. No offer where this boot's counter is unusable: that node keys
 /// nothing, and its sessions stay signed (Decision 6).
+///
+/// A signed frame carries a user credential (`AUTHNP05`, user-keys step 8)
+/// when a key is held for the uid captured at the park (`Parked::uid`):
+/// every one-shot, a run, a session's opening `NP_SESSION`, and each verb of
+/// an unkeyed session. A keyed session's frames carry none; the session's
+/// user was attested once, at its opening, which marks the session
+/// `attested` so that it closes when that user's last key goes
+/// (`close_unheld`).
 #[inline(never)]
-fn sign_parked<const S: usize, const R: usize, const H: usize, const K: usize>(c: &mut Wire<S, R, H, K>, auth: &Auth) -> bool {
+fn sign_parked<const S: usize, const R: usize, const H: usize, const K: usize>(c: &mut Wire<S, R, H, K>, auth: &Auth, held: &held::Held) -> bool {
     let pk = c.parked.as_mut().unwrap();
     if let Some(ka) = c.keys.first_mut() {
         if let KeyState::Keyed { k_c2s, seq, .. } = &mut ka.state {
+            // A session opened under a user's credential sends nothing keyed
+            // once that user is not held: the frame carries no credential,
+            // so it would be served as them. Asked here, at the send, and not
+            // only at the park, so that no path which loses a key between the
+            // two has to have closed the session first (medium review of
+            // step 8). Refused as a frame that does not fit is.
+            if ka.attested && !held.holds_live(pk.uid) {
+                pk.raw = 0;
+                return false;
+            }
             let total = frame_keyed_in_place(k_c2s, seq, NP_SIGNED_NP_OFF, pk.raw as usize, &mut c.sbuf);
             pk.raw = 0;
             if total == 0 {
@@ -2782,7 +2905,13 @@ fn sign_parked<const S: usize, const R: usize, const H: usize, const K: usize>(c
             }
         }
     }
-    let (total, nonce) = frame_signed_in_place(auth, &pk.who, pk.raw as usize, &mut c.sbuf);
+    let cred = user_cred(held, pk.uid, &pk.expect_key);
+    if pk.opening && cred.is_some() {
+        if let Some(ka) = c.keys.first_mut() {
+            ka.attested = true;
+        }
+    }
+    let (total, nonce) = frame_signed_in_place(auth, &pk.who, cred, pk.raw as usize, &mut c.sbuf);
     pk.raw = 0;
     if total == 0 {
         return false;
@@ -2891,6 +3020,7 @@ fn verify_keyed_reply(resp: &[u8], got: usize, k_s2c: &[u8; ninep_abi::NP_SESSIO
 fn phase_two<const S: usize, const R: usize, const H: usize, const K: usize>(
     c: &mut Wire<S, R, H, K>,
     auth: &Auth,
+    cred: Option<UserCred>,
     who: &[u8; ninep_abi::NP_NAME_LEN],
     nonce: &[u8; ninep_abi::NP_NONCE_LEN],
     result: &[u8],
@@ -2963,7 +3093,7 @@ fn phase_two<const S: usize, const R: usize, const H: usize, const K: usize>(
             return if total == 0 { Err(syscall_abi::FS_ERR_AUTH) } else { Ok((total, [0; ninep_abi::NP_NONCE_LEN])) };
         }
     }
-    let (total, nonce) = frame_signed(auth, who, &c.held[..held_len], &mut c.sbuf);
+    let (total, nonce) = frame_signed(auth, who, cred, &c.held[..held_len], &mut c.sbuf);
     if total == 0 {
         return Err(syscall_abi::FS_ERR_AUTH);
     }
@@ -2980,7 +3110,7 @@ type RemoteConn = Wire<REMOTE_SBUF, REMOTE_RBUF, 0, 0>;
 /// opens (step 2 of docs/roadmap/roadmap-async-rmount.md), and the one slot of
 /// session keys (step 7 of docs/roadmap/roadmap-session-auth.md) that no other
 /// table carries.
-type SessionConn = Wire<REMOTE_SBUF, REMOTE_RBUF, REMOTE_NP_MAX, 1>;
+type SessionConn = Wire<SESSION_SBUF, REMOTE_RBUF, REMOTE_NP_MAX, 1>;
 
 #[derive(Clone, Copy, PartialEq)]
 enum DialState {
@@ -3112,6 +3242,12 @@ struct SessionAuth {
     /// than run as the opener: sessions are looked up by uid, the far side
     /// authorizes by name, and the two must not drift apart (review of step 7).
     opener: [u8; ninep_abi::NP_NAME_LEN],
+    /// The opening `NP_SESSION` carried the opener's credential (user-keys
+    /// step 8). Such a session speaks for a user who was logged in here when
+    /// it opened, and is closed when no key is held for its uid any more
+    /// (`close_unheld`), so nothing running as that uid afterwards can ride
+    /// it as the attested user.
+    attested: bool,
     state: KeyState,
 }
 
@@ -3141,7 +3277,7 @@ enum KeyState {
 }
 
 impl SessionAuth {
-    const NONE: SessionAuth = SessionAuth { opener: [0; ninep_abi::NP_NAME_LEN], state: KeyState::None };
+    const NONE: SessionAuth = SessionAuth { opener: [0; ninep_abi::NP_NAME_LEN], attested: false, state: KeyState::None };
 
     /// Wipe whatever secret the state holds and return to `None`: at phase two
     /// once the ephemeral is spent, on every refusal of the opening, and in
@@ -4870,6 +5006,7 @@ fn deny_claim(c: &mut TcpConn, request: &[u8], cause: Refused, auth: &Auth, nonc
 fn frame_signed(
     auth: &Auth,
     who: &[u8; ninep_abi::NP_NAME_LEN],
+    cred: Option<UserCred>,
     np: &[u8],
     out: &mut [u8],
 ) -> (usize, [u8; ninep_abi::NP_NONCE_LEN]) {
@@ -4877,14 +5014,44 @@ fn frame_signed(
         return (0, [0u8; ninep_abi::NP_NONCE_LEN]);
     }
     out[NP_SIGNED_NP_OFF..NP_SIGNED_NP_OFF + np.len()].copy_from_slice(np);
-    frame_signed_in_place(auth, who, np.len(), out)
+    frame_signed_in_place(auth, who, cred, np.len(), out)
 }
+
+/// A user credential for an outbound request (user-keys step 8): the seed
+/// `login` handed over for the caller's uid, and the key of the export the
+/// request is for, which is the key its reply is checked against
+/// (`Parked::expect_key`, resolved from the address dialled). Built only by
+/// [`user_cred`], so no request carries a credential for a uid but its own.
+#[derive(Clone, Copy)]
+struct UserCred<'a> {
+    seed: &'a [u8; 32],
+    export: &'a [u8; clusterkeys::KEY_LEN],
+}
+
+/// The credential a parked request carries: the key held for the uid
+/// captured at its park, if one is held, bound to its export. None for a
+/// caller with no key held (it sends `AUTHNP03`, as before step 8), and for a
+/// run to an address no `authorized` line names, whose export key is unknown
+/// (all zeros: `park_run`'s "no anchor").
+fn user_cred<'a>(held: &'a held::Held, uid: u32, export: &'a [u8; clusterkeys::KEY_LEN]) -> Option<UserCred<'a>> {
+    if *export == [0u8; clusterkeys::KEY_LEN] {
+        return None;
+    }
+    held.seed_for(uid).map(|seed| UserCred { seed, export })
+}
+
+/// Bytes a kind-1 credential block adds to a signed frame: its header and
+/// the user's signature.
+const CRED_BLOCK_LEN: usize = ninep_abi::NP_CRED_HDR_LEN + ninep_abi::NP_CRED_USER_SIG_LEN;
 
 /// [`frame_signed`] for an NP message already in place at `NP_SIGNED_NP_OFF`
 /// of `out`, `np_len` bytes long: what a parked request is (`Parked::raw`).
+/// With a credential the message moves `CRED_BLOCK_LEN` further on, and the
+/// frame is `AUTHNP05`.
 fn frame_signed_in_place(
     auth: &Auth,
     who: &[u8; ninep_abi::NP_NAME_LEN],
+    cred: Option<UserCred>,
     np_len: usize,
     out: &mut [u8],
 ) -> (usize, [u8; ninep_abi::NP_NONCE_LEN]) {
@@ -4908,7 +5075,7 @@ fn frame_signed_in_place(
     // fall back to now, and a request this machine cannot authenticate must not
     // be sent at all - see the gate above.
     match auth.signing.as_ref() {
-        Some(id) => frame_signed_ed25519(&id.key, who, np_len, out),
+        Some(id) => frame_signed_ed25519(&id.key, who, cred, np_len, out),
         None => (0, zero_nonce),
     }
 }
@@ -4921,18 +5088,34 @@ fn frame_signed_in_place(
 /// and the nonce. The nonce is what binds the two halves of the exchange:
 /// the exporter signs its reply over that same value, so a captured reply cannot
 /// be replayed against a different request.
+///
+/// With `cred` the frame is `AUTHNP05` (user-keys step 8): the message moves
+/// up by `CRED_BLOCK_LEN`, the credential block goes where it was, and the
+/// machine signature covers the block and the message under `AUTHNP05`'s own
+/// tag. The tag is ninep-abi's `request_sig_domain` of the magic written, for
+/// both formats, so this site cannot sign a credentialed frame under the old
+/// tag.
 fn frame_signed_ed25519(
     key: &ed25519::SigningKey,
     who: &[u8; ninep_abi::NP_NAME_LEN],
+    cred: Option<UserCred>,
     np_len: usize,
     out: &mut [u8],
 ) -> (usize, [u8; ninep_abi::NP_NONCE_LEN]) {
     let zero_nonce = [0u8; ninep_abi::NP_NONCE_LEN];
     let p = ninep_abi::NP_NET_LEN_PREFIX;
-    let body = ninep_abi::NP_AUTH_HDR_SIGNED + np_len;
+    let block = if cred.is_some() { CRED_BLOCK_LEN } else { 0 };
+    let body = ninep_abi::NP_AUTH_HDR_SIGNED + block + np_len;
     let total = p + body;
     if total > out.len() || np_len > ninep_abi::NP_NET_MAX {
         return (0, zero_nonce);
+    }
+    let magic = if cred.is_some() { ninep_abi::NP_AUTH_MAGIC_USER } else { ninep_abi::NP_AUTH_MAGIC_SIGNED };
+    let Some(tag) = ninep_abi::request_sig_domain(magic) else {
+        return (0, zero_nonce);
+    };
+    if block != 0 {
+        out.copy_within(NP_SIGNED_NP_OFF..NP_SIGNED_NP_OFF + np_len, NP_SIGNED_NP_OFF + block);
     }
     // Fresh nonce: [monotonic_us:8][our_ip_packed:8], as the MAC'd path uses.
     // Only freshness is required of it, not secrecy - and with a signature the
@@ -4946,22 +5129,33 @@ fn frame_signed_ed25519(
     nonce[8..16].copy_from_slice(&ipp.to_le_bytes());
 
     out[0..4].copy_from_slice(&(body as u32).to_le_bytes());
-    out[p..p + 8].copy_from_slice(&ninep_abi::NP_AUTH_MAGIC_SIGNED.to_le_bytes());
+    out[p..p + 8].copy_from_slice(&magic.to_le_bytes());
     let noff = p + ninep_abi::NP_AUTH_NONCE_OFF;
     out[noff..noff + ninep_abi::NP_NONCE_LEN].copy_from_slice(&nonce);
     let woff = p + ninep_abi::NP_AUTH_NAME_OFF;
     out[woff..woff + ninep_abi::NP_NAME_LEN].copy_from_slice(who);
+    let public = key.public();
     let koff = p + ninep_abi::NP_AUTH_PUBKEY_OFF;
-    out[koff..koff + ninep_abi::NP_PUBKEY_LEN].copy_from_slice(&key.public());
-    // The NP message is already in place; the header is written around it.
+    out[koff..koff + ninep_abi::NP_PUBKEY_LEN].copy_from_slice(&public);
+    if let Some(cred) = cred {
+        // The user's signature first: the machine's covers the block.
+        let at = NP_SIGNED_NP_OFF + block;
+        let sig = user_sign(cred, &nonce, who, &public, &out[at..at + np_len]);
+        let b = NP_SIGNED_NP_OFF;
+        out[b..b + 2].copy_from_slice(&ninep_abi::NP_CRED_KIND_USER_SIG.to_le_bytes());
+        out[b + 2..b + 4].copy_from_slice(&(ninep_abi::NP_CRED_USER_SIG_LEN as u16).to_le_bytes());
+        out[b + ninep_abi::NP_CRED_HDR_LEN..b + block].copy_from_slice(&sig);
+    }
+    // The NP message (and any credential block before it) is in place; the
+    // header is written around it.
     let (head, rest) = out.split_at_mut(NP_SIGNED_NP_OFF);
-    let np = &rest[..np_len];
+    let np = &rest[..block + np_len];
 
-    // Signed over SIG_DOMAIN_REQUEST ‖ nonce ‖ name ‖ np - the same bytes the
-    // retired MAC covered, after the tag - and via the two-part entry point, so
-    // the concatenation is never built in memory.
+    // Signed over the tag ‖ nonce ‖ name ‖ every byte after `sig` (for
+    // AUTHNP03 the message, for AUTHNP05 the block and the message) - the
+    // same bytes the retired MAC covered, after the tag - and via the two-part
+    // entry point, so the concatenation is never built in memory.
     let mut prefix = [0u8; ninep_abi::SIG_DOMAIN_MAX + ninep_abi::NP_SIG_PREFIX_LEN];
-    let tag = ninep_abi::SIG_DOMAIN_REQUEST;
     prefix[..tag.len()].copy_from_slice(tag);
     prefix[tag.len()..tag.len() + ninep_abi::NP_NONCE_LEN].copy_from_slice(&nonce);
     prefix[tag.len() + ninep_abi::NP_NONCE_LEN..tag.len() + ninep_abi::NP_SIG_PREFIX_LEN]
@@ -4970,6 +5164,66 @@ fn frame_signed_ed25519(
     let soff = p + ninep_abi::NP_AUTH_SIG_OFF;
     head[soff..soff + ninep_abi::NP_SIG_LEN].copy_from_slice(&sig);
     (total, nonce)
+}
+
+/// A kind-1 credential: the user's signature, with the seed held for the
+/// caller's uid, over ninep-abi's `user_sig_input` (the nonce, the name and
+/// this machine's key from the header, the export's key, and the SHA-512 of
+/// the NP message). Its own frame, so the second signature and the hash are
+/// not stacked on the machine signature's in `frame_signed_ed25519`.
+///
+/// THE STACK IS SCRUBBED after the signature. `ed25519::sign` expands the seed
+/// into the secret scalar and the nonce prefix, each as good as the user's key,
+/// and they pass through its SHA-512 state, the nonce and the field arithmetic
+/// on frames below this one, none of which wipes. `held.rs` wipes the seed when
+/// its entry goes; without this the expansion of it would stay in `netd`'s
+/// memory after the logout, until something happened to overwrite it (high
+/// review of step 8). The two calls below start at the same stack pointer, so
+/// `scrub_stack`'s array lies over the frames `user_sign_inner` used.
+#[inline(never)]
+fn user_sign(
+    cred: UserCred,
+    nonce: &[u8; ninep_abi::NP_NONCE_LEN],
+    who: &[u8; ninep_abi::NP_NAME_LEN],
+    public: &[u8; ninep_abi::NP_PUBKEY_LEN],
+    np: &[u8],
+) -> [u8; ninep_abi::NP_CRED_USER_SIG_LEN] {
+    let sig = user_sign_inner(cred, nonce, who, public, np);
+    scrub_stack();
+    sig
+}
+
+#[inline(never)]
+fn user_sign_inner(
+    cred: UserCred,
+    nonce: &[u8; ninep_abi::NP_NONCE_LEN],
+    who: &[u8; ninep_abi::NP_NAME_LEN],
+    public: &[u8; ninep_abi::NP_PUBKEY_LEN],
+    np: &[u8],
+) -> [u8; ninep_abi::NP_CRED_USER_SIG_LEN] {
+    let hash = ed25519::sha512(np);
+    let input = ninep_abi::user_sig_input(nonce, who, public, cred.export, &hash);
+    ed25519::sign(cred.seed, &input)
+}
+
+/// Bytes `scrub_stack` zeroes below its caller: past the deepest chain under
+/// `ed25519::sign`, about 3.5 KB measured by frame size on this build
+/// (`sign`, `sign_two_part`, SHA-512's `compress`, the curve's `mul`, `add`
+/// and `double`). Affordable because it runs where every signature runs, at
+/// the top of `serve` (`service_remotes`), about 12 KB above the deepest
+/// chain's 2.7 KB of headroom.
+const SCRUB_BYTES: usize = 6144;
+
+/// Zero the `SCRUB_BYTES` of stack below the caller's frame. VOLATILE, so the
+/// stores to an array nothing reads afterwards are not removed as dead.
+#[inline(never)]
+fn scrub_stack() {
+    let mut area = [0u64; SCRUB_BYTES / 8];
+    for w in area.iter_mut() {
+        // SAFETY: a word of a local array.
+        unsafe { core::ptr::write_volatile(w, 0) };
+    }
+    core::hint::black_box(&area);
 }
 
 /// Serve a remote-run request (cluster Phase 4a - the Plan 9 `cpu` model): spawn

@@ -907,6 +907,219 @@ all, no sweep, rule 2 first, rule 2 above the squash, a broken line read as
 unregistered). The gate, `keyed-gate`, `test-run-callback` (18),
 `test-no-identity` and `test-async-rmount` pass.
 
+### Step 8's results (2026-11-08): the client, in `netd`
+
+**What went in.** A request `netd` parks for a uid whose key it holds is
+framed `AUTHNP05`: the user's signature over ninep-abi's `user_sig_input`
+(`user_sign`, its own frame), with the key of the `authorized` line for the
+address dialled as the export's key, the key the reply is checked against.
+That covers a one-shot request, a run, a session's opening `NP_SESSION` and
+each verb of a session the export does not key; a keyed session's frames
+carry no credential, the session's user having been attested once at its
+opening. A caller with no key held sends `AUTHNP03` as before, and so does a
+run to an address no line names, whose export key is unknown. The machine
+signature takes its tag from `request_sig_domain` of the magic it writes, in
+both formats, so the framer cannot sign a credentialed frame under the old
+tag.
+
+**The uid is captured at the park.** `Parked::uid` is read from `SENDER_ID`
+in the handler of the message that asked, beside the name it resolves to, and
+the credential is signed with the key held for that uid; `SENDER_ID` is never
+read at sign time, when the last message received is whoever's arrived since.
+
+**A session closes when its user's last key goes.** A session whose opening
+carried a credential is marked `attested`, and is used only while a live
+login holds a key for its uid (`Held::holds_live`): `park_session` closes
+one for the uid it parks that fails the test, before its lookup, and
+`sign_parked` sends nothing keyed on one (the guards, since the reviews
+below). `close_unheld` closes every attested session whose uid fails it:
+politely (a FIN once anything already sent is acked), its fids gone with it,
+so the next verb from that uid opens a fresh session, uncredentialed, which
+the far side judges afresh. A verb parked on it is refused `FS_ERR_AUTH`,
+sent or not (since the medium review). It runs after each key op and after
+the idle pass's `reap_dead`; the guards are what guarantee a verb never
+rides such a session. This is step 4's deferred item, done.
+
+**The send buffers, and what they cost.** The credential block is 68 bytes,
+and every remote slot's send buffer grew by it first. The probe of
+`8429d38f` (painted at `serve`'s start, applied uncommitted) then read 2,016
+bytes of headroom on the async rig's deepest checks, down 960 from step 7's
+2,976 and below the 1,936 step 7 rejected for the resident registry. Three
+experiments placed it: removing the new reap and close from `NETOP_RMOUNT`
+changed nothing; sending no credential at all changed nothing; the send
+buffer back at step 7's size gave 2,928. A frame-size diff of the two builds
+named the function: `park_session`, 1,824 bytes, then 2,800, by exactly the
+new buffer. It assembles a new `SessionConn` on its own frame and copies it
+into the slot, and past step 7's size the send buffer was assembled there
+too; writing it by `ptr::write`, or through a constructor never inlined, did
+not stop the copy (the second made the frame 3,104). So the tables differ: a
+session slot keeps step 7's buffer (`SESSION_SBUF`), which holds the block
+beside 684 bytes of message, and the largest fid verb any client sends is a
+560-byte `NP_PWRITE` (asserted at build time); only the path-verb table
+grows. A fid verb too large to frame with its credential is refused
+`FS_ERR_AUTH`, the answer every request too large to frame gets. On the
+final tree, headroom in bytes:
+
+| rig | step 7 | step 8 |
+|---|---|---|
+| `test-async-rmount` (the client's park path, the deepest) | 2,976 | 2,704 |
+| `test-run-callback` | 3,312 | 3,040 |
+| `impersonate-gate 7` (the export) | 5,728 | 5,360 |
+| `test-cred-client` (both nodes) | | 2,704 |
+
+**The checks.** `make test-cred-client`, new (`scripts/test-cred-client.py`):
+the two-node ext2 pair, A exporting and B the client, B's console driven and
+B's link captured, 17 checks.
+
+- Served: `user` logged in on B reads `/Users/user/PRIVATE.TXT` on A (0600,
+  `user`'s) by `cat` and through a keyed session (`cremote`), and
+  `cpu A cat /host/...` runs on A as `user`, on B's credential, and reads
+  B's copy back through `/host` under Decision 7.
+- The key locked: after the logout, root's `su user` (uid 1000, no key held)
+  is refused at A, by `cat` and by `cremote`.
+- The session case: `cfidwait`, a new C program, holds a remote fid across
+  the logout; B's capture shows B's FIN on that session 1.5 s after it
+  opened, at the logout, no keyed frame on it after, and the su'd request's
+  session opening afresh, signed `AUTHNP03`; the held fid's second read is
+  refused. The same with a nested login shell (`/bin/sh`, now staged on the
+  ext2 image) killed instead of logged out: the FIN 1.9 s after the session
+  opened, and the fid dead.
+- Under load from another uid: `user`'s reads are served while root, also
+  logged in with a key held, floods `netd` with messages (`cfidwait -n`,
+  76,000 to 91,000 in 25 s).
+- The capture's census counts `AUTHNP05` (as `drive-2vm.py`'s now does).
+
+Against the foreign verifier: a FAT32 guest logged in as `user` reads
+`np9p_server.py`'s `HELLO.TXT` by `cat` and through a keyed session
+(`cremote: all checks passed`), and after the logout root's `su user` is
+refused by both, the server logging "user is registered and the request
+carries no credential" for the one-shot and for the keyed session. The ten
+misbehaving credentials of step 6 were aimed at `netd`'s export in step 7's
+gate, every one refused; on this `netd` the gate and `test-run-callback` (18)
+pass with the probe in, and `test-async-rmount` (6 of 6) with it out, as
+does `make test`.
+
+**The controls**, each one mutation of `netd` on the committed tree, rebuilt
+and run:
+
+- no credential sent: 12 checks fail, every served one among them, and the
+  capture holds no `AUTHNP05`;
+- no close on the last drop, the lookup's guard kept: neither held session
+  FINned at the logout or the kill; uid 1000 is still refused and the held
+  fids still dead, by the guard, which is the evidence that it holds alone;
+- neither the close nor the guard: uid 1000 served on the old session, both
+  held fids alive, neither session FINned (6 fail).
+
+Before the guard, the no-close control's first run left the two fid checks
+green: `cfidwait` held the fid 60 s, past the far export's 30 s idle reap, so
+the fid died at A whatever B did. The hold is 25 s now.
+
+**Not covered by a control: the uid captured at the park.** The plan's
+mutation, `SENDER_ID` read at sign time, passes every check. The park and the
+sign happen in one drain of `netd`'s mailbox, so a credential is signed for
+another uid only if that uid's message lands between them, and root's flood
+never did. What holds the rule is its shape: the sign has no way to ask who
+sent last, only the uid the park recorded. The flood check stays, named for
+what it shows.
+
+**Measured.** The client's added cost is one sign from a seed (key expansion
+and a signature, `user_sign`): 878 µs on the QEMU guest (`edtest`'s "sign
+(one-shot)"), before the first byte is sent, so the capture cannot see it.
+The export's is a verify (870 µs) and the hash; from B's capture, request to
+reply, `user`'s against `guest`'s by `su guest` (no key held, so `AUTHNP03`;
+unregistered, so served), the same file and verb, the medians of five runs
+put the added cost at 0.7 to 2.5 ms for a one-shot read and 0.7 to 1.9 ms for
+a session's opening. The spread is the rig's, one run's medians over 5 to 18
+samples; the floor is the verify.
+
+### Step 8's high review (2026-11-08)
+
+Ten findings.
+
+- *Fixed:* `ed25519::sign` expands the seed into the secret scalar and the
+  nonce prefix, as good as the key, on frames nothing wipes, so the expansion
+  outlived the logout that wiped the seed. `user_sign` now runs the sign and
+  then `scrub_stack` from one frame, the second's 6 KB volatile-zeroed array
+  lying over the first's chain (about 3.5 KB by frame size); affordable at
+  the top of `serve`, where every signature runs.
+- *Fixed:* two logins of one user with a password change between them held
+  two keys, and the first slot signed, which could be the stale one. The
+  newest hold signs (`Held::seed_for`, by hold order).
+- *Fixed, and the guard moved:* closing an attested session was wired as
+  `close_unheld` calls at three sites, one a reap on every `NETOP_RMOUNT`, so
+  a future path that lost a key without the call would leave a session
+  usable as the logged-out user. `park_session`'s lookup now refuses it
+  itself (`Held::holds_live`, liveness asked per lookup, no wait for the
+  reap); `close_unheld` is the prompt close, at two sites, and the per-verb
+  reap is gone. The controls above separate the two.
+- *Fixed:* an `NP_OPEN` on the wire when its session closed was answered as
+  a success, with a fid that died with the session. It is answered as
+  refused.
+- *Fixed:* `close_politely`, the one copy of the parked tables' close rule
+  (four were); the rig's failure detail printed a list; `sign_parked` copied
+  the export key to borrow it.
+- *Not changed:* a session opened before its user logged in never becomes
+  attested. For a registered user such an opening is refused, so no session
+  is kept; for an unregistered one the far side serves on the machine's word
+  either way; and a session opened under a run is bound to the run (step 7).
+- *Asked, not changed:* a `cpu` run whose login is killed while it runs goes
+  on, and B's export goes on serving its `/host` reads under Decision 7. The
+  plan closes a uid's sessions with its last key and says nothing of runs;
+  whether a run should end with them is Hans's to decide.
+
+On the final tree `test-cred-client` passes 17 of 17, every control as above.
+
+### Step 8's medium review (2026-11-09)
+
+Ten findings.
+
+- *Fixed, one predicate:* a killed login's key went on signing new sessions
+  until the idle pass reaped it, because `Held::seed_for` did not ask whether
+  the login lived, while the lookup's guard did; and `close_unheld` asked a
+  third question, any key at all. A key now counts only while its login
+  lives: `seed_for` skips a dead one, and `holds_live`, the one test every
+  caller asks, is `seed_for(uid).is_some()`. `Held::holds` is gone.
+- *Fixed:* the lookup passed over an attested session whose user was not
+  held and opened a fresh one beside it; a later login of the same user made
+  the old one usable again, first in slot order, so the fresh session's fids
+  were sent down it. `park_session` now closes such a session for the
+  endpoint and uid it parks, then looks up, asking liveness once.
+- *Fixed:* `sign_parked` refuses a keyed verb on an attested session whose
+  user is not held, at the send, so no path that loses a key between the
+  park and the send has to have closed the session first.
+- *Fixed:* a close for a user who has gone left a verb already on the wire
+  to finish, but the FIN follows once the request is acked, and the far
+  export drops a connection on its peer's FIN with the reply unsent; the
+  caller waited out the deadline. Every parked verb is now answered
+  `FS_ERR_AUTH` at the close, sent or not. That removes the high review's
+  open rewrite, and with it a fid the rewritten open still counted.
+- *Not changed:* a session opened before its user logged in never becomes
+  attested; as the high review found, for a registered user such an opening
+  is refused.
+- *Not changed, a limit:* `scrub_stack` zeroes the stack, not the vector
+  registers, and its 6 KB is a measured cover, not a checked one (about
+  3.5 KB of frames, from `objdump`). A register is overwritten by netd's next
+  work, and is saved only into the kernel's `Context` for this task.
+- *Asked, not changed:* a fid verb over 684 bytes framed with a credential
+  is refused `FS_ERR_AUTH`, and so only while its user is logged in (the
+  results above). Nothing sends one; whether the limit stands is Hans's.
+
+The controls on the final tree, each a mutation of netd that the rig must
+fail:
+
+| Mutation | Result |
+|---|---|
+| No credential sent | caught, 12 checks fail |
+| `close_unheld` removed, the guards kept | caught by the FIN within an idle period of the kill; the FIN at the logout now also comes from `park_session`'s close, when the `su`'d request parks |
+| Every close and the lookup term removed, `sign_parked`'s check kept | uid 1000 still refused after the logout: the send-time check alone holds (only the kill's FIN fails) |
+| All three removed | caught, 6 checks fail: uid 1000 reads the file on the old session |
+| A dead login's key still signs (`seed_for` without `alive`) | **not caught**: no verb from the uid falls between the kill and the idle pass's reap. Recorded as not covered, beside the uid-at-sign-time mutation |
+
+`test-cred-client` passes 17 of 17, `test-async-rmount` 6 of 6, and `make
+test` exits 0. The probe's headroom: async 2,656, run-callback 2,992, gate
+5,360, cred-client 2,656 on both nodes, 48 bytes below the high review's
+tree on the client paths (the close loop in `park_session`).
+
 ## Decisions
 
 Scored on the project's standing order: **stable, safe, and not blocking
