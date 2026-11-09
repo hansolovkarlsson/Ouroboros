@@ -63,6 +63,7 @@ is `0.5.0`.
 | `0.22.0` | 2026-10-04 | the Raspberry Pi 4 runs a full session (own stack, EL2 to EL1 drop, xHCI on non-coherent PCIe, hubs, `make sdcard`/`make stick`); per-user keys steps 0 to 4 below the wire; root squash; version-2 shadow lines |
 | `0.23.0` | 2026-10-13 | multi-core (programs on every core, one kernel lock, booted on QEMU, the Pi 4 and Parallels); the C-hosting arc (DevTools's `cpp` and `edit` run here); the console and keyboard for a full-screen editor; FP/SIMD saved across the kernel |
 | `0.24.0` | 2026-11-07 | one disk for the ESP and the root (`make bootstick`, a stick that boots the Pi 4 and Parallels); the Pi 4 on its SD card alone (an SDHCI driver, EMMC2 from ACPI); three weeks of storage-server hardening; virtio-mmio probed only where ACPI declares it (the Parallels 27.1 fault) |
+| `0.25.0` | 2026-11-09 | per-user keys for the cluster (`AUTHNP05`, a credential by a password-derived key `netd` holds from login to logout; an export requires it for a user it registers, not a flag day); `clusterkey user`; a mount seen from its parent |
 
 ## Four things that have bitten, and how to avoid them
 
