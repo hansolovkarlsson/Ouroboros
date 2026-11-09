@@ -928,15 +928,17 @@ the credential is signed with the key held for that uid; `SENDER_ID` is never
 read at sign time, when the last message received is whoever's arrived since.
 
 **A session closes when its user's last key goes.** A session whose opening
-carried a credential is marked `attested`, and `close_unheld` closes every
+carried a credential is marked `attested`; `park_session`'s lookup finds it
+only while a live login holds a key for its uid (`Held::holds_live`, the
+guard, since the high review below), and `close_unheld` closes every
 attested session whose uid has no key held any more: politely (a FIN once
 anything already sent is acked), its fids gone with it, so the next verb from
 that uid opens a fresh session, uncredentialed, which the far side judges
 afresh. A verb parked on it and not yet sent is refused `FS_ERR_AUTH`; one
 already on the wire was signed while the key was held and is left to finish.
-It runs after each key op, after the idle pass's `reap_dead`, and at the top
-of `NETOP_RMOUNT`, so a verb never finds such a session live. This is step
-4's deferred item, done.
+It runs after each key op and after the idle pass's `reap_dead`; the lookup
+is what guarantees a verb never rides such a session. This is step 4's
+deferred item, done.
 
 **The send buffers, and what they cost.** The credential block is 68 bytes,
 and every remote slot's send buffer grew by it first. The probe of
@@ -1002,12 +1004,15 @@ and run:
 
 - no credential sent: 12 checks fail, every served one among them, and the
   capture holds no `AUTHNP05`;
-- no close on the last drop: 6 fail, uid 1000 served on the old session, both
-  held fids alive, neither held session FINned at the logout or the kill.
+- no close on the last drop, the lookup's guard kept: neither held session
+  FINned at the logout or the kill; uid 1000 is still refused and the held
+  fids still dead, by the guard, which is the evidence that it holds alone;
+- neither the close nor the guard: uid 1000 served on the old session, both
+  held fids alive, neither session FINned (6 fail).
 
-Its first run left the two fid checks green: `cfidwait` held the fid 60 s,
-past the far export's 30 s idle reap, so the fid died at A whatever B did.
-The hold is 25 s now, and the control fails both.
+Before the guard, the no-close control's first run left the two fid checks
+green: `cfidwait` held the fid 60 s, past the far export's 30 s idle reap, so
+the fid died at A whatever B did. The hold is 25 s now.
 
 **Not covered by a control: the uid captured at the park.** The plan's
 mutation, `SENDER_ID` read at sign time, passes every check. The park and the
@@ -1026,6 +1031,43 @@ unregistered, so served), the same file and verb, the medians of five runs
 put the added cost at 0.7 to 2.5 ms for a one-shot read and 0.7 to 1.9 ms for
 a session's opening. The spread is the rig's, one run's medians over 5 to 18
 samples; the floor is the verify.
+
+### Step 8's high review (2026-11-08)
+
+Ten findings.
+
+- *Fixed:* `ed25519::sign` expands the seed into the secret scalar and the
+  nonce prefix, as good as the key, on frames nothing wipes, so the expansion
+  outlived the logout that wiped the seed. `user_sign` now runs the sign and
+  then `scrub_stack` from one frame, the second's 6 KB volatile-zeroed array
+  lying over the first's chain (about 3.5 KB by frame size); affordable at
+  the top of `serve`, where every signature runs.
+- *Fixed:* two logins of one user with a password change between them held
+  two keys, and the first slot signed, which could be the stale one. The
+  newest hold signs (`Held::seed_for`, by hold order).
+- *Fixed, and the guard moved:* closing an attested session was wired as
+  `close_unheld` calls at three sites, one a reap on every `NETOP_RMOUNT`, so
+  a future path that lost a key without the call would leave a session
+  usable as the logged-out user. `park_session`'s lookup now refuses it
+  itself (`Held::holds_live`, liveness asked per lookup, no wait for the
+  reap); `close_unheld` is the prompt close, at two sites, and the per-verb
+  reap is gone. The controls above separate the two.
+- *Fixed:* an `NP_OPEN` on the wire when its session closed was answered as
+  a success, with a fid that died with the session. It is answered as
+  refused.
+- *Fixed:* `close_politely`, the one copy of the parked tables' close rule
+  (four were); the rig's failure detail printed a list; `sign_parked` copied
+  the export key to borrow it.
+- *Not changed:* a session opened before its user logged in never becomes
+  attested. For a registered user such an opening is refused, so no session
+  is kept; for an unregistered one the far side serves on the machine's word
+  either way; and a session opened under a run is bound to the run (step 7).
+- *Asked, not changed:* a `cpu` run whose login is killed while it runs goes
+  on, and B's export goes on serving its `/host` reads under Decision 7. The
+  plan closes a uid's sessions with its last key and says nothing of runs;
+  whether a run should end with them is Hans's to decide.
+
+On the final tree `test-cred-client` passes 17 of 17, every control as above.
 
 ## Decisions
 
