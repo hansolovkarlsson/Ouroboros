@@ -967,12 +967,8 @@ fn handle_client(packed_mac: u64, buf: &[u8], len: usize, dials: &mut [Option<Di
             // `drain_client_messages` refuses it with `FS_ERR_BUSY` (a bystander,
             // or a chained-cpu child) before this frame. So a mount reaching
             // here is top-level, and its park is driven by the serve loop.
-            // A key gone since the last pass (a killed login) takes its
-            // attested sessions with it BEFORE this verb looks one up.
-            held.reap_dead();
-            close_unheld(sessions, held);
             let mut r = [0u8; syscall_abi::MSG_MAX_LEN as usize];
-            if let Some(rlen) = handle_rmount(packed_mac, call, buf, len, sessions, remotes, &mut r, auth) {
+            if let Some(rlen) = handle_rmount(packed_mac, call, buf, len, sessions, remotes, &mut r, auth, held) {
                 reply(call, &r[..rlen]);
             }
         }
@@ -1803,7 +1799,7 @@ fn verify_sealed(resp: &[u8], got: usize, nonce: &[u8; ninep_abi::NP_NONCE_LEN],
 /// Not inlined: its own frame, for the reason `park_rmount` gives.
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn park_session(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, uid: u32, verb: u64, caller: u64, call: u64, who: &[u8; ninep_abi::NP_NAME_LEN], expect_key: Option<[u8; clusterkeys::KEY_LEN]>, auth: &Auth, msg: &[u8], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS]) -> Result<(), u64> {
+fn park_session(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, uid: u32, verb: u64, caller: u64, call: u64, who: &[u8; ninep_abi::NP_NAME_LEN], expect_key: Option<[u8; clusterkeys::KEY_LEN]>, auth: &Auth, held: &held::Held, msg: &[u8], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS]) -> Result<(), u64> {
     let Some(expect_key) = expect_key else {
         return Err(syscall_abi::FS_ERR_AUTH);
     };
@@ -1817,7 +1813,20 @@ fn park_session(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, uid: u32, verb: u64, 
     // so the verb is refused busy below) or established. A closing or closed
     // one is spent - its fids died with the connection - and is not found, so
     // the verb opens a fresh session beside it until the pump reaps it.
-    let live = sessions.iter().position(|s| matches!(s, Some(s) if s.peer_ip == ip && s.peer_port == port && s.uid == uid && matches!(s.state, DialState::Connecting | DialState::Established)));
+    //
+    // And a session opened under a user's credential is live only while that
+    // user still has a key held by a login that is alive (user-keys step 8):
+    // a keyed frame carries no credential, so riding such a session after the
+    // logout, or after the login was killed and before the idle pass reaps its
+    // key, would be served as the attested user. Asked HERE, in the one lookup
+    // every verb goes through, rather than relying on each path that loses a
+    // key to have called `close_unheld` first (high review of step 8); that
+    // still closes the session, promptly, but nothing depends on it having run.
+    let live = sessions.iter().position(|s| {
+        matches!(s, Some(s) if s.peer_ip == ip && s.peer_port == port && s.uid == uid
+            && matches!(s.state, DialState::Connecting | DialState::Established)
+            && !(s.keys[0].attested && !held.holds_live(uid)))
+    });
     if let Some(i) = live {
         let s = sessions[i].as_mut().unwrap();
         // Pick up a re-resolved next hop. `handle_rmount` runs ARP fresh on
@@ -1898,7 +1907,7 @@ fn park_session(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, uid: u32, verb: u64, 
 /// `FS_ERR_BUSY` before `handle_client`'s frame is built.)
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn handle_rmount(packed_mac: u64, call: u64, buf: &[u8], len: usize, sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], out: &mut [u8], auth: &Auth) -> Option<usize> {
+fn handle_rmount(packed_mac: u64, call: u64, buf: &[u8], len: usize, sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], out: &mut [u8], auth: &Auth, held: &held::Held) -> Option<usize> {
     // A bare-status failure reply the shell surfaces cleanly. `st` distinguishes
     // an unreachable peer (NO_FS) from an auth failure (FS_ERR_AUTH).
     let fail = |out: &mut [u8], st: u64| -> Option<usize> {
@@ -1958,7 +1967,7 @@ fn handle_rmount(packed_mac: u64, call: u64, buf: &[u8], len: usize, sessions: &
     // is parked on its slot's own buffers; each branch is its own frame.
     let verb = if msg.len() >= 8 { read_u64(msg, 0) } else { 0 };
     let parked = if shape(verb) != Shape::Path {
-        park_session(&dst_mac, ip, port, uid, verb, caller, call, &who, expect_key, auth, msg, sessions)
+        park_session(&dst_mac, ip, port, uid, verb, caller, call, &who, expect_key, auth, held, msg, sessions)
     } else {
         park_rmount(&dst_mac, ip, port, verb, caller, call, &who, uid, expect_key, auth, msg, remotes)
     };
@@ -2102,11 +2111,7 @@ fn service_remotes<const S: usize, const H: usize, const K: usize>(remotes: &mut
                 };
                 reply(parked.call, &r[..n]);
                 c.held_len = 0;
-                match c.state {
-                    DialState::Established => c.state = DialState::Closing,
-                    DialState::Closing | DialState::Closed => {}
-                    _ => c.state = DialState::Closed,
-                }
+                close_politely(c);
             }
             continue;
         }
@@ -2158,11 +2163,7 @@ fn service_remotes<const S: usize, const H: usize, const K: usize>(remotes: &mut
                 msg.len()
             };
             reply(parked.call, &r[..n]);
-            match c.state {
-                DialState::Established => c.state = DialState::Closing,
-                DialState::Closing | DialState::Closed => {}
-                _ => c.state = DialState::Closed,
-            }
+            close_politely(c);
             continue;
         }
         // Complete: the frame's own length says so. A frame the buffer cannot
@@ -2252,6 +2253,18 @@ fn service_remotes<const S: usize, const H: usize, const K: usize>(remotes: &mut
             let n = if verified && np_status == 0 { status_only(&mut r, syscall_abi::FS_ERROR) } else { n };
             reply(parked.call, &r[..n]);
         } else {
+            // An open that succeeded on a session `close_unheld` closed while
+            // it was on the wire: its fid dies with the session, so the caller
+            // is told the open failed, not handed a fid whose first read fails
+            // (high review of step 8). Only `close_unheld` sets a session
+            // Closing with a verb in flight.
+            let n = if verified && parked.verb == ninep_abi::NP_OPEN && np_status < syscall_abi::FS_ERR_MIN
+                && c.state == DialState::Closing
+            {
+                status_only(&mut r, syscall_abi::FS_ERR_AUTH)
+            } else {
+                n
+            };
             let heard = reply(parked.call, &r[..n]) != syscall_abi::REPLY_STALE;
             // Refcount the fid this verb made or freed. The NP status is the
             // reply body's first word. An open whose caller left the call
@@ -2272,11 +2285,7 @@ fn service_remotes<const S: usize, const H: usize, const K: usize>(remotes: &mut
         }
         // Done with the connection: a live one is closed politely. A slot
         // still connecting has nothing to FIN; it is Closed outright.
-        match c.state {
-            DialState::Established => c.state = DialState::Closing,
-            DialState::Closing | DialState::Closed => {}
-            _ => c.state = DialState::Closed,
-        }
+        close_politely(c);
     }
 }
 
@@ -2293,12 +2302,15 @@ fn service_remotes<const S: usize, const H: usize, const K: usize>(remotes: &mut
 /// A verb parked on it and not yet sent (still raw, or the verb held behind
 /// an opening `NP_SESSION`) is refused now, `FS_ERR_AUTH`: it would otherwise
 /// be signed, or sent keyed, on a session whose user has gone. A verb already
-/// on the wire was signed while the key was held, and is left to finish.
+/// on the wire was signed while the key was held, and is left to finish;
+/// an `NP_OPEN` among them is answered as refused, since its fid dies with
+/// the session (`service_remotes`).
 ///
-/// Called wherever the table can lose a key, and before a remote verb is
-/// parked: after each key op (`handle_client`), after the idle pass's
-/// `reap_dead` (`serve`), and at the top of `NETOP_RMOUNT`, so a verb can
-/// never find such a session live.
+/// Called wherever the table can lose a key: after each key op
+/// (`handle_client`) and after the idle pass's `reap_dead` (`serve`). It is
+/// the prompt close, not the guard: `park_session`'s lookup refuses such a
+/// session itself (`Held::holds_live`), so a path that drops a key without
+/// calling this leaves a session open a little longer, never usable.
 fn close_unheld(sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], held: &held::Held) {
     for c in sessions.iter_mut().flatten() {
         let attested = c.keys.first().is_some_and(|a| a.attested);
@@ -2320,11 +2332,19 @@ fn close_unheld(sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], held:
             }
         }
         c.fids = 0;
-        match c.state {
-            DialState::Established => c.state = DialState::Closing,
-            DialState::Closing | DialState::Closed => {}
-            _ => c.state = DialState::Closed,
-        }
+        close_politely(c);
+    }
+}
+
+/// Done with a client connection: a live one is closed politely (a FIN once
+/// what is queued is sent and acked), and one still connecting, which has
+/// nothing to FIN, is Closed outright. The one copy of that rule for the
+/// parked tables (`service_remotes`, `close_unheld`).
+fn close_politely<const S: usize, const R: usize, const H: usize, const K: usize>(c: &mut Wire<S, R, H, K>) {
+    match c.state {
+        DialState::Established => c.state = DialState::Closing,
+        DialState::Closing | DialState::Closed => {}
+        _ => c.state = DialState::Closed,
     }
 }
 
@@ -2869,8 +2889,7 @@ fn sign_parked<const S: usize, const R: usize, const H: usize, const K: usize>(c
             }
         }
     }
-    let export = pk.expect_key;
-    let cred = user_cred(held, pk.uid, &export);
+    let cred = user_cred(held, pk.uid, &pk.expect_key);
     if pk.opening && cred.is_some() {
         if let Some(ka) = c.keys.first_mut() {
             ka.attested = true;
@@ -5136,8 +5155,30 @@ fn frame_signed_ed25519(
 /// this machine's key from the header, the export's key, and the SHA-512 of
 /// the NP message). Its own frame, so the second signature and the hash are
 /// not stacked on the machine signature's in `frame_signed_ed25519`.
+///
+/// THE STACK IS SCRUBBED after the signature. `ed25519::sign` expands the seed
+/// into the secret scalar and the nonce prefix, each as good as the user's key,
+/// and they pass through its SHA-512 state, the nonce and the field arithmetic
+/// on frames below this one, none of which wipes. `held.rs` wipes the seed when
+/// its entry goes; without this the expansion of it would stay in `netd`'s
+/// memory after the logout, until something happened to overwrite it (high
+/// review of step 8). The two calls below start at the same stack pointer, so
+/// `scrub_stack`'s array lies over the frames `user_sign_inner` used.
 #[inline(never)]
 fn user_sign(
+    cred: UserCred,
+    nonce: &[u8; ninep_abi::NP_NONCE_LEN],
+    who: &[u8; ninep_abi::NP_NAME_LEN],
+    public: &[u8; ninep_abi::NP_PUBKEY_LEN],
+    np: &[u8],
+) -> [u8; ninep_abi::NP_CRED_USER_SIG_LEN] {
+    let sig = user_sign_inner(cred, nonce, who, public, np);
+    scrub_stack();
+    sig
+}
+
+#[inline(never)]
+fn user_sign_inner(
     cred: UserCred,
     nonce: &[u8; ninep_abi::NP_NONCE_LEN],
     who: &[u8; ninep_abi::NP_NAME_LEN],
@@ -5147,6 +5188,26 @@ fn user_sign(
     let hash = ed25519::sha512(np);
     let input = ninep_abi::user_sig_input(nonce, who, public, cred.export, &hash);
     ed25519::sign(cred.seed, &input)
+}
+
+/// Bytes `scrub_stack` zeroes below its caller: past the deepest chain under
+/// `ed25519::sign`, about 3.5 KB measured by frame size on this build
+/// (`sign`, `sign_two_part`, SHA-512's `compress`, the curve's `mul`, `add`
+/// and `double`). Affordable because it runs where every signature runs, at
+/// the top of `serve` (`service_remotes`), about 12 KB above the deepest
+/// chain's 2.7 KB of headroom.
+const SCRUB_BYTES: usize = 6144;
+
+/// Zero the `SCRUB_BYTES` of stack below the caller's frame. VOLATILE, so the
+/// stores to an array nothing reads afterwards are not removed as dead.
+#[inline(never)]
+fn scrub_stack() {
+    let mut area = [0u64; SCRUB_BYTES / 8];
+    for w in area.iter_mut() {
+        // SAFETY: a word of a local array.
+        unsafe { core::ptr::write_volatile(w, 0) };
+    }
+    core::hint::black_box(&area);
 }
 
 /// Serve a remote-run request (cluster Phase 4a - the Plan 9 `cpu` model): spawn

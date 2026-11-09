@@ -124,8 +124,13 @@ def await_nth(g, rx, n, timeout):
 
 
 def first_line(out, rx):
+    """The line `rx` matches in `out`, or, when nothing does, the last line
+    of output before the prompt, as text: a FAIL line's detail."""
     m = re.search(rx, out)
-    return m.group(0) if m else out.strip().replace("\r", "").split("\n")[-2:]
+    if m:
+        return m.group(0)
+    lines = [l for l in out.replace("\r", "").split("\n") if l.strip()]
+    return lines[-2] if len(lines) >= 2 else (lines[-1] if lines else "no output")
 
 
 # --- B's capture --------------------------------------------------------------
