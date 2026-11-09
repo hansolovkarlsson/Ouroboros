@@ -253,13 +253,20 @@ def killed_login(g, prompt):
     The run went out with `user`'s credential, so from the kill on it no
     longer counts as in flight: the run's machine's claim of `user`, served
     before the kill, is refused after it, and the guest closes the run."""
+    # The nested shell's slot is the one `ps` lists after the spawn and not
+    # before it, not merely the highest: a task left from an earlier phase
+    # would otherwise be the one handed the keyboard and killed.
+    def slots():
+        tail = g.transcript().rsplit("ps", 1)[-1]
+        return {int(n) for n, _ in re.findall(r"task (\d+): (blocked|runnable|running)", tail)}
+    g.run([("", "ps"), (prompt, "")])
+    before = slots()
     g.run([("", "exec /bin/sh"), ("login:", ""), ("", "ps"), (prompt, "")])
-    tail = g.transcript().rsplit("ps", 1)[-1]
-    slots = [int(n) for n, st in re.findall(r"task (\d+): (blocked|runnable|running)", tail) if int(n) >= 6]
-    if not slots:
-        check("the killed login: a nested shell is running", False, "no task 6 or above in ps")
+    new = slots() - before
+    if len(new) != 1:
+        check("the killed login: one nested shell is running", False, f"new tasks in ps: {sorted(new)}")
         return
-    nested = max(slots)
+    (nested,) = new
     if not g.run([("", f"fg {nested}"), ("", "user"), ("assword", "user"), (r"\$ ", "")]):
         check("the killed login: `user` logs in on the nested shell", False, "timed out")
         return
@@ -308,9 +315,13 @@ def killed_login(g, prompt):
 
     t = threading.Thread(target=stand, daemon=True)
     t.start()
-    ready.wait(10)
+    if not ready.wait(10):
+        check("the killed login: the stand-in listens", False, "not bound in 10 s")
+        return
     g.type_line(f"cpu 10.0.2.2:{FLAGGED} id")
-    reached.wait(150)
+    if not reached.wait(150):
+        check("the killed login: the run reached the stand-in", False, "no run in 150 s")
+        return
     # Ctrl+C with the nested shell owning the keyboard DETACHES it (a
     # `fg`-handed session, `tasks::interrupt_key_check`): the keyboard goes
     # back to root's shell, which prints no new prompt, its `# ` having been

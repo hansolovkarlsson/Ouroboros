@@ -981,7 +981,7 @@ fn handle_client(packed_mac: u64, buf: &[u8], len: usize, dials: &mut [Option<Di
             // imported-namespace callbacks - its `/host` reads come back to our
             // own export - without any of the re-entrant pumping `tcp_run` did.
             let mut r = [0u8; syscall_abi::MSG_MAX_LEN as usize];
-            if let Some(rlen) = park_run(packed_mac, call, buf, len, &mut r, remotes, auth, pending) {
+            if let Some(rlen) = park_run(packed_mac, call, buf, len, &mut r, remotes, auth, held, pending) {
                 reply(call, &r[..rlen]);
             }
         }
@@ -1533,6 +1533,11 @@ fn tcp_get(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], dst_port: u16, re
 /// (`SENDER_TASK`), so a task that later lands in the issuer's reaped slot
 /// cannot pull it.
 const RUN_OUT_MAX: usize = 2048;
+
+/// What the caller of a run sent with its user's credential is told when the
+/// user's last key goes before the run ends, or before it is sent.
+const RUN_UNHELD_NOTE: &[u8] = b"\r\ncpu: the run was ended here: its user is no longer logged in\r\n";
+const _: () = assert!(RUN_UNHELD_NOTE.len() <= RUN_OUT_MAX);
 struct PendingRun {
     active: bool,
     owner: u64,
@@ -1573,7 +1578,7 @@ impl PendingRun {
 /// The step-1 lesson ("each branch holds its own buffers in its OWN frame")
 /// is about SIBLINGS, not about depth in general.
 #[allow(clippy::too_many_arguments)]
-fn park_run(packed_mac: u64, call: u64, buf: &[u8], len: usize, out: &mut [u8], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], auth: &Auth, pending: &mut PendingRun) -> Option<usize> {
+fn park_run(packed_mac: u64, call: u64, buf: &[u8], len: usize, out: &mut [u8], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], auth: &Auth, held: &held::Held, pending: &mut PendingRun) -> Option<usize> {
     // Captured before any receive: an unfiltered receive replaces the captured
     // sender, so reading this later could name whoever's message was drained
     // last. Nothing here receives any more, but the ordering rule stands and
@@ -1687,7 +1692,12 @@ fn park_run(packed_mac: u64, call: u64, buf: &[u8], len: usize, out: &mut [u8], 
     // (`run_in_flight`). No line, no anchor: zeros, which `run_in_flight`
     // reads as none.
     let anchor = clusterkeys::find_by_ip(auth.authorized(), &ip).map_or([0u8; clusterkeys::KEY_LEN], |peer| peer.key);
-    match park_remote(&dst_mac, ip, port, ninep_abi::NP_RUN, owner, call, &who, uid, &np[..hdr + clen], anchor, remotes) {
+    // Attested from the park on if a key is held for the user now (review of
+    // the run decision): the run is theirs from the moment they typed `cpu`,
+    // so a key lost before the send ends it, rather than letting it go out
+    // unattested and outlive them (`sign_parked`).
+    let attested = user_cred(held, uid, &anchor).is_some();
+    match park_remote(&dst_mac, ip, port, ninep_abi::NP_RUN, owner, call, &who, uid, &np[..hdr + clen], anchor, attested, remotes) {
         Ok(()) => None,
         Err(msg) => fail(out, msg),
     }
@@ -1698,7 +1708,7 @@ fn park_run(packed_mac: u64, call: u64, buf: &[u8], len: usize, out: &mut [u8], 
 /// already refused a machine that cannot sign. `Err` is the text to answer the
 /// caller with.
 #[allow(clippy::too_many_arguments)]
-fn park_remote(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, verb: u64, caller: u64, call: u64, who: &[u8; ninep_abi::NP_NAME_LEN], uid: u32, np: &[u8], anchor: [u8; clusterkeys::KEY_LEN], remotes: &mut [Option<RemoteConn>; MAX_REMOTE]) -> Result<(), &'static [u8]> {
+fn park_remote(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, verb: u64, caller: u64, call: u64, who: &[u8; ninep_abi::NP_NAME_LEN], uid: u32, np: &[u8], anchor: [u8; clusterkeys::KEY_LEN], attested: bool, remotes: &mut [Option<RemoteConn>; MAX_REMOTE]) -> Result<(), &'static [u8]> {
     let Some(slot) = remotes.iter().position(|r| r.is_none()) else {
         return Err(b"cpu: no free connection for the run (try again)\r\n");
     };
@@ -1718,7 +1728,7 @@ fn park_remote(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, verb: u64, caller: u64
     // `service_remotes` both of those things; no extra field is needed.
     // `since: 0` for the reason `park_rmount` gives: the clock starts at the
     // first send, never at the park.
-    wire.parked = Some(Parked { caller, call, nonce: [0; ninep_abi::NP_NONCE_LEN], expect_key: anchor, since: 0, who: *who, uid, verb, opening: false, attested: false, raw });
+    wire.parked = Some(Parked { caller, call, nonce: [0; ninep_abi::NP_NONCE_LEN], expect_key: anchor, since: 0, who: *who, uid, verb, opening: false, attested, raw });
     Ok(())
 }
 
@@ -2114,7 +2124,11 @@ fn service_remotes<const S: usize, const H: usize, const K: usize>(remotes: &mut
                 // overflow); `can_send` was asked at the park. Answered as the
                 // park would have answered it: FS_ERR_AUTH.
                 let parked = c.parked.take().unwrap();
-                let n = if parked.verb == ninep_abi::NP_RUN {
+                let n = if parked.verb == ninep_abi::NP_RUN && parked.attested {
+                    let msg = RUN_UNHELD_NOTE;
+                    r[..msg.len()].copy_from_slice(msg);
+                    msg.len()
+                } else if parked.verb == ninep_abi::NP_RUN {
                     let msg = b"cpu: cannot authenticate (no /etc/cluster/id to sign with, or the request does not fit)\r\n";
                     r[..msg.len()].copy_from_slice(msg);
                     msg.len()
@@ -2156,12 +2170,16 @@ fn service_remotes<const S: usize, const H: usize, const K: usize>(remotes: &mut
             // user. The caller gets the output so far and a line saying why.
             // The child on the far machine is not stopped: a peer's close
             // reaps no child there (`TcpConn`'s `Drop`), a gap of its own.
-            let unheld = !run_counts(c.parked.as_ref().unwrap(), held);
+            // A run that finished in this same pass is complete, and says
+            // nothing more. The note always fits: where the output has filled
+            // `RUN_OUT_MAX` it replaces the output's tail, since a run cut off
+            // with no reason given reads as one that ended on its own.
+            let unheld = !finished && !run_counts(c.parked.as_ref().unwrap(), held);
             if unheld {
-                let note = b"\r\ncpu: the run was ended here: its user is no longer logged in\r\n";
-                let take = note.len().min(RUN_OUT_MAX.saturating_sub(p.len));
-                p.buf[p.len..p.len + take].copy_from_slice(&note[..take]);
-                p.len += take;
+                let note = RUN_UNHELD_NOTE;
+                let at = p.len.min(RUN_OUT_MAX - note.len());
+                p.buf[at..at + note.len()].copy_from_slice(note);
+                p.len = at + note.len();
             }
             if !(finished || silent || unheld) {
                 continue;
@@ -2845,7 +2863,9 @@ struct Parked {
     /// for a `cpu` run alone: an attested run is in flight, for Decision 7's
     /// `/host` callback, only while its user is still held here, and ends
     /// when their last key goes, as an attested session does (Hans,
-    /// 2026-11-09, the question step 8's high review left open).
+    /// 2026-11-09, the question step 8's high review left open). A run sets
+    /// it at the park already (`park_run`), so a key lost before the send
+    /// stops the run there rather than sending it unattested.
     attested: bool,
     /// Bytes of a raw NP request waiting in `Wire::sbuf` at `NP_SIGNED_NP_OFF`,
     /// the place its framed form will put it, to be framed and signed by
@@ -2925,6 +2945,12 @@ fn sign_parked<const S: usize, const R: usize, const H: usize, const K: usize>(c
         }
     }
     let cred = user_cred(held, pk.uid, &pk.expect_key);
+    // A run attested at the park whose user's key went before the send is
+    // not sent: unattested, it would outlive them (`run_counts`).
+    if pk.attested && cred.is_none() {
+        pk.raw = 0;
+        return false;
+    }
     pk.attested = cred.is_some();
     if pk.opening && cred.is_some() {
         if let Some(ka) = c.keys.first_mut() {
