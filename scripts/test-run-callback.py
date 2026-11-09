@@ -310,18 +310,17 @@ def killed_login(g, prompt):
     ready.wait(10)
     g.type_line(f"cpu 10.0.2.2:{FLAGGED} id")
     reached.wait(150)
-    # The first Ctrl+C cuts the nested shell's `cpu` call, back to its `$`;
-    # the run stays parked in netd, its caller gone, which is the window
-    # this checks. A second, at that idle prompt, detaches the nested shell
-    # to its parent, alive; root kills it.
+    # Ctrl+C with the nested shell owning the keyboard DETACHES it (a
+    # `fg`-handed session, `tasks::interrupt_key_check`): the keyboard goes
+    # back to root's shell, which prints no new prompt, its `# ` having been
+    # printed at the `fg`. The nested shell's `cpu` call is cut too
+    # (`cpu: remote run failed`); the run stays parked in netd, its caller
+    # gone, which is the window this checks. Root then types the kill.
     g.type_raw(b"\x03")
-    # The prompt AFTER the cut's message: the `$ ` echoed with the `cpu` line
-    # is already in the output, and matching it sent the second Ctrl+C into
-    # the cut while it was still being handled, where it was swallowed.
-    if not g.run([(r"remote run failed[^\n]*\n[\s\S]*?\$ ", "")]):
-        check("the killed login: Ctrl+C cuts the nested shell's `cpu`", False, "timed out")
-    g.type_raw(b"\x03")
-    if not g.run([(prompt, f"kill {nested}"), (prompt, "")]):
+    if not g.run([(r"remote run failed", "")]):
+        check("the killed login: Ctrl+C detaches the nested shell", False, "timed out")
+    g.type_line(f"kill {nested}")
+    if not g.run([(prompt, "")]):
         check("the killed login: root kills the nested login", False, "timed out")
     killed.set()
     t.join(timeout=60)
