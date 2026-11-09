@@ -310,7 +310,13 @@ def killed_login(g, prompt):
     ready.wait(10)
     g.type_line(f"cpu 10.0.2.2:{FLAGGED} id")
     reached.wait(150)
-    # Ctrl+C detaches the nested shell to its parent, alive; root kills it.
+    # The first Ctrl+C cuts the nested shell's `cpu` call, back to its `$`;
+    # the run stays parked in netd, its caller gone, which is the window
+    # this checks. A second, at that idle prompt, detaches the nested shell
+    # to its parent, alive; root kills it.
+    g.type_raw(b"\x03")
+    if not g.run([(r"\$ ", "")]):
+        check("the killed login: Ctrl+C cuts the nested shell's `cpu`", False, "timed out")
     g.type_raw(b"\x03")
     if not g.run([(prompt, f"kill {nested}"), (prompt, "")]):
         check("the killed login: root kills the nested login", False, "timed out")
