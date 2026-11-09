@@ -73,7 +73,12 @@ EXPORT = f"{A_IP}:564"
 PRIVATE = "/Users/user/PRIVATE.TXT"
 PRIVATE_TEXT = "only user may read this"
 HELLO = "/HELLO.TXT"
-HOLD_S = 60          # cfidwait's hold: past the su'd checks that follow the logout
+# cfidwait's hold: past the su'd checks that follow the logout (about 8 s on
+# QEMU), and INSIDE the far export's 30 s idle reap (netd's CONN_IDLE_TICKS):
+# held longer, the fid dies at A whatever B does, and the check that B closed
+# the session passes on a tree that never closes it (measured, user-keys step
+# 8: with 60 s the no-close control left both fid checks green).
+HOLD_S = 25
 AUTH_REFUSED = "authentication failed"
 USER_P, ROOT_P = r"\$ ", "# "
 
