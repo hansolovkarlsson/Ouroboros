@@ -1,6 +1,6 @@
 # Blind instruments
 
-*A process retrospective, 2026-09-02, extended through 2026-11-08. It began
+*A process retrospective, 2026-09-02, extended through 2026-11-09. It began
 with a day of small roadmap items (five PRs, one release, no arc) during which
 five separate tools reported success while proving nothing. Every later day
 that found another instrument of the same kind added a dated section after
@@ -8,7 +8,7 @@ that found another instrument of the same kind added a dated section after
 off a phone photo, the Raspberry Pi's bench tools, and on 2026-10-09 the
 stale-image guard and the four blind spots in the guard that replaced it, and
 on 2026-10-10 the controls a keyboard change blinded and then the multi-core
-rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's, and on 2026-10-20 the volume bounds', and on 2026-10-21 the exFAT sets' and names', and on 2026-10-22 the stall classifier's and sector 0's, and on 2026-10-23 the blank disk's, and on 2026-10-24 the exFAT frees' mutants and plants, and on 2026-10-25 the disk-trace stalls' classifier, fake, arithmetic and a host sleep, and on 2026-10-28 the read-only gate's control, review, run script and wait, and on 2026-10-29 the open probes' and the disk gate rig's silence, sites, truncate check and unspellable control, and on 2026-10-30 the read-only mount's shared tail, unheld order, overwritten transcript and unread pass, and the disk-gate staging's check run once, and that evening the boot start's bug no mount showed, its rig's absent step read as empty and its recomputed signature, and on 2026-10-31 the exFAT free's counts blind to order, the batch model's assertion that skipped the head, a fix no boot could grade, and a count I predicted for an order, and on 2026-11-01 an exit code that flattened two verdicts, a hint a byte wide read a cluster at a time, a model that started where it assumed and two citations that pointed at nothing, and on 2026-11-04 a rig that attached its disks so macOS could not mount them, a test helper whose encoding broke a deep nest before the walk reached it, and a grep that hid where a fault happened, and on 2026-11-05 a probe whose two writes libc joined into one, a control run without its boot flag, and a diagnostic whose only first run was on the Pi, and on 2026-11-07 a self-test case refused by the wrong rule, a rig that graded only runs that succeed, and a mutation caught as a crash, and on 2026-11-08 a filter that read a refused boot as silence, a control placed where the two answers agree, and a glob that read yesterday's logs. The spine below has held for all of them.*
+rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's, and on 2026-10-20 the volume bounds', and on 2026-10-21 the exFAT sets' and names', and on 2026-10-22 the stall classifier's and sector 0's, and on 2026-10-23 the blank disk's, and on 2026-10-24 the exFAT frees' mutants and plants, and on 2026-10-25 the disk-trace stalls' classifier, fake, arithmetic and a host sleep, and on 2026-10-28 the read-only gate's control, review, run script and wait, and on 2026-10-29 the open probes' and the disk gate rig's silence, sites, truncate check and unspellable control, and on 2026-10-30 the read-only mount's shared tail, unheld order, overwritten transcript and unread pass, and the disk-gate staging's check run once, and that evening the boot start's bug no mount showed, its rig's absent step read as empty and its recomputed signature, and on 2026-10-31 the exFAT free's counts blind to order, the batch model's assertion that skipped the head, a fix no boot could grade, and a count I predicted for an order, and on 2026-11-01 an exit code that flattened two verdicts, a hint a byte wide read a cluster at a time, a model that started where it assumed and two citations that pointed at nothing, and on 2026-11-04 a rig that attached its disks so macOS could not mount them, a test helper whose encoding broke a deep nest before the walk reached it, and a grep that hid where a fault happened, and on 2026-11-05 a probe whose two writes libc joined into one, a control run without its boot flag, and a diagnostic whose only first run was on the Pi, and on 2026-11-07 a self-test case refused by the wrong rule, a rig that graded only runs that succeed, and a mutation caught as a crash, and on 2026-11-08 a filter that read a refused boot as silence, a control placed where the two answers agree, and a glob that read yesterday's logs, and on 2026-11-09 a control the far side's reap graded, a control a new guard answered for, and a review that read a mutant as the code. The spine below has held for all of them.*
 
 The previous day's retrospective
 ([`repairing-the-repairs-postmortem.md`](repairing-the-repairs-postmortem.md))
@@ -2745,4 +2745,38 @@ tree where every rig had exited 0. They were the earlier mutants' logs, kept
 beside the new ones. I read the paths before reporting and saw it.
 **Name the logs of the run being judged, not a pattern that also matches
 the runs before it.**
+
+## Three more, from the user credential's client (2026-11-08 to 2026-11-09)
+
+**A control the far side's reap graded.** `make test-cred-client` holds a
+remote fid open across the user's logout and checks that it is dead after
+it, which only `close_unheld` should cause. The control that removes
+`close_unheld` passed those checks anyway. The fid was held for 60 seconds,
+and the far export reaps a session idle for 30, so the fid died at the
+export whatever the client did. Held for 25 seconds, inside the reap, the
+control fails both fid checks (`18baeafc`). **When a check's outcome has
+two possible causes, the control has to remove the one under test while the
+other cannot happen; otherwise the second cause grades the check.**
+
+**A control a new guard answered for.** After step 8's medium review,
+`park_session` closes a stale attested session itself when a request for
+that uid parks. The no-close control then went from caught to not caught on
+its check for the FIN at the logout: the `su`'d request that follows the
+logout parks, and the new close sends that FIN. The control is still caught,
+by the FIN after a kill, which no request follows and only `close_unheld`
+sends, and its expected list now names that check alone. **Adding a second
+mechanism that produces the same observable makes every control of the
+first one blind at that observable; rerun the controls after a fix, not
+only the rig.**
+
+**A review that read a mutant as the code.** The medium review of step 9 ran
+while a mutation control was applied to `clusterkey`'s retype check, and its
+first finding was that "an uncommitted edit adds `&& pwl == usize::MAX`",
+making the check unable to fire. It was the control's edit, reverted by the
+control script a few minutes later. Here the review said "uncommitted", so it
+was told apart. A review that had read the mutant without noticing would
+have reported a defect that does not exist, or, worse, passed a file whose
+mutant it took for the code. **A review reads the working tree, so it is an
+observer of whatever state the tree is in; run it on a quiet tree, or run
+the controls where it cannot see them.**
 
