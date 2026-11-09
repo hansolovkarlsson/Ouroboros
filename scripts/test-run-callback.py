@@ -315,7 +315,10 @@ def killed_login(g, prompt):
     # this checks. A second, at that idle prompt, detaches the nested shell
     # to its parent, alive; root kills it.
     g.type_raw(b"\x03")
-    if not g.run([(r"\$ ", "")]):
+    # The prompt AFTER the cut's message: the `$ ` echoed with the `cpu` line
+    # is already in the output, and matching it sent the second Ctrl+C into
+    # the cut while it was still being handled, where it was swallowed.
+    if not g.run([(r"remote run failed[^\n]*\n[\s\S]*?\$ ", "")]):
         check("the killed login: Ctrl+C cuts the nested shell's `cpu`", False, "timed out")
     g.type_raw(b"\x03")
     if not g.run([(prompt, f"kill {nested}"), (prompt, "")]):
