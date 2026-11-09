@@ -11,6 +11,7 @@
 //! clusterkey realm        show the cluster's realm
 //! clusterkey realm new [-f]  generate a realm (refuses without real entropy)
 //! clusterkey held         the uids netd holds a user key for (root only; a diagnostic)
+//! clusterkey user NAME    print NAME's /etc/cluster/users line, from a password typed twice
 //! ```
 //!
 //! ## Why generation refuses rather than degrades
@@ -32,7 +33,7 @@ use clusterkeys::{KEY_HEX_LEN, KEY_LEN};
 const ID_PATH: &str = "/etc/cluster/id";
 const PUB_PATH: &str = "/etc/cluster/id.pub";
 const AUTHORIZED_PATH: &str = "/etc/cluster/authorized";
-const REALM_PATH: &str = "/etc/cluster/realm";
+const REALM_PATH: &str = clusterkeys::REALM_PATH;
 
 /// Mode for the private key: readable by its owner and nobody else. Enforced on
 /// ext2; FAT32 and exFAT model no mode at all, which the boot warning already
@@ -59,8 +60,10 @@ pub extern "C" fn _start() -> ! {
         realm(target)
     } else if cmd == b"held" {
         held(target)
+    } else if cmd == b"user" {
+        user(target)
     } else {
-        out(target, b"usage: clusterkey [new [-f] | peers | line <name> <ip> | realm [new [-f]] | held]\r\n");
+        out(target, b"usage: clusterkey [new [-f] | peers | line <name> <ip> | realm [new [-f]] | held | user <name>]\r\n");
         2
     };
     ulib::end_of_stream(target);
@@ -328,13 +331,12 @@ fn held(target: u64) -> u64 {
 /// short by an `fsd` restart leaves exactly that, and folding it into
 /// `Unreadable` made `realm new -f` refuse to replace it for good.
 fn read_realm_file(buf: &mut [u8]) -> FileRead {
-    let r = ulib::fs_read_bulk(REALM_PATH, 0, buf);
-    if r == syscall_abi::FS_ERR_NOT_FOUND {
-        FileRead::Absent
-    } else if ulib::is_fs_error(r) {
-        FileRead::Unreadable
-    } else {
-        FileRead::Bytes((r as usize).min(buf.len()))
+    // The reader `useradd` and `passwd` read the realm through too, so the
+    // three agree on what an absent and an unreadable realm are.
+    match ulib::read_file_status(REALM_PATH, buf) {
+        ulib::FileStatus::Absent => FileRead::Absent,
+        ulib::FileStatus::Unreadable => FileRead::Unreadable,
+        ulib::FileStatus::Bytes(n) => FileRead::Bytes(n),
     }
 }
 
@@ -589,6 +591,80 @@ fn public_key_of_this_machine(target: u64) -> Option<[u8; KEY_LEN]> {
         return clusterkeys::parse_key_file(&pbuf[..pn]);
     }
     None
+}
+
+/// `clusterkey user <name>`: the `/etc/cluster/users` line for `name` in this
+/// node's realm, from a password typed twice (echo off), on standard output
+/// alone, so `clusterkey user ann >> /etc/cluster/users` writes just the line.
+/// The prompts and every refusal go to the console.
+///
+/// The way to register a user who already has a password, and to make every
+/// line again after a new realm, without resetting anyone's password: the user
+/// runs it, and gives the line to whoever keeps the exports' registries. The
+/// password is not checked against `/etc/shadow` (an ordinary user cannot
+/// read it), so the second prompt is what catches a typo; a wrong line only
+/// makes the export refuse the user until it is replaced (high review of
+/// user-keys step 9).
+fn user(target: u64) -> u64 {
+    let mut name = [0u8; 64];
+    let nlen = ulib::arg(2, &mut name).unwrap_or(0);
+    if nlen == 0 {
+        ulib::con_write(b"usage: clusterkey user <name>\r\n");
+        return 2;
+    }
+    let name = &name[..nlen];
+    if !clusterkeys::user_line_name_ok(name) {
+        ulib::con_write(b"clusterkey: a registry line cannot carry that name (1 to 32 bytes, no space, no leading #)\r\n");
+        return 2;
+    }
+    ulib::con_write(b"Password: ");
+    let mut pw = [0u8; 64];
+    let pwl = ulib::read_line(&mut pw, false);
+    ulib::con_write(b"\r\nRetype password: ");
+    let mut pw2 = [0u8; 64];
+    let pwl2 = ulib::read_line(&mut pw2, false);
+    ulib::con_write(b"\r\n");
+    let matched = pw[..pwl] == pw2[..pwl2];
+    ulib::wipe(&mut pw2);
+    if !matched || pwl == 0 {
+        ulib::wipe(&mut pw);
+        // An empty password is no account's: useradd and passwd refuse one,
+        // so a line made from it could only ever be refused (medium review).
+        ulib::con_write(if matched { b"clusterkey: a password may not be empty\r\n" } else { b"clusterkey: passwords do not match\r\n" });
+        return 1;
+    }
+    let mut reg = [0u8; clusterkeys::USER_LINE_MAX];
+    let mut rbuf = [0u8; clusterkeys::REALM_FILE_MAX + 1];
+    let code = match read_realm_file(&mut rbuf) {
+        FileRead::Absent => {
+            ulib::con_write(b"clusterkey: no realm here (/etc/cluster/realm), so no user keys: 'clusterkey realm new'\r\n");
+            1
+        }
+        FileRead::Unreadable => {
+            ulib::con_write(b"clusterkey: /etc/cluster/realm is unreadable\r\n");
+            1
+        }
+        FileRead::Bytes(n) => {
+            let notice = || ulib::con_write(b"clusterkey: deriving the key...\r\n");
+            match clusterkeys::user_registry_line(&mut reg, name, &rbuf[..n], &pw[..pwl], notice) {
+                clusterkeys::UserLine::Line(n) => {
+                    out(target, &reg[..n]);
+                    out(target, b"\r\n");
+                    0
+                }
+                clusterkeys::UserLine::NoRealm => {
+                    ulib::con_write(b"clusterkey: /etc/cluster/realm holds no realm: 'clusterkey realm new -f'\r\n");
+                    1
+                }
+                clusterkeys::UserLine::NameRefused => {
+                    ulib::con_write(b"clusterkey: a registry line cannot carry that name\r\n");
+                    2
+                }
+            }
+        }
+    };
+    ulib::wipe(&mut pw);
+    code
 }
 
 fn out(target: u64, bytes: &[u8]) {

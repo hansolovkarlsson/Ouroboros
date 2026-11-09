@@ -334,10 +334,9 @@ so realistic command output comes back whole.
     See [`unspellable-postmortem.md`](../postmortems/unspellable-postmortem.md) for the
     attempt that did it the other way and what that cost. `cpu` is covered by a
     second mechanism: `netd` assumes the mapped user for the length of the spawn
-    so the child inherits it. **Still machine-keyed**, which is the point of the
-    per-user-*key* item below: an authorized machine can claim any of its own
-    users' names, so this protects against the users of a trusted node, not a
-    compromised one.
+    so the child inherits it. Machine-keyed on its own; per-user keys (below)
+    narrowed it in 2026-11: a user registered at an export is served there only
+    with their own credential.
   - **Tier 2+, TRIGGER-GATED: activate only when Ouroboros leaves a trusted
     network.** These are real hardening but **deliberately not built while the
     deployment is a trusted LAN** (two QEMU VMs, or Hans's own Raspberry Pi
@@ -357,10 +356,13 @@ so realistic command output comes back whole.
       (needs bounded state under no-heap).
     - **Per-user keys**: the per-machine half **shipped 2026-08-31** (Ed25519
       per machine, peers authorized by public key, revocation by deleting a
-      line), so "interchangeable members" and "no key rotation" are closed. What
-      remains is per-*user*: an authorized machine can still claim any of its own
-      users' names, so the model defends against the users of a trusted node but
-      not a compromised one. **A designated auth server (Plan 9's
+      line), so "interchangeable members" and "no key rotation" are closed. The
+      per-*user* half **shipped 2026-11-09**
+      ([`roadmap-user-keys.md`](roadmap-user-keys.md)): a key derived from the
+      user's password, held by `netd` while the user is logged in, and an export
+      that registers the user serves them only with that key's signature. So a
+      compromised node can act only as the users logged in on it, and as any
+      user nobody has registered. **A designated auth server (Plan 9's
       `authsrv` + tickets) is evaluated in full under item 1 of
       [`ROADMAP.md`](../ROADMAP.md)**: it is the right long-term shape, it is what
       Plan 9 does, and the note records both the detail that decides whether it
@@ -370,7 +372,14 @@ so realistic command output comes back whole.
       (tiers 1–2) protects *integrity and who-may-act*, **not secrecy**. Every
       byte still crosses the wire in **cleartext**, so a sniffer reads your files
       even with perfect MACs. An untrusted-network move needs transport
-      encryption, a separate axis from all the authentication above.
+      encryption, a separate axis from all the authentication above. **Per-user
+      keys made this trigger matter more** (2026-11-09): every credential is a
+      signature by a password-derived key over cleartext, so one captured
+      credential lets its holder guess that user's password offline, an
+      exposure that did not exist before. The slow derivation and a realm
+      unique to the cluster slow it; only encryption, carrying the credential
+      sealed, closes it ([`roadmap-user-keys.md`](roadmap-user-keys.md), "What
+      this plan closes").
     - **`cpu`-stream reply-auth**: MAC the remote-run output stream (per-chunk
       or streaming), the framed-reply auth's harder cousin.
 - **Consistency and failure.** Partitions, disconnects, concurrent writers: the

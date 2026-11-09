@@ -70,8 +70,40 @@ def nested_login(slot, user, prompt):
     ]
 
 
+def registry_line(name, password):
+    """A regex for the registry line `useradd`, `passwd` and `clusterkey user`
+    must print for `name` with `password` in the dev realm, derived by
+    mkclusterkeys.py's Python, which shares no code with the guest's
+    (Decision 9; step 9). Returned as a callable, so the derivation (a full
+    PBKDF2) runs only when a check of it does, not for every scenario."""
+    def rx():
+        if HERE not in sys.path:
+            sys.path.insert(0, HERE)
+        import mkclusterkeys
+        key = mkclusterkeys.edref.public_key(mkclusterkeys.user_seed(name, password.encode()))
+        return re.escape(f"{name} {key.hex()}")
+    return rx
+
+
+def new_password(pw, prompt):
+    """Answer a New/Retype password pair, then wait for `prompt`."""
+    return [("s", "New password", pw), ("s", "Retype", pw), ("s", prompt, "")]
+
+
+def after(command, rx, nth=1):
+    """A regex for `rx()` in the output of the `nth` run of `command`: after
+    the command's echo, before the next prompt at a line's start."""
+    def full():
+        lead = rf"{re.escape(command)}\r?\n(?:(?!# )[^\n]*\n)*?"
+        skip = rf"(?:{re.escape(command)}[\s\S]*?)" * (nth - 1)
+        return skip + lead + rf"[^\n]*{rx()}"
+    return full
+
+
 # Each scenario: a list of ("s", wait, type) console steps, ("h", uids, what)
-# host checks of the table, and ("t", regex, what) checks of the transcript.
+# host checks of the table, ("t", regex, what) checks of the transcript,
+# ("x", regex, what) checks that it does NOT match, and ("n", text, count,
+# what) counts of a text in it. A regex may be a callable, made when checked.
 SCENARIOS = {
     # The step's check: a login holds its user's key, a logout drops it.
     "login-logout": [
@@ -127,6 +159,51 @@ SCENARIOS = {
         ("s", r"uid=1000", ""),
         ("h", [], "a login on a node with no realm holds nothing"),
     ],
+    # Decision 9: `useradd` and `passwd` print the registry line for the new
+    # password, the key the host derives independently; a user's own `passwd`
+    # finds their name by uid; and a node with no realm prints none.
+    "registry-lines": [
+        *login("root", "# "),
+        ("s", "", "useradd ann"),
+        *new_password("ann", "# "),
+        ("t", registry_line("ann", "ann"), "useradd prints the new user's registry line"),
+        # The same line from `clusterkey user`, the password typed twice; and a
+        # mismatched retype refused, with no line.
+        ("s", "", "clusterkey user ann"),
+        ("s", "Password", "ann"),
+        ("s", "Retype", "ann"),
+        ("s", "# ", "clusterkey user ann"),
+        ("s", "Password", "ann"),
+        ("s", "Retype", "nna"),
+        ("s", "# ", ""),
+        ("t", after("clusterkey user ann", registry_line("ann", "ann")), "clusterkey user prints the same line"),
+        ("t", after("clusterkey user ann", lambda: r"passwords do not match", nth=2), "a mismatched retype is refused"),
+        ("x", after("clusterkey user ann", lambda: r"ann [0-9a-f]{64}", nth=2), "and prints no line"),
+        # An empty password is no account's, so it makes no line either.
+        ("s", "", "clusterkey user ann"),
+        ("s", "Password", "<ENTER>"),
+        ("s", "Retype", "<ENTER>"),
+        ("s", "# ", ""),
+        ("t", after("clusterkey user ann", lambda: r"may not be empty", nth=3), "an empty password is refused"),
+        ("x", after("clusterkey user ann", lambda: r"ann [0-9a-f]{64}", nth=3), "and makes no line"),
+        ("s", "", "passwd user"),
+        *new_password("pw2", "# "),
+        ("t", registry_line("user", "pw2"), "root's passwd prints the changed user's line"),
+        ("s", "", "exit"),
+        ("s", "login:", "user"),
+        ("s", "assword", "pw2"),
+        ("s", r"\$ ", "passwd"),
+        ("s", "Current", "pw2"),
+        *new_password("pw3", r"\$ "),
+        ("t", registry_line("user", "pw3"), "a user's own passwd prints their line, found by uid"),
+        ("s", "", "exit"),
+        *login("root", "# "),
+        ("s", "", "rm /etc/cluster/realm"),
+        ("s", "# ", "passwd user"),
+        *new_password("pw4", "# "),
+        ("n", "password updated", 3, "three password changes"),
+        ("n", "the cluster key changed", 2, "with no realm, passwd prints no line"),
+    ],
     # A fifth hold with four live keys is refused, never evicting, and that
     # login still succeeds. Four root logins: the boot shell and three nested.
     "full-table": [
@@ -167,9 +244,16 @@ def run(name, plan):
                 ok = got == want
                 print(f"[{'PASS' if ok else 'FAIL'}] {name}: {what}: held uids {got}, want {want}", flush=True)
                 failures += 0 if ok else 1
+            elif step[0] == "n":
+                _, text, want, what = step
+                got = g.transcript().count(text)
+                ok = got == want
+                print(f"[{'PASS' if ok else 'FAIL'}] {name}: {what}: {got} of {text!r}, want {want}", flush=True)
+                failures += 0 if ok else 1
             else:
-                _, rx, what = step
-                ok = re.search(rx, g.transcript()) is not None
+                kind, rx, what = step
+                found = re.search(rx() if callable(rx) else rx, g.transcript()) is not None
+                ok = found if kind == "t" else not found
                 print(f"[{'PASS' if ok else 'FAIL'}] {name}: {what}", flush=True)
                 failures += 0 if ok else 1
         # A run whose guest died proves nothing either way.

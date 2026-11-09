@@ -364,6 +364,44 @@ showing even if it overwrites the screen. On a byte-stream console
 beyond parity: `cond` parses ANSI, so `clear` actually clears on a
 framebuffer, which the kernel's old `fbconsole` never did.
 
+### The key agent: `netd` holds users' cluster keys
+
+A cluster request can carry the requesting user's own signature, made with a
+key derived from their password (`docs/roadmap/roadmap-user-keys.md`; the
+wire format is `ninep-abi`'s normative block). Something has to hold that
+key between the login that derives it and the requests that use it, and that
+is `netd` itself: it is the only task that signs, so the key never leaves the
+process that uses it, and no new server or capability was needed.
+
+- **`login` derives and hands over.** After checking the password, `login`
+  derives the key (PBKDF2 over the password, the user's name and the
+  cluster's realm, about a second on the QEMU guest), sends its seed with
+  `NETOP_KEY_HOLD` while it is still root, keeps the handle `netd` returns,
+  and wipes its own copies. Only root may hold, so a full table
+  (`NET_KEY_MAX`, 4) refuses a hold rather than evicting a key: nothing but
+  a login can have put the others there.
+- **The shell gives it back.** At logout the shell sends `NETOP_KEY_DROP`
+  with the handle, and before every login prompt `NETOP_KEY_DROP_MINE`, so a
+  lost logout drop cannot outlive its session.
+- **A key is used only while its login lives.** Each entry records the
+  packed task identity (`sender_task`) of the login that held it. A key
+  whose owner is gone is never used, and the idle pass removes it; every
+  seed is wiped when its entry goes.
+- **Signing is per request, for the uid captured when it was queued.** A
+  client request is parked with its caller's `SENDER_ID` uid, and signed in
+  `netd`'s service pass with the newest live key for that uid, never for
+  whoever sent the last message. The stack the signature used is zeroed
+  after it, since Ed25519 expands the seed into values as good as the key.
+- **A session opened with a credential is attested, and dies with the
+  key.** Its keyed frames carry no credential, so `netd` uses it only while
+  a live login holds that user's key, and closes it when the last one goes.
+  Programs the user left running are refused from then on.
+
+`clusterkey held` (root) lists whose keys are held, never the keys. A
+restart of `netd` by the supervisor empties the table: the requests of the
+users logged in at the time go out without a credential until they log in
+again, which an export that registers them refuses.
+
 ### Dynamic task creation (`spawn`/`exec`)
 
 `exec <path>` in the shell loads a *second* (or third/fourth) program

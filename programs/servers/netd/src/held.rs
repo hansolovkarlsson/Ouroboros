@@ -20,7 +20,9 @@
 //!   **A drop of "mine"** takes every key the sender holds (the login loop sends
 //!   it before every prompt, so a lost logout drop cannot outlive the session).
 //! - **A dead owner's key goes** in the idle pass: an owner is alive while its
-//!   slot still holds the same packed identity and is not a zombie.
+//!   slot still holds the same packed identity and is not a zombie. Until then
+//!   it is held but never used: `seed_for` and `holds_live` ask liveness
+//!   themselves.
 //! - **Every seed is wiped** when its entry goes, whichever way it goes.
 //!
 //! What a held key means: while `user` is logged in here, anything running as

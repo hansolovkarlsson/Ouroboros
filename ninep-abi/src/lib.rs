@@ -665,15 +665,18 @@ pub const NP_REMOTE_CHUNK: usize = 512;
 // docs/roadmap/roadmap-cluster.md): replay-of-observed-ops (a passive sniffer can replay
 // a captured request verbatim; forgery of a *new* one it cannot), transport
 // encryption, and reply-auth for the `cpu`-run output *stream* (not a framed
-// reply). Keys are per-MACHINE, not per-user, so an authorized machine can
-// claim ANY name that exists on the export, not only its own users' (nothing
-// checks the name exists on the caller). The one exception is ROOT SQUASH: a
-// name resolving to uid 0 or gid 0 on the export is refused (FS_ERR_AUTH,
-// signed) unless the peer's `authorized` line carries the `root` flag
-// (docs/roadmap/roadmap-user-keys.md, Decision 6). Per-user keys, the rest of
-// that plan, close the remainder: the USER CREDENTIALS section below defines
-// the format that carries a user's own signature (`AUTHNP05`), and an export
-// requires it for a user it has a registered key for.
+// reply). The machine signature alone lets an authorized machine claim ANY
+// name that exists on the export, not only its own users' (nothing checks the
+// name exists on the caller). Two rules narrow that, both in the policy of
+// USER CREDENTIALS below (docs/roadmap/roadmap-user-keys.md): ROOT SQUASH, a
+// name resolving to uid 0 or gid 0 on the export refused unless the peer's
+// `authorized` line carries the `root` flag (Decision 6), and a name with a
+// key registered at the export, served only with that user's own signature
+// (`AUTHNP05`, Decision 5), which a machine can make only while the user is
+// logged in on it. A name with no registered key is still the machine's to
+// claim. And a credential is a signature by a password-derived key over
+// cleartext bytes, so one captured credential lets its holder test password
+// guesses offline: the encryption tier above is its cure.
 //
 // The retired shared-key MAC format ("AUTHNP02") is refused outright; it
 // survives only as a negative control `np9p_client.py --legacy-mac` can send.
@@ -850,6 +853,14 @@ pub const NP_REMOTE_CHUNK: usize = 512;
 //      `AUTHNP03` is, the credential unread. A registry line that cannot be
 //      read, or two that disagree, is not "no key": the claim is refused.
 //
+// What a client does: it sends `AUTHNP05` when it holds a key for the
+// requesting user (in `netd`, a key `login` derived and handed over, held
+// until that login ends) and knows the export's key, and `AUTHNP03`
+// otherwise. A session it opened with a credential is closed by the client
+// when the user's last key goes, and nothing is sent on it after: its keyed
+// frames carry no credential, so the export would go on serving them as the
+// attested user (Decision 4).
+//
 // The reply is `AUTHNP03`'s signed reply, unchanged: [`SIG_DOMAIN_REPLY`] ‖
 // request nonce ‖ status ‖ result. A keyed session's `NP_SESSION` may be sent
 // as `AUTHNP05`; its keyed frames then run as the user that credential
@@ -871,8 +882,9 @@ pub const NP_NONCE_LEN: usize = 16;
 /// model instead of serving every remote request as root. It is covered by the
 /// signature, so the claimed user cannot be tampered with in flight - though an
 /// authorized machine can claim ANY name the far side has, not only its own
-/// users', except a root-equivalent one without the `root` flag (root squash).
-/// A per-USER key tier (docs/roadmap/roadmap-user-keys.md) closes the rest.
+/// users', except a root-equivalent one without the `root` flag (root squash)
+/// and a user with a key registered at the export, who needs their own
+/// credential (`AUTHNP05`, docs/roadmap/roadmap-user-keys.md).
 ///
 /// **A name, not a uid.** Two nodes have independent `/etc/passwd` files, so
 /// uid 1000 need not be the same person on both - numeric identity (NFS's

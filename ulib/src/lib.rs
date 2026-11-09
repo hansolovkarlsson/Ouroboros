@@ -1975,3 +1975,37 @@ fn panic(_info: &PanicInfo) -> ! {
         core::hint::spin_loop();
     }
 }
+
+/// What [`read_file_status`] found.
+pub enum FileStatus {
+    /// Definitely not there.
+    Absent,
+    /// There may or may not be a file: the read failed for another reason.
+    Unreadable,
+    /// Read this many bytes (an empty file is `Bytes(0)`).
+    Bytes(usize),
+}
+
+/// Read a whole small file, telling a missing file from one that could not be
+/// read: the difference between "this node has no realm" and "this node may
+/// have one". `clusterkey`, `useradd` and `passwd` read `/etc/cluster/realm`
+/// through it.
+pub fn read_file_status(path: &str, buf: &mut [u8]) -> FileStatus {
+    let r = fs_read_bulk(path, 0, buf);
+    if r == syscall_abi::FS_ERR_NOT_FOUND {
+        FileStatus::Absent
+    } else if is_fs_error(r) {
+        FileStatus::Unreadable
+    } else {
+        FileStatus::Bytes((r as usize).min(buf.len()))
+    }
+}
+
+/// Zero a buffer that held a secret (a password typed at a prompt), volatile
+/// so it is not optimised away as a dead store.
+pub fn wipe(b: &mut [u8]) {
+    for x in b.iter_mut() {
+        // SAFETY: a byte of a live slice.
+        unsafe { core::ptr::write_volatile(x, 0) };
+    }
+}

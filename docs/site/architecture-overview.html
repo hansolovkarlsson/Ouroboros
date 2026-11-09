@@ -382,7 +382,7 @@
             <tr>
               <td class="slot">4</td>
               <td class="tname">Network server</td>
-              <td><span class="d">The entire protocol stack in userland (ARP, IPv4, ICMP, UDP, DNS, TCP), plus an HTTP server, the cluster's 9P export gateway, and remote execution. The only task allowed the NIC syscalls; the DMA-owning driver stays in the kernel because there is no IOMMU.</span></td>
+              <td><span class="d">The entire protocol stack in userland (ARP, IPv4, ICMP, UDP, DNS, TCP), plus an HTTP server, the cluster's 9P export gateway, and remote execution. It also holds each logged-in user's cluster key, handed over by <code class="inline">login</code> and dropped at logout, and signs that user's requests with it, so the key never leaves the task that uses it. The only task allowed the NIC syscalls; the DMA-owning driver stays in the kernel because there is no IOMMU.</span></td>
               <td><span class="tbadge pro">protected</span></td>
             </tr>
             <tr>

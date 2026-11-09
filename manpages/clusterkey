@@ -7,6 +7,7 @@ SYNOPSIS
     clusterkey peers
     clusterkey line <name> <ip>
     clusterkey realm [new [-f]]
+    clusterkey user <name>
     clusterkey held
 
 DESCRIPTION
@@ -44,9 +45,28 @@ DESCRIPTION
     other nodes. A node with no realm derives no user keys, and logs in as it
     always did.
 
+    A user's key in the realm is registered at an export by a line in its
+    /etc/cluster/users (0600): "<name> <public key>". An export serves a
+    registered user only with a request signed by that key, which a machine
+    can make only while the user is logged in on it, with one exception: while
+    the export has a `cpu` run in flight to a machine as that user, it serves
+    that machine's claims of the user (the run's /host reads) until the run
+    ends. An unregistered user is served on the machine's word. A new realm
+    changes every key, so every line.
+
+    user <name> prints that line for a password typed twice (echo off), on
+    standard output alone, so `clusterkey user ann >> /etc/cluster/users`
+    writes just the line. Anyone may run it: the user types their own
+    password and hands the line to whoever keeps the exports' registries,
+    which registers an existing account, or remakes every line after a new
+    realm, without resetting a password. The password is not checked against
+    /etc/shadow; a mistyped one makes a line the export refuses the user by,
+    until it is replaced. useradd and passwd print the line too, for the
+    password they set.
+
     held (root only) lists the users whose cluster keys netd holds right now:
-    login derives a user's key and hands it over, and logout drops it. It
-    names uids, never keys.
+    login derives a user's key and hands it over, netd signs that user's
+    requests with it, and logout drops it. It names uids, never keys.
 
 EXIT STATUS
     0   success
@@ -54,4 +74,5 @@ EXIT STATUS
     2   bad usage
 
 SEE ALSO
+    useradd, passwd, login - where a user's key is derived
     id - the calling task's user identity, a different thing entirely

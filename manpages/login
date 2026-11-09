@@ -10,7 +10,7 @@ DESCRIPTION
         login: <username>
         password: <not echoed>
 
-    and checks the credentials against /etc/passwd. On success it becomes that
+    and checks the password against /etc/shadow. On success it becomes that
     user (uid/gid) for the session; the prompt is # for root, $ for anyone else.
     A wrong username or password prints "Login incorrect" and re-prompts.
 
@@ -24,24 +24,42 @@ DESCRIPTION
     for that).
 
 CREDENTIALS
-    /etc/passwd holds one account per line:
+    /etc/passwd (world-readable) holds one account per line:
 
-        name:uid:gid:home:salt:hash
+        name:uid:gid:home
 
-    where hash = SHA-256(salt || password). The salt+hash are precomputed at
-    build time (scripts/mkpasswd.py); login only verifies. The DEV image ships
-    two accounts (a real deployment would set its own):
+    and /etc/shadow (0600, root's) the password secret for each:
 
-        root / root    (uid 0)
-        user / user    (uid 1000)
+        name:<salt>:<hash>
 
-    If /etc/passwd is missing (a freshly formatted disk, say), login falls back
-    to a single root session so the machine stays usable.
+    A version-2 line, which useradd and passwd write, has a salt field of
+    "2$" and 14 hex digits (a 7-byte random salt) and the first 32 bytes of
+    PBKDF2-HMAC-SHA-512(password, salt, 210000 iterations) as its hash: about
+    a second to check on the QEMU guest, on purpose, so a stolen shadow file
+    is slow to guess at. A version-1 line (16 hex digits of salt, the hash
+    SHA-256(salt || password)) still verifies, and a successful login
+    rewrites it as version 2 in place. An old /etc/passwd line with the
+    secret inline still verifies too, and is not upgraded.
 
-    There is no `passwd` or `useradd` yet - accounts are the static file above.
+    The DEV images ship accounts root/root (uid 0), user/user (uid 1000) and
+    guest/guest; a real deployment would set its own. If /etc/passwd is
+    missing (a freshly formatted disk, say), login starts a single root
+    session so the machine stays usable.
+
     A logged-in user starts in their home directory (the passwd `home` field,
-    normally /Users/<name>); the shell exports it as HOME, so `~` expands to it.
-    Manage accounts with useradd / passwd / groupadd / usermod (all root only).
+    normally /Users/<name>); the shell exports it as HOME, so `~` expands to
+    it. Manage accounts with useradd, passwd, groupadd and usermod.
+
+CLUSTER KEY
+    On a node with a cluster realm (/etc/cluster/realm), login also derives
+    the user's cluster key from the password, the name and the realm (another
+    second), and hands it to netd, which holds it until the session ends and
+    signs that user's cluster requests with it. An export that lists the user
+    in /etc/cluster/users serves them only with that signature, so a user is
+    served there only while logged in somewhere. With no realm, nothing is
+    derived and login is otherwise the same. A full key table (four logins)
+    says "login: note: the cluster key is not held" and the login goes on.
+    clusterkey held (root) lists whose keys are held.
 
 SEE ALSO
-    su, logout, id, sh
+    su, logout, id, sh, passwd, useradd, clusterkey

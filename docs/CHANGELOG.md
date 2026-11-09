@@ -11,6 +11,35 @@ here actually works today, see [`architecture.md`](architecture.md) and
 
 **Not yet released.** Changes since v0.24.0, drafted as they land.
 
+**Per-user keys for the cluster (2026-11-08 to 2026-11-09, #426 to #429, and
+step 9).** A remote request's user was asserted by the calling machine and
+attested by nothing, so any machine the cluster authorized could claim any
+user with an account on the export. Now a user can be vouched for by their
+own password. `login` derives the user's cluster key (PBKDF2-HMAC-SHA-512
+over the name and the cluster's realm, steps 0 to 4, on `main` since
+2026-09-27) and hands it to `netd`, which holds it until logout. `netd`
+signs every request of that user's uid with it in a new format, `AUTHNP05`:
+the machine's signature over a typed credential block whose kind 1 is the
+user's signature, bound to the nonce, both machines' keys and the message.
+An export that lists the user in `/etc/cluster/users` serves them only with
+that credential; an unregistered user is served on the machine's word as
+before, root only from a peer flagged `root` or with root's own credential,
+and a `cpu` run's `/host` reads on the run's own standing until it ends. A
+held session opened with a credential is closed when the user's last key
+goes, and nothing more is sent on it. `clusterkey user <name>` prints a
+user's registry line from their password, and `useradd` and `passwd` print
+it for the password they set. **Not a flag day**: `AUTHNP03`
+is still accepted, and registering a user at an export is what turns the
+check on for them there. But a node from before this change sends no
+credential, so a user registered at an export is refused there from it.
+And a credential is a signature over cleartext, so one captured credential
+lets its holder guess the password offline: strong passwords are part of
+the model, and `manual.md` says so. The export costs 0.7 to 3.3 ms more per
+credentialed one-shot read on QEMU. Graded by `make test-cred-client`
+(new), `make test-run-callback` (new), `make test-no-identity` (new),
+`impersonate-gate 7` and a sixth `test-held-keys` scenario; the plan,
+results and reviews of every step are in `roadmap/roadmap-user-keys.md`.
+
 **A mount can be seen from its parent, and bare `mount` names every mount
 (2026-11-08, #422, #423).** `mount <n> <path>` has mounted a second
 partition beside `/` since 2026-08-25, but on the Pi the mount looked like

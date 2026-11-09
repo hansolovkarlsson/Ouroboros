@@ -38,14 +38,18 @@ about the practical trade for a would-be user.**
   `qsort`, `malloc`), though no real *application* is ported yet and there's no
   dynamic linking; programs are position-independent `aarch64-none`
   binaries.
-- **Accounts and permissions exist, but cluster keys are per-machine**. There
-  is a real user model (`/etc/passwd`, `/etc/shadow`, groups, `login`, enforced
-  file modes on ext2), and a remote request carries the requesting user's name so
-  the far side applies its own permissions to it. What is missing is per-user
-  *keys*: authentication is per-**machine** (an Ed25519 keypair per node since
-  v0.16.0), so an authorized machine can claim any user with an account on the
-  export, root included, and there is no on-the-wire encryption. Trusted-LAN by
-  design. Not self-hosting (you cross-compile from macOS).
+- **Accounts and permissions exist, and cluster keys are per-user where you
+  register them**. There is a real user model (`/etc/passwd`, `/etc/shadow`,
+  groups, `login`, enforced file modes on ext2), and a remote request carries
+  the requesting user's name so the far side applies its own permissions to
+  it. Machines hold Ed25519 keypairs (since v0.16.0); since v0.25.0 a user
+  registered at an export is served there only with a signature by their own
+  password-derived key, which a machine holds only while they are logged in
+  on it (or, while a `cpu` run as them is in flight, to the machine running
+  it), and root only from a peer flagged `root`. An unregistered user is
+  still the machine's to claim, there is no auth server, and there is no
+  on-the-wire encryption, so a captured credential can be guessed at offline.
+  Trusted-LAN by design. Not self-hosting (you cross-compile from macOS).
 
 Keep that list in mind: the "you gain" columns are real, but every "you
 give up" column is measured against a system that is *finished* and one

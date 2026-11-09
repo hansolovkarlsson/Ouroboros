@@ -385,6 +385,7 @@ name = "passwd"
 version = "0.1.0"
 dependencies = [
  "accounts",
+ "clusterkeys",
  "syscall-abi",
  "ulib",
 ]
@@ -725,6 +726,7 @@ name = "useradd"
 version = "0.1.0"
 dependencies = [
  "accounts",
+ "clusterkeys",
  "ninep-abi",
  "syscall-abi",
  "ulib",

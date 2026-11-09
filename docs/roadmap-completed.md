@@ -20,6 +20,50 @@ a **DONE** marker or ~~strikethrough~~ is finished.
 
 ---
 
+## Per-user keys for the cluster ✅ DONE (2026-11-09)
+
+`ROADMAP.md`'s frontier item 1, planned on 2026-09-26 in
+[`roadmap/roadmap-user-keys.md`](roadmap/roadmap-user-keys.md), which holds
+every step's results and reviews. Until it, the user a remote request named
+was asserted by the calling machine and attested by nothing, so any
+authorized machine could claim any user with an account on the export, root
+included. Now:
+
+- **Root squash** (step 1, #171): a claim resolving to uid or gid 0 is
+  refused unless the export's `authorized` line for the peer ends with
+  `root`, or root is registered there and root's credential verifies.
+- **A key per user, from the password** (steps 2 and 3): PBKDF2-HMAC-SHA-512
+  at 210,000 iterations over the name and the cluster's realm, so a user has
+  one key on every node of a realm. `/etc/shadow` moved to the same slow
+  function (version 2), upgraded in place at a login.
+- **Held only while logged in** (step 4): `login` derives the key and hands
+  it to `netd`, which holds it until logout and never uses a key whose
+  login is gone.
+- **On the wire** (steps 5 and 6, #426, #427): `AUTHNP05`, a typed credential
+  block under the machine signature, kind 1 a signature by the user's key
+  bound to the nonce, both machines' keys and the message. Both Python peers
+  speak it, the foreign implementation the wire check holds equal.
+- **The export** (step 7, #428): a user registered in `/etc/cluster/users` is
+  served only with a credential that verifies; an unregistered one on the
+  machine's word; a `cpu` run's `/host` reads on the run's own standing.
+- **The client** (step 8, #429): `netd` signs a credential for every request
+  of a uid whose key it holds, and closes a session opened with one when the
+  user's last key goes.
+- **Step 9**: `useradd` and `passwd` print the registry line for the
+  password they set (Decision 9, found unbuilt at this step), and
+  `clusterkey user` prints it from a password typed twice, so an existing
+  account is registered without a reset; and the
+  manual, the man pages, `architecture.md`, the normative block and the
+  cluster roadmap say what the arc closes and what it does not: an
+  unregistered user is still claimable, and a captured credential can be
+  guessed at offline until the encryption tier.
+
+Graded by `make test-held-keys`, `make test-run-callback`, `make
+test-cred-client`, `impersonate-gate 7` and the wire and peer checks in
+`make test`, each with the mutation controls the plan records. Open from it,
+in `ROADMAP.md`'s item 1: the auth server it was shaped for, and Hans's
+question whether a `cpu` run should end when its login is killed.
+
 ## More than one partition in use, and mounts seen ✅ DONE (2026-11-08)
 
 Pi item 1 of the directions Hans listed on 2026-10-03. On 2026-11-07 it
