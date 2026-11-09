@@ -128,7 +128,66 @@ pub extern "C" fn _start() -> ! {
     let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
     call(&req[..w], &mut reply);
     let status = read_u64(&reply, 0);
+    if status == 0 {
+        ulib::con_write(b"passwd: password updated\r\n");
+        print_registry_line(name, &pw[..pwl]);
+    }
     report(status)
+}
+
+/// After a change: the account's new registry line (Decision 9). The user's
+/// cluster key is derived from the password, so it changed too, and every
+/// export that lists the user in `/etc/cluster/users` now refuses them until
+/// its line is replaced. With no name given, the account is the caller's,
+/// found by uid in `/etc/passwd`. Nothing is printed without a realm.
+#[inline(never)]
+fn print_registry_line(name: &[u8], password: &[u8]) {
+    let mut pbuf = [0u8; 2048];
+    let mut own = [0u8; clusterkeys::NAME_MAX];
+    let name = if name.is_empty() {
+        let plen = ulib::read_file_all("/etc/passwd", &mut pbuf);
+        let Some(acct) = accounts::find_user_by_uid(&pbuf[..plen], ulib::getuid()) else { return };
+        if acct.name.len() > own.len() {
+            return;
+        }
+        own[..acct.name.len()].copy_from_slice(acct.name);
+        &own[..acct.name.len()]
+    } else {
+        name
+    };
+    let mut reg = [0u8; REG_LINE_MAX];
+    let n = registry_line(name, password, &mut reg);
+    if n == 0 {
+        return;
+    }
+    ulib::con_write(b"passwd: the cluster key changed with the password. Every export that lists\r\n  this user in /etc/cluster/users refuses them until that line is replaced by:\r\n");
+    ulib::con_write(&reg[..n]);
+    ulib::con_write(b"\r\n");
+}
+
+/// What `registry_line` says before its derivation.
+const PROG_DERIVING: &[u8] = b"passwd: deriving the cluster key...\r\n";
+
+/// The cluster's realm file. Present, the new password gives the user a
+/// cluster key, whose registry line is printed; absent, nothing is.
+const REALM_FILE: &str = "/etc/cluster/realm";
+
+/// The longest registry line: a name, a space and 64 hex digits.
+const REG_LINE_MAX: usize = clusterkeys::NAME_MAX + 1 + clusterkeys::KEY_HEX_LEN;
+
+/// `name`'s registry line for `password` (`clusterkeys::user_registry_line`),
+/// into `out`, or 0 when this node has no readable realm. One derivation,
+/// about a second on the guest. `#[inline(never)]`: the realm buffer stays
+/// off the caller's frame.
+#[inline(never)]
+fn registry_line(name: &[u8], password: &[u8], out: &mut [u8; REG_LINE_MAX]) -> usize {
+    let mut rbuf = [0u8; clusterkeys::REALM_FILE_MAX + 1];
+    let rlen = ulib::read_file_all(REALM_FILE, &mut rbuf);
+    if clusterkeys::parse_realm(&rbuf[..rlen]).is_none() {
+        return 0;
+    }
+    ulib::con_write(PROG_DERIVING);
+    clusterkeys::user_registry_line(out, name, &rbuf[..rlen], password).unwrap_or(0)
 }
 
 /// Send one request to `accountd` and return the reply's length. Dies if
@@ -159,10 +218,7 @@ fn call(req: &[u8], reply: &mut [u8]) -> usize {
 /// Report a final status and exit.
 fn report(status: u64) -> ! {
     match status {
-        0 => {
-            ulib::con_write(b"passwd: password updated\r\n");
-            ulib::exit(0)
-        }
+        0 => ulib::exit(0),
         syscall_abi::ACCT_ERR_DENIED => die(b"passwd: only root may change another user's password\r\n"),
         syscall_abi::ACCT_ERR_NO_USER => die(b"passwd: no such user\r\n"),
         syscall_abi::ACCT_ERR_WRONG_PASSWORD => die(b"passwd: current password is wrong\r\n"),

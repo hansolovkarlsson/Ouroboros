@@ -70,8 +70,23 @@ def nested_login(slot, user, prompt):
     ]
 
 
+def registry_line(name, password):
+    """The registry line `useradd` and `passwd` must print for `name` with
+    `password` in the dev realm, derived by mkclusterkeys.py's Python, which
+    shares no code with the guest's (Decision 9; step 9)."""
+    sys.path.insert(0, HERE)
+    import mkclusterkeys
+    return f"{name} {mkclusterkeys.edref.public_key(mkclusterkeys.user_seed(name, password.encode())).hex()}"
+
+
+def new_password(pw, prompt):
+    """Answer a New/Retype password pair, then wait for `prompt`."""
+    return [("s", "New password", pw), ("s", "Retype", pw), ("s", prompt, "")]
+
+
 # Each scenario: a list of ("s", wait, type) console steps, ("h", uids, what)
-# host checks of the table, and ("t", regex, what) checks of the transcript.
+# host checks of the table, ("t", regex, what) checks of the transcript, and
+# ("n", text, count, what) counts of a text in it.
 SCENARIOS = {
     # The step's check: a login holds its user's key, a logout drops it.
     "login-logout": [
@@ -127,6 +142,32 @@ SCENARIOS = {
         ("s", r"uid=1000", ""),
         ("h", [], "a login on a node with no realm holds nothing"),
     ],
+    # Decision 9: `useradd` and `passwd` print the registry line for the new
+    # password, the key the host derives independently; a user's own `passwd`
+    # finds their name by uid; and a node with no realm prints none.
+    "registry-lines": [
+        *login("root", "# "),
+        ("s", "", "useradd ann"),
+        *new_password("ann", "# "),
+        ("t", re.escape(registry_line("ann", "ann")), "useradd prints the new user's registry line"),
+        ("s", "", "passwd user"),
+        *new_password("pw2", "# "),
+        ("t", re.escape(registry_line("user", "pw2")), "root's passwd prints the changed user's line"),
+        ("s", "", "exit"),
+        ("s", "login:", "user"),
+        ("s", "assword", "pw2"),
+        ("s", r"\$ ", "passwd"),
+        ("s", "Current", "pw2"),
+        *new_password("pw3", r"\$ "),
+        ("t", re.escape(registry_line("user", "pw3")), "a user's own passwd prints their line, found by uid"),
+        ("s", "", "exit"),
+        *login("root", "# "),
+        ("s", "", "rm /etc/cluster/realm"),
+        ("s", "# ", "passwd user"),
+        *new_password("pw4", "# "),
+        ("n", "password updated", 3, "three password changes"),
+        ("n", "the cluster key changed", 2, "with no realm, passwd prints no line"),
+    ],
     # A fifth hold with four live keys is refused, never evicting, and that
     # login still succeeds. Four root logins: the boot shell and three nested.
     "full-table": [
@@ -166,6 +207,12 @@ def run(name, plan):
                 got = held()
                 ok = got == want
                 print(f"[{'PASS' if ok else 'FAIL'}] {name}: {what}: held uids {got}, want {want}", flush=True)
+                failures += 0 if ok else 1
+            elif step[0] == "n":
+                _, text, want, what = step
+                got = g.transcript().count(text)
+                ok = got == want
+                print(f"[{'PASS' if ok else 'FAIL'}] {name}: {what}: {got} of {text!r}, want {want}", flush=True)
                 failures += 0 if ok else 1
             else:
                 _, rx, what = step

@@ -132,6 +132,10 @@ pub extern "C" fn _start() -> ! {
     // The password secret goes to /etc/shadow, written as the last prep step
     // before the /etc/passwd commit - see the ordering note above.
     let secret;
+    // The new user's registry line (Decision 9), derived while the password is
+    // in hand and printed once the account exists.
+    let mut reg = [0u8; REG_LINE_MAX];
+    let reg_len;
     {
         let mut pbuf = [0u8; BUF];
         // Checked: `out` is built from this and written back over /etc/passwd, so
@@ -195,6 +199,7 @@ pub extern "C" fn _start() -> ! {
         salt.copy_from_slice(&salt8[..accounts::SALT_V2]);
         ulib::con_write(b"useradd: deriving the password's hash...\r\n");
         let new_secret = accounts::secret_v2(salt, &pw[..pwl]);
+        reg_len = registry_line(name, &pw[..pwl], &mut reg);
 
         let mut line = [0u8; 256];
         let Some(llen) =
@@ -273,7 +278,37 @@ pub extern "C" fn _start() -> ! {
     ulib::con_write(b"useradd: created ");
     ulib::con_write(name);
     ulib::con_write(b"\r\n");
+    if reg_len > 0 {
+        ulib::con_write(b"useradd: to require this user's own key at an export, add this line to\r\n  /etc/cluster/users there:\r\n");
+        ulib::con_write(&reg[..reg_len]);
+        ulib::con_write(b"\r\n");
+    }
     ulib::exit(0);
+}
+
+/// What `registry_line` says before its derivation.
+const PROG_DERIVING: &[u8] = b"useradd: deriving the cluster key...\r\n";
+
+/// The cluster's realm file. Present, the new password gives the user a
+/// cluster key, whose registry line is printed; absent, nothing is.
+const REALM_FILE: &str = "/etc/cluster/realm";
+
+/// The longest registry line: a name, a space and 64 hex digits.
+const REG_LINE_MAX: usize = clusterkeys::NAME_MAX + 1 + clusterkeys::KEY_HEX_LEN;
+
+/// `name`'s registry line for `password` (`clusterkeys::user_registry_line`),
+/// into `out`, or 0 when this node has no readable realm. One derivation,
+/// about a second on the guest. `#[inline(never)]`: the realm buffer stays
+/// off the caller's frame.
+#[inline(never)]
+fn registry_line(name: &[u8], password: &[u8], out: &mut [u8; REG_LINE_MAX]) -> usize {
+    let mut rbuf = [0u8; clusterkeys::REALM_FILE_MAX + 1];
+    let rlen = ulib::read_file_all(REALM_FILE, &mut rbuf);
+    if clusterkeys::parse_realm(&rbuf[..rlen]).is_none() {
+        return 0;
+    }
+    ulib::con_write(PROG_DERIVING);
+    clusterkeys::user_registry_line(out, name, &rbuf[..rlen], password).unwrap_or(0)
 }
 
 /// Copy the top-level files of `/etc/skel` into a freshly created home, giving

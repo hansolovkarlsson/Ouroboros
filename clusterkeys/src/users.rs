@@ -191,6 +191,24 @@ pub fn format_user_line(out: &mut [u8], name: &[u8], key: &[u8; KEY_LEN]) -> Opt
     Some(total)
 }
 
+/// The registry line (`<name> <pubkey-hex>`, no newline) for `name` with
+/// `password`, in the realm `realm_file` holds, into `out`: what `useradd`
+/// and `passwd` print for the admin to add to `/etc/cluster/users` on every
+/// export that should require the user's credential (Decision 9). `None`
+/// when the file holds no realm (the node is not in a cluster), or for a
+/// name or buffer [`format_user_line`] refuses. The seed is wiped before
+/// this returns. One derivation: about a second on the guest.
+pub fn user_registry_line(out: &mut [u8], name: &[u8], realm_file: &[u8], password: &[u8]) -> Option<usize> {
+    let realm = parse_realm(realm_file)?;
+    let mut seed = derive_user_seed(name, realm, password)?;
+    let public = ed25519::public_key(&seed);
+    for b in seed.iter_mut() {
+        // SAFETY: a byte of a local array.
+        unsafe { core::ptr::write_volatile(b, 0) };
+    }
+    format_user_line(out, name, &public)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,6 +228,19 @@ mod tests {
         ("user", "user", "e9da28586b272bf011df63d204692079a1920d5b128706f2bc6d1fc87886490f"),
         ("guest", "guest", "9b12a54c8a4d9ab6de5cd6b00a9db817c8016247e40bf9fb897a2a7dae5b48a5"),
     ];
+
+    /// `useradd`'s and `passwd`'s line: the dev registry's line for `user`,
+    /// from the realm file as staged (a trailing newline), and nothing
+    /// without a realm.
+    #[test]
+    fn the_registry_line_is_the_dev_registrys() {
+        let mut out = [0u8; NP_NAME_LEN + 1 + KEY_HEX_LEN];
+        let n = user_registry_line(&mut out, b"user", b"ouroboros-dev\n", b"user").expect("a line");
+        let want = format!("user {}", DEV_USER_KEYS[1].2);
+        assert_eq!(&out[..n], want.as_bytes());
+        assert_eq!(user_registry_line(&mut out, b"user", b"", b"user"), None);
+        assert_eq!(user_registry_line(&mut out, b"user", b"ouroboros-dev\n", b"wrong").map(|n| out[..n] == *want.as_bytes()), Some(false));
+    }
 
     /// The step's check: the Rust derivation, at the real count, agrees with
     /// the independent Python for every dev user.
