@@ -349,8 +349,11 @@ A user with **no** line in `/etc/cluster/users` is served on the machine's
 word, as before: registering a user at an export is what turns the check on
 for them there, so a mixed cluster works and nothing has to change at once.
 A `cpu` run is the one delegation: while machine B runs a command for you
-from A, A serves B's `/host` reads as you, until the run ends (never as root
-without the `root` flag).
+from A, A serves B's `/host` reads as you, until the run ends or you are no
+longer logged in on A, whichever comes first (never as root without the
+`root` flag). A run is ended on A when your last login there goes, as your
+held connections are; the command on B is not stopped, and its `/host`
+reads are refused from then on.
 
 **Strong passwords are part of the cluster's model now.** A credential is a
 signature by a password-derived key, sent in cleartext. Anyone who captures

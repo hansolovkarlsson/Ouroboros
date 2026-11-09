@@ -395,7 +395,8 @@ process that uses it, and no new server or capability was needed.
 - **A session opened with a credential is attested, and dies with the
   key.** Its keyed frames carry no credential, so `netd` uses it only while
   a live login holds that user's key, and closes it when the last one goes.
-  Programs the user left running are refused from then on.
+  Programs the user left running are refused from then on. A `cpu` run sent
+  with the credential ends the same way, which closes its `/host` window.
 
 `clusterkey held` (root) lists whose keys are held, never the keys. A
 restart of `netd` by the supervisor empties the table: the requests of the

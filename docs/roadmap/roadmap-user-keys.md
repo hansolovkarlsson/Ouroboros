@@ -1225,6 +1225,49 @@ that falls through to print a line fails both "prints no line" checks; an
 empty password allowed fails the empty-password pair. `make test` exits 0.
 
 
+### Hans's two decisions from step 8 (2026-11-09)
+
+**A `cpu` run ends with its user.** Step 8's high review found that a run
+whose login is killed goes on, and the dispatching node goes on serving the
+executing machine's `/host` claims of the user under Decision 7 until the run
+finishes. The plan closed a user's sessions with their last key and said
+nothing of runs. Hans's answer: close the run too. A request sent with a
+credential is marked (`Parked::attested`), and `run_counts`, which
+`run_in_flight` and `run_live` both ask, counts an attested run only while a
+live login holds its user's key. Liveness is asked there, not after the idle
+pass, so Decision 7's window closes in the same pass as the key; `held` is
+passed down to the export's `admit` for it. The run arm then ends the run:
+the caller gets the output so far and `cpu: the run was ended here: its user
+is no longer logged in`. A run sent without a credential (no realm, or no key
+held) is unaffected, since its user was never attested. **Not stopped: the
+child on the executing machine.** A peer's close reaps no `cpu` child there
+(`TcpConn`'s `Drop`); it runs on into a closed connection, as it did before
+for any peer that closed mid-run, and its `/host` reads are refused.
+
+*Check:* `test-run-callback` gains the killed login: a nested shell logged in
+as `user` sends `cpu` to the stand-in; while the stand-in holds the run,
+Ctrl+C detaches the nested shell and root kills it. The run carries `user`'s
+credential; the stand-in's claim of `user` is served before the kill and
+refused after it; and the guest closes the run. It runs before the registry
+checks, which end with no registry, where an uncredentialed claim of `user`
+is served regardless. `test-run-callback` passes 22 of 22. *Control:* a run
+counted in flight whatever its user: the claim after the kill is served and
+the run stays open, both checks failing. Getting there took three versions
+of the rig: Ctrl+C with a `fg`-handed shell owning the keyboard detaches it
+at once, and the boot shell prints no new prompt, so a wait for `# ` never
+ended; and whether the same Ctrl+C also cuts the nested shell's `cpu` call
+(`cpu: remote run failed`) depends on timing, seen both ways, so the rig
+waits for neither.
+
+**The 684-byte limit stands.** A fid verb framed with a credential must fit
+`SESSION_SBUF`, which kept step 7's size, so one over 684 bytes is refused
+`FS_ERR_AUTH`, and only while its user is logged in. The largest fixed one is
+a 560-byte `NP_PWRITE`, asserted at build time. The one whose size a caller
+chooses is `NP_OPEN`, by its path, and the export's `fsd` refuses any fid
+path over 96 bytes (`FID_PATH_MAX`), so no request the limit refuses would
+be served. Lifting it would cost 976 bytes of headroom on the client's
+deepest path. Hans's answer: accept it, recorded here.
+
 ## Decisions
 
 Scored on the project's standing order: **stable, safe, and not blocking

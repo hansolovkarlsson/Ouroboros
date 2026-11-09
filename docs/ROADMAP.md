@@ -48,9 +48,9 @@ This document is the one to update first when direction changes.
 > **Released 2026-11-09: v0.25.0, per-user keys for the cluster** (#416 to
 > #430, recorded in [`CHANGELOG.md`](CHANGELOG.md) and
 > [`roadmap-completed.md`](roadmap-completed.md)). Open from the arc, in
-> item 1: the auth server it was shaped for, and two questions for Hans
-> from step 8 (whether a `cpu` run ends when its login is killed, and the
-> 684-byte limit on a credentialed fid verb). Open next: Pi item 3, a stick
+> item 1: the auth server it was shaped for. Hans's two questions from step
+> 8 were answered the same day, after the release: a `cpu` run ends with its
+> user's last key (Unreleased), and the 684-byte limit stands. Open next: Pi item 3, a stick
 > with no card, and the frontier's items 4 and 5 (transitive delegation,
 > per-task ASIDs).
 
@@ -118,9 +118,11 @@ the microkernel arc itself still leaves open):
    registry line `useradd` and `passwd` print, and the release) 2026-11-09.
    **What stays open:** an unregistered user is still the machine's to
    claim; a captured credential can be guessed at offline until the
-   encryption tier; a `cpu` run whose login is killed goes on (Hans's
-   question in the plan's step 8 review); and the auth server below, which
-   would remove the hand-distributed registry. Per-user cluster *identity* shipped
+   encryption tier; and the auth server below, which would remove the
+   hand-distributed registry. Hans's two questions from step 8 were
+   answered on 2026-11-09: a `cpu` run sent with the user's credential ends
+   with their last key, and the 684-byte limit on a credentialed fid verb
+   stands (the plan's "Hans's two decisions from step 8"). Per-user cluster *identity* shipped
    2026-08-31 (see [`CHANGELOG.md`](CHANGELOG.md) and
    [`unspellable-postmortem.md`](postmortems/unspellable-postmortem.md)): a remote request
    carries the requesting user's **name** inside the signature, the far side resolves
