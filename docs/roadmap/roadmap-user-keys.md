@@ -1156,6 +1156,75 @@ item 1 and the site's two pages; the arc moved to `roadmap-completed.md`;
 and the changelog. The minor version, v0.25.0, is its own PR, as v0.24.0's
 was, and publishing it waits on Hans.
 
+### Step 9's high review (2026-11-09)
+
+Nine findings, all taken.
+
+- *The biggest, a design point:* the line came only from setting a password,
+  so registering an existing user meant resetting their password (and root
+  learning it), and a new realm meant resetting everyone's. The key is a pure
+  function of name, realm and password, so **`clusterkey user <name>`** now
+  prints the line from a password typed twice, on standard output alone: the
+  user runs it and hands the line over. `useradd` and `passwd` still print it
+  for the password they set, as Decision 9 says. The password is not checked
+  against `/etc/shadow`, which an ordinary user cannot read; a mistyped one
+  makes a line the export refuses the user by, until it is replaced, and the
+  retype is what catches it.
+- *Silence:* after a change, `passwd` printed nothing when it could not make
+  the line (`/etc/passwd` or the realm unreadable, a name a line cannot
+  carry), though the key had changed. `ulib::user_registry_line` now reports
+  what it found, and every case but "no realm" is said, with the command
+  that prints the line later.
+- *A comment that was not true:* "the seed is wiped" held for one copy; the
+  PBKDF2 output and Ed25519's expansion of the seed stayed on the stack. Both
+  go now: the output wiped where it is held, and the stack below the
+  derivation scrubbed as `netd`'s signature scrubs it.
+- *Copies:* the realm path (three), the line's length (built from the peer
+  name limit), the name rule and the read-and-derive (two) each have one copy
+  now, in `clusterkeys` and `ulib`.
+- *Order:* `useradd` derived the key before steps that can fail; it derives
+  after the commit.
+- *Docs:* the `clusterkey` page and `comparison.md` stated the credential
+  rule without the `cpu` run's exception (Decision 7); `passwd`'s examples
+  did not match its output.
+- *The rig* derived its expected lines when the file loaded, for every
+  scenario; it derives them when a check runs.
+
+`registry-lines` gains `clusterkey user`: the same line as `useradd`, and a
+mismatched retype refused. *Controls:* `clusterkey user` without the retype
+check, a missing realm read as the dev realm, and `passwd` looking up uid 0
+for its own name: each caught.
+
+### Step 9's medium review (2026-11-09)
+
+Nine findings; one was a mutation control's edit, applied while the review
+read the tree and reverted by the control script.
+
+- *Fixed:* `ulib` had taken `clusterkeys`, and with it `ed25519`, under every
+  program for three tools. The line is `clusterkeys::user_registry_line`
+  again, over a realm file the caller reads; `ulib::read_file_status` is the
+  one realm reader `useradd`, `passwd` and `clusterkey` share, telling an
+  absent realm from an unreadable one. The name and the realm are checked
+  before anything is derived, so a refused name is told apart from a
+  missing realm, and nothing is derived for either.
+- *Fixed:* `clusterkey user` took an empty password, which is no account's;
+  refused, as `useradd` and `passwd` refuse one.
+- *Fixed:* the typed passwords are wiped in all three tools.
+- *Fixed:* `passwd` reads `/etc/passwd` with the checked reader.
+- *Fixed:* the rig checked a refused `clusterkey user` said so, not that it
+  printed no line; it checks both, and the empty password too.
+- *Not changed:* with no name, `passwd` finds the account by uid, the first
+  line with it. So does `accountd`, whose password it changed, so the line
+  is the changed account's. Two names on one uid are one account to both.
+- *Not changed:* `login` reads the realm through the shell's own reader, as
+  every account file; an unreadable realm there means no key at this login,
+  which a later login retries.
+
+On the final tree `registry-lines` passes 10 of 10. *Controls:* a refusal
+that falls through to print a line fails both "prints no line" checks; an
+empty password allowed fails the empty-password pair. `make test` exits 0.
+
+
 ## Decisions
 
 Scored on the project's standing order: **stable, safe, and not blocking

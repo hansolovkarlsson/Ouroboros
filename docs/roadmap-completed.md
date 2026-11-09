@@ -50,7 +50,9 @@ included. Now:
   of a uid whose key it holds, and closes a session opened with one when the
   user's last key goes.
 - **Step 9**: `useradd` and `passwd` print the registry line for the
-  password they set (Decision 9, found unbuilt at this step), and the
+  password they set (Decision 9, found unbuilt at this step), and
+  `clusterkey user` prints it from a password typed twice, so an existing
+  account is registered without a reset; and the
   manual, the man pages, `architecture.md`, the normative block and the
   cluster roadmap say what the arc closes and what it does not: an
   unregistered user is still claimable, and a captured credential can be

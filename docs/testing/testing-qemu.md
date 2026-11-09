@@ -335,9 +335,11 @@ user's hold, list and drops, each refused) and a nested login started by a
 non-root shell, whose hold is refused; a fifth hold with four live keys is
 refused and that login still succeeds; a node with no realm holds nothing; and
 `registry-lines` (step 9): the `/etc/cluster/users` line `useradd` prints for a
-new user, and `passwd` for root changing `user`'s password and for `user`
-changing their own, each equal to the line `mkclusterkeys.py`'s independent
-Python derives, and none printed once the realm is removed.
+new user, `clusterkey user` for the same password, and `passwd` for root
+changing `user`'s password and for `user` changing their own, each equal to
+the line `mkclusterkeys.py`'s independent Python derives; `clusterkey user`
+refusing a mismatched retype and an empty password with no line; and none
+printed once the realm is removed.
 Transcripts land in `build/held-<scenario>.txt`.
 
 **The impersonation gate** (user-keys step 0, 2026-09-26): `impersonate-gate

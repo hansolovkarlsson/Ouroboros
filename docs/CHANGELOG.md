@@ -26,8 +26,9 @@ that credential; an unregistered user is served on the machine's word as
 before, root only from a peer flagged `root` or with root's own credential,
 and a `cpu` run's `/host` reads on the run's own standing until it ends. A
 held session opened with a credential is closed when the user's last key
-goes, and nothing more is sent on it. `useradd` and `passwd` print the
-registry line for the password they set. **Not a flag day**: `AUTHNP03`
+goes, and nothing more is sent on it. `clusterkey user <name>` prints a
+user's registry line from their password, and `useradd` and `passwd` print
+it for the password they set. **Not a flag day**: `AUTHNP03`
 is still accepted, and registering a user at an export is what turns the
 check on for them there. But a node from before this change sends no
 credential, so a user registered at an export is refused there from it.
