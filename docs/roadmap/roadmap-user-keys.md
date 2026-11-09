@@ -1268,6 +1268,29 @@ path over 96 bytes (`FID_PATH_MAX`), so no request the limit refuses would
 be served. Lifting it would cost 976 bytes of headroom on the client's
 deepest path. Hans's answer: accept it, recorded here.
 
+*The medium review of the run change (2026-11-09)* found nine things.
+Fixed: the line saying why a run ended was added to a run that had
+finished cleanly in the same pass, and was dropped where the output had
+filled `RUN_OUT_MAX` (it now replaces the output's tail); a run whose user
+logged out between the park and the send went out unattested and so was
+never ended (a run is now marked attested at the park, and `sign_parked`
+does not send one whose key went, telling the caller why); the manual, its
+site page and `clusterkey`'s man page said every run ends at logout,
+where only a credentialed one does; `ROADMAP.md` item 1 no longer named
+the child left running on the executing machine (it now points at the
+receive-path ledger's orphaned-child entry, which a logout now reaches);
+and the rig ignored its own waits and took the nested shell's slot as the
+highest in `ps` (it now fails at a wait that times out, and takes the one
+slot new since the spawn). **Not changed:** the review's point that a run
+sent with no credential keeps its window past any logout. Such a run is
+either no realm's, where every claim is the machine's word anyway, or
+root's `su` to a user, which an executing export that registers the user
+refuses at the run itself. Where the executing machine does not register
+the user and the dispatching one does, the window lends that machine the
+user's standing on the dispatching machine's files, which root there, who
+started the run, holds already. The rule is about runs a user's key vouched for,
+and there is no key to lose for the others.
+
 ## Decisions
 
 Scored on the project's standing order: **stable, safe, and not blocking

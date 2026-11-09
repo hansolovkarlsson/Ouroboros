@@ -51,9 +51,10 @@ DESCRIPTION
     can make only while the user is logged in on it, with one exception: while
     the export has a `cpu` run in flight to a machine as that user, it serves
     that machine's claims of the user (the run's /host reads) until the run
-    ends, which is when the user's last login on the dispatching machine
-    goes, if that comes first. An unregistered user is served on the machine's word. A new realm
-    changes every key, so every line.
+    ends. A run sent with the user's credential also ends when the user's
+    last login on the dispatching machine goes. An unregistered user is
+    served on the machine's word. A new realm changes every key, so every
+    line.
 
     user <name> prints that line for a password typed twice (echo off), on
     standard output alone, so `clusterkey user ann >> /etc/cluster/users`

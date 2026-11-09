@@ -122,7 +122,11 @@ the microkernel arc itself still leaves open):
    hand-distributed registry. Hans's two questions from step 8 were
    answered on 2026-11-09: a `cpu` run sent with the user's credential ends
    with their last key, and the 684-byte limit on a credentialed fid verb
-   stands (the plan's "Hans's two decisions from step 8"). Per-user cluster *identity* shipped
+   stands (the plan's "Hans's two decisions from step 8"). Ending the run
+   stops nothing on the executing machine: its child runs on into a closed
+   connection and holds a task slot there, the receive-path ledger's
+   "a peer that RSTs or FINs mid-`cpu` run orphans the child", which a
+   logout now reaches as a matter of course. Per-user cluster *identity* shipped
    2026-08-31 (see [`CHANGELOG.md`](CHANGELOG.md) and
    [`unspellable-postmortem.md`](postmortems/unspellable-postmortem.md)): a remote request
    carries the requesting user's **name** inside the signature, the far side resolves
@@ -3691,7 +3695,9 @@ would otherwise silently shrink into looking like nothing was ever found.
       the review of step 5 (2026-09-12) because `TcpConn`'s new `Drop` reads
       as the connection's teardown and is not: a `WAIT` there would block the
       event loop, so the release is a `KILL` or a deferred reap, its own
-      change.
+      change. Since 2026-11-09 a routine event reaches it: the dispatching
+      machine closes a run sent with its user's credential when that user
+      logs out (per-user keys, Hans's two decisions from step 8).
     - **No zero-window persist timer** (RFC 1122 4.2.2.17). Nothing probes a
       receiver that shuts its window, so nothing elicits the update that would
       reopen it: with the window shut the first RTO expiry's `rewind_to` drives

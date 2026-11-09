@@ -349,11 +349,13 @@ A user with **no** line in `/etc/cluster/users` is served on the machine's
 word, as before: registering a user at an export is what turns the check on
 for them there, so a mixed cluster works and nothing has to change at once.
 A `cpu` run is the one delegation: while machine B runs a command for you
-from A, A serves B's `/host` reads as you, until the run ends or you are no
-longer logged in on A, whichever comes first (never as root without the
-`root` flag). A run is ended on A when your last login there goes, as your
-held connections are; the command on B is not stopped, and its `/host`
-reads are refused from then on.
+from A, A serves B's `/host` reads as you until the run ends (never as root
+without the `root` flag). A run sent with your credential, which is every
+run you start while logged in on a machine with a realm, is also ended on A
+when your last login there goes, as your held connections are: you get the
+output so far and a line saying why, the command on B is not stopped, and
+its `/host` reads are refused from then on. A run sent without one (no
+realm on A, or root's `su` to you) lasts until it ends.
 
 **Strong passwords are part of the cluster's model now.** A credential is a
 signature by a password-derived key, sent in cleartext. Anyone who captures
