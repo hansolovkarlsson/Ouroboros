@@ -1674,10 +1674,10 @@ def do_fid_gate(host, port, path, data_path):
         st_open, _ = d.op(open_r)
         if not served(st_open):
             raise RuntimeError(f"open -> {status_name(st_open)}")
-        st_u, _ = d.op(fstat(st_open), user=b"user")
+        st_u, _ = d.op(fstat(st_open), user=b"guest")
         st_r, _ = d.op(fstat(st_open))
         ok = st_u == FS_ERR_PERM and st_r == STAT_INFO_LEN
-        detail = f"fid {st_open} opened as root: fstat as user -> {status_name(st_u)}, then as root -> {status_name(st_r) if not served(st_r) else 'served'}"
+        detail = f"fid {st_open} opened as root: fstat as guest -> {status_name(st_u)}, then as root -> {status_name(st_r) if not served(st_r) else 'served'}"
     except (RuntimeError, OSError) as exc:
         ok, detail = False, f"{exc}"
     check("another user on the same session is refused the fid, and the owner still has it", ok, detail)
@@ -1687,11 +1687,11 @@ def do_fid_gate(host, port, path, data_path):
     try:
         if d is None or not served(st_open):
             raise RuntimeError("no fid to probe")
-        st_c, _ = d.op(clunk(st_open), user=b"user")
+        st_c, _ = d.op(clunk(st_open), user=b"guest")
         st_r2, _ = d.op(fstat(st_open))
         st_own, _ = d.op(clunk(st_open))
         ok = st_c == FS_ERR_PERM and st_r2 == STAT_INFO_LEN and st_own == 0
-        detail = f"clunk as user -> {status_name(st_c)}, owner's fstat -> {status_name(st_r2) if not served(st_r2) else 'served'}, owner's clunk -> {status_name(st_own) if not served(st_own) else '0'}"
+        detail = f"clunk as guest -> {status_name(st_c)}, owner's fstat -> {status_name(st_r2) if not served(st_r2) else 'served'}, owner's clunk -> {status_name(st_own) if not served(st_own) else '0'}"
     except (RuntimeError, OSError) as exc:
         ok, detail = False, f"{exc}"
     check("another user's clunk is refused and the owner still holds the fid, then closes it", ok, detail)
@@ -1716,10 +1716,10 @@ def do_fid_gate(host, port, path, data_path):
         if not served(st_open):
             raise RuntimeError(f"open {data_path} -> {status_name(st_open)}")
         data_fid = st_open
-        st_u, _ = d.op(pread(data_fid, 0, NP_REMOTE_CHUNK), user=b"user")
+        st_u, _ = d.op(pread(data_fid, 0, NP_REMOTE_CHUNK), user=b"guest")
         st_r, chunk_r = d.op(pread(data_fid, 0, NP_REMOTE_CHUNK))
         ok = st_u == FS_ERR_PERM and served(st_r) and st_r == len(chunk_r) and st_r > 0
-        detail = (f"fid {data_fid} opened as root: pread as user -> {status_name(st_u)}, "
+        detail = (f"fid {data_fid} opened as root: pread as guest -> {status_name(st_u)}, "
                   f"then as root -> {status_name(st_r) if not served(st_r) else f'{st_r} bytes'}")
     except (RuntimeError, OSError) as exc:
         ok, detail = False, f"{exc}"
@@ -2011,9 +2011,16 @@ IMPERSONATE_PUBLIC = "/HELLO.TXT"
 # are the export's answers about WHO is asking: the name or key is refused
 # (FS_ERR_AUTH), or the resolved user may not (FS_ERR_PERM).
 IMPERSONATE_REFUSALS = (FS_ERR_AUTH, FS_ERR_PERM)
+# A stage is what the run CLAIMS about the code it runs against. Stages 0 and
+# 1 describe trees before user-keys step 7: against today's tree, whose dev
+# registry lists `user`, their row 2 is refused, and the run to make is stage 7.
 IMPERSONATE_STAGES = {
     0: {"row 1": True, "row 2": True},
     1: {"row 1": False, "row 2": True},
+    # User-keys step 7: netd's export reads /etc/cluster/users. Every refusal
+    # is "auth", FS_ERR_AUTH exactly: an FS_ERR_PERM would mean the claim was
+    # SERVED as the user and only the file's mode stopped it.
+    7: {"row 1": "auth", "row 2": "auth", "row 3": "auth", "row 4": True, "row 5": True},
 }
 
 
@@ -2039,8 +2046,13 @@ def do_impersonate_gate(host, port, stage):
       `host` identity claiming root, so row 2 reads a file that really is
       `user`'s alone.
 
-    Rows 3 to 5 of the plan's table need a credential or a registry, neither of
-    which exists yet, and are printed as n/a with the step that adds them.
+    Rows 3 to 5 (from stage 7, user-keys step 7) carry credentials: row 3
+    `user`'s made from a wrong password, row 4 `user`'s own, row 5 none, for
+    `guest`, whom the dev registry does not list. Before stage 7 they are n/a.
+
+    The two controls that need a served non-root claim claim `guest`, the
+    unregistered user, at every stage: from stage 7 an uncredentialed claim of
+    `user` is refused before modes are ever consulted.
     """
     want = IMPERSONATE_STAGES.get(stage)
     if want is None:
@@ -2057,11 +2069,15 @@ def do_impersonate_gate(host, port, stage):
         if not ok:
             failed += 1
 
-    def op(np_msg, seed, user):
-        """One signed request as `user`, signed by `seed`. The exception is
-        returned rather than raised, so a dead connection reads as its own
-        outcome and never as a refusal."""
-        frame, nonce = signed_frame(np_msg, seed, user=user.encode())
+    def op(np_msg, seed, user, password=None, mode=None):
+        """One signed request as `user`, signed by `seed`, credentialed with
+        `password` if one is given. The exception is returned rather than
+        raised, so a dead connection reads as its own outcome and never as a
+        refusal."""
+        if password is None:
+            frame, nonce = signed_frame(np_msg, seed, user=user.encode())
+        else:
+            frame, nonce = credentialed_frame(np_msg, seed, password, user=user.encode(), mode=mode)
         try:
             with socket.create_connection((host, port), timeout=10) as s:
                 s.sendall(frame)
@@ -2069,9 +2085,9 @@ def do_impersonate_gate(host, port, stage):
         except (RuntimeError, OSError) as exc:
             return None, f"{exc.__class__.__name__}: {exc}"
 
-    def read(path, seed, user):
+    def read(path, seed, user, password=None, mode=None):
         pb = path.encode()
-        return op(build_frame(NP_READ, 0, [len(pb), 0, 4096], pb), seed, user)
+        return op(build_frame(NP_READ, 0, [len(pb), 0, 4096], pb), seed, user, password, mode)
 
     def outcome(status, data):
         if status is None:
@@ -2082,15 +2098,15 @@ def do_impersonate_gate(host, port, stage):
 
     print(f"impersonate-gate: stage {stage}, signing as `intruder`", flush=True)
 
-    st, data = read("/etc/shadow", intruder, "user")
-    check("control: the export enforces modes (`user` claiming /etc/shadow is refused)",
+    st, data = read("/etc/shadow", intruder, "guest")
+    check("control: the export enforces modes (`guest` claiming /etc/shadow is refused)",
           st == FS_ERR_PERM,
           outcome(st, data) + ("" if st == FS_ERR_PERM else
                                " - an export that serves this enforces nothing, so rows 1 and 2 "
                                "would prove nothing (FAT32 image? this gate needs ext2)"))
 
-    st, data = read(IMPERSONATE_PUBLIC, intruder, "user")
-    check("control: the intruder key is authorized here (a public file is served)",
+    st, data = read(IMPERSONATE_PUBLIC, intruder, "guest")
+    check("control: the intruder key is authorized here (`guest` is served a public file)",
           st is not None and served(st),
           outcome(st, data) + ("" if st != FS_ERR_AUTH else
                                " - an image built before `intruder` was added to "
@@ -2122,10 +2138,13 @@ def do_impersonate_gate(host, port, stage):
         if got and not good_data(data):
             check(f"{label}: {text}", False, f"served, but not the expected bytes: {data[:40]!r}")
             return
-        ok = got if expect else st in IMPERSONATE_REFUSALS
-        check(f"{label}: {text}", ok,
-              f"{outcome(st, data)}; stage {stage} expects "
-              f"{'served' if expect else 'refused FS_ERR_AUTH or FS_ERR_PERM'}")
+        if expect is True:
+            ok, said = got, "served"
+        elif expect == "auth":
+            ok, said = st == FS_ERR_AUTH, "refused FS_ERR_AUTH"
+        else:
+            ok, said = st in IMPERSONATE_REFUSALS, "refused FS_ERR_AUTH or FS_ERR_PERM"
+        check(f"{label}: {text}", ok, f"{outcome(st, data)}; stage {stage} expects {said}")
 
     st, data = read("/etc/shadow", intruder, "root")
     row("row 1", "intruder claims root, reads /etc/shadow", st, data,
@@ -2135,12 +2154,55 @@ def do_impersonate_gate(host, port, stage):
     row("row 2", f"intruder claims `user`, reads {IMPERSONATE_PRIVATE}", st, data,
         lambda d: d == IMPERSONATE_PRIVATE_TEXT)
 
-    print("[n/a ] row 3: `user` with a credential from the wrong password - no credential "
-          "kind exists until step 7", flush=True)
-    print("[n/a ] row 4: `user` with a valid credential - no credential kind exists until "
-          "step 7", flush=True)
-    print("[n/a ] row 5: `guest`, a name with no registered key - the registry is staged since "
-          "step 3 but no export reads it until step 7", flush=True)
+    if "row 3" not in want:
+        print("[n/a ] rows 3 to 5: credentials and the registry, from stage 7", flush=True)
+    else:
+        st, data = read(IMPERSONATE_PRIVATE, intruder, "user", password=b"not-users-password")
+        row("row 3", f"intruder claims `user` with a wrong-password credential, reads {IMPERSONATE_PRIVATE}",
+            st, data, lambda d: d == IMPERSONATE_PRIVATE_TEXT)
+        st, data = read(IMPERSONATE_PRIVATE, intruder, "user", password=b"user")
+        row("row 4", f"intruder claims `user` with `user`'s credential, reads {IMPERSONATE_PRIVATE}",
+            st, data, lambda d: d == IMPERSONATE_PRIVATE_TEXT)
+        st, data = read(IMPERSONATE_PUBLIC, intruder, "guest")
+        row("row 5", f"intruder claims `guest` (unregistered), no credential, reads {IMPERSONATE_PUBLIC}",
+            st, data, lambda d: len(d) > 0)
+        # Each of step 6's misbehaving credentials, wrong in exactly one way,
+        # must be refused FS_ERR_AUTH; row 4 above is the same request made
+        # honestly, so a refusal here is the binding the mode breaks.
+        for mode in CRED_MODES:
+            st, data = read(IMPERSONATE_PRIVATE, intruder, "user", password=b"user", mode=mode)
+            check(f"misbehaving: a '{mode}' credential for `user` is refused",
+                  st == FS_ERR_AUTH, outcome(st, data))
+        # A `cpu` run refused for its block is told so as TEXT: the export
+        # finds the verb past a block it cannot read by the block's own clen
+        # (the high review of step 7; it answered a framed status, which a
+        # `cpu` caller prints as binary).
+        for mode in ("unknown-kind", "bad-length"):
+            cmd = b"id"
+            frame, _ = credentialed_frame(build_frame(NP_RUN, 0, [len(cmd), 0, 0, 0], cmd), intruder,
+                                          b"user", user=b"user", mode=mode)
+            try:
+                with socket.create_connection((host, port), timeout=10) as s:
+                    s.sendall(frame)
+                    out = b""
+                    while chunk := s.recv(4096):
+                        out += chunk
+                text = out.decode("latin-1")
+            except OSError as exc:
+                text = f"no reply ({exc})"
+            check(f"a `cpu` run with a '{mode}' credential is refused as text",
+                  text.startswith("cpu: the request's credential cannot be read"), repr(text[:80]))
+        # Rule 1 as ninep-abi words it: the root flag serves root without a
+        # credential, so one present and wrong is not read either (pinned in
+        # np9p_server.py's self-test too). `host` is root-flagged.
+        st, data = read("/etc/shadow", trusted, "root", password=b"not-roots-password")
+        check("rule 1: a flagged peer claiming root with a wrong credential is served",
+              st is not None and served(st) and data.startswith(b"root:"), outcome(st, data))
+        # And without the flag, root's own credential cannot help while root
+        # is unregistered here (the dev registry lists `user` only).
+        st, data = read("/etc/shadow", intruder, "root", password=b"root")
+        check("rule 1: an unflagged peer claiming root with root's credential, root unregistered, "
+              "is refused", st == FS_ERR_AUTH, outcome(st, data))
 
     print(f"impersonate-gate: {failed} check(s) failed", flush=True)
     return failed
@@ -2487,7 +2549,11 @@ def main():
         # A file LONGER than NP_REMOTE_CHUNK, and a non-root account the
         # image's /etc/passwd has (the ext2 image's is `user`).
         data_path = args[3] if len(args) > 3 else "/man/grep"
-        low_user = args[4] if len(args) > 4 else "user"
+        # `guest`, not `user`: since user-keys step 7 the dev registry makes an
+        # uncredentialed claim of `user` FS_ERR_AUTH before the session's user
+        # is ever consulted, and check 5 needs a claim that is SERVED as a
+        # non-root user. `guest` is the unregistered one.
+        low_user = args[4] if len(args) > 4 else "guest"
         sys.exit(min(do_keyed_gate(host, port, data_path, low_user), 125))
 
     if op == "path-gate":

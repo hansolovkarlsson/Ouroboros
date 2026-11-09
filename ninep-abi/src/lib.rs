@@ -836,9 +836,13 @@ pub const NP_REMOTE_CHUNK: usize = 512;
 //   2. A claim of user U from machine A while this export has an `NP_RUN` as
 //      U in flight to A (Decision 7, a `cpu` child's `/host` reads): served on
 //      the machine's word until that run ends, the credential unread. A keyed
-//      session opened under this rule is bound to the run: the export closes
-//      it when the run ends, since its keyed frames carry no credential to
-//      re-check and would otherwise outlive the rule that let it open.
+//      session that ONLY this rule lets open (rules 3 and 4 would refuse it)
+//      is bound to the run: the export closes it when the run ends, since its
+//      keyed frames carry no credential to re-check and would otherwise
+//      outlive the rule that let it open. A session rule 3 or 4 would serve
+//      is not bound, whatever is in flight. "Machine A" is
+//      the `authorized` line for the address the run dialled; a run to an
+//      address no line names lets no claim in.
 //   3. A name with a registered key (Decision 5): served only if a kind-1
 //      credential verifies under that key. An `AUTHNP03` claim of it is
 //      refused.

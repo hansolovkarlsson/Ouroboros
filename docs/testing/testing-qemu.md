@@ -315,7 +315,7 @@ modes are enforced; on FAT32 it fails and says why:
 ```sh
 make image-ext2
 IMAGE=build/espext2.img NO_BUILD=1 scripts/run-guest.sh -- \
-    python3 scripts/np9p_client.py localhost 5640 keyed-gate /man/grep user
+    python3 scripts/np9p_client.py localhost 5640 keyed-gate /man/grep guest
 # expected: 13 PASS, "keyed-gate: 0 check(s) failed", guest alive, 0 restarts
 ```
 
@@ -338,21 +338,35 @@ Transcripts land in `build/held-<scenario>.txt`.
 
 **The impersonation gate** (user-keys step 0, 2026-09-26): `impersonate-gate
 <stage>` signs as `intruder`, a dev identity every image authorizes and no
-machine holds, and claims users it has no credential for: row 1 claims root
-and reads `/etc/shadow`, row 2 claims `user` and reads
-`/Users/user/PRIVATE.TXT` (0600, `user`'s). Four controls run first (modes are
-enforced, the intruder key is authorized, an unauthorized key is refused, the
-private file's mode and owner). Stage `0` expects both rows **served**, the gap
-as it was before root squash; stage `1` (root squash, the current code) expects
-row 1 refused `FS_ERR_AUTH` or `FS_ERR_PERM` and row 2 still served. It needs the
-**ext2 image**; against FAT32 the mode control fails and says why:
+machine holds, and claims users: row 1 claims root and reads `/etc/shadow`,
+row 2 claims `user` and reads `/Users/user/PRIVATE.TXT` (0600, `user`'s), both
+with no credential. Four controls run first (modes are enforced, the intruder
+key is authorized, an unauthorized key is refused, the private file's mode and
+owner); the two that need a served non-root claim claim `guest`, whom the dev
+registry does not list. Stage `0` expects both rows **served**, the gap as it
+was before root squash; stage `1` expects row 1 refused and row 2 served.
+Stage `7` (user-keys step 7, the current code) adds rows 3 to 5: `user` with a
+credential from a wrong password, `user` with `user`'s own, and `guest` with
+none. Rows 1 to 3 must be refused `FS_ERR_AUTH` exactly (an `FS_ERR_PERM` would
+mean the claim was served and a mode stopped it), rows 4 and 5 served. It then
+aims each of `np9p_client.py`'s ten misbehaving credentials at `netd`, each
+refused, and checks rule 1 both ways (a flagged peer served root with a wrong
+credential; an unflagged one refused with root's own, root unregistered), and
+that a `cpu` run refused for an unreadable credential block is told so as text. It
+needs the **ext2 image**; against FAT32 the mode control fails and says why:
 
 ```sh
 make image-ext2
 IMAGE=build/espext2.img NO_BUILD=1 scripts/run-guest.sh -- \
-    python3 scripts/np9p_client.py localhost 5640 impersonate-gate 1
-# expected: 6 PASS, 3 n/a, "impersonate-gate: 0 check(s) failed" (row 1 refused FS_ERR_AUTH)
+    python3 scripts/np9p_client.py localhost 5640 impersonate-gate 7
+# expected: 23 PASS, "impersonate-gate: 0 check(s) failed"
 ```
+
+**Since step 7, and until step 8, a registered user crosses no guest
+export.** The dev registry lists `user`, and `netd`'s client sends no
+credential until step 8, so a `user` logged in on one guest is refused
+(`FS_ERR_AUTH`) at another guest's export. The two-node recipes below that
+log in as `user` on B refuse at A until then; as root they are unchanged.
 
 **The session gate** (step 4 of `docs/roadmap/roadmap-fid-verbs.md`, 2026-09-07):
 `session-gate` runs the plan's checks and negative controls against the live
