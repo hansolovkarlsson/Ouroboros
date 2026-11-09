@@ -113,27 +113,27 @@ impl Held {
         }
     }
 
-    /// The seed held for `uid`, for signing that user's credential (step 8):
-    /// the NEWEST of its keys. Two logins of one user hold the same key,
-    /// derived from the same name, realm and password, unless the password
-    /// changed between them; then only the later login's key matches the
-    /// registry the password change rewrote, and the slot order says nothing
-    /// about which that is (high review of step 8).
+    /// The seed held for `uid` by a login that is still alive, for signing
+    /// that user's credential (step 8): the NEWEST of those keys. Two logins
+    /// of one user hold the same key, derived from the same name, realm and
+    /// password, unless the password changed between them; then only the
+    /// later login's key matches the registry the password change rewrote,
+    /// and the slot order says nothing about which that is (high review of
+    /// step 8). A dead login's key is not used, though the idle pass has not
+    /// reaped it yet: a killed login's user is not attested by it (medium
+    /// review of step 8).
     pub fn seed_for(&self, uid: u32) -> Option<&[u8; 32]> {
-        self.slots.iter().flatten().filter(|k| k.uid == uid).max_by_key(|k| k.seq).map(|k| &k.seed)
+        self.slots.iter().flatten().filter(|k| k.uid == uid && alive(k.owner)).max_by_key(|k| k.seq).map(|k| &k.seed)
     }
 
     /// Whether a key is held for `uid` by a login that is still alive, asked
-    /// without waiting for the idle pass to reap a dead one: what lets a
-    /// session opened under that user's credential be found and used
-    /// (`park_session`).
+    /// without waiting for the idle pass to reap a dead one. The one test of
+    /// "this user is held" every caller asks: what signs the credential
+    /// (`seed_for`), what lets a session opened under it be used
+    /// (`park_session`, `sign_parked`) and what keeps it open
+    /// (`close_unheld`), so no two of them disagree in the window between a
+    /// login's death and its reap (medium review of step 8).
     pub fn holds_live(&self, uid: u32) -> bool {
-        self.slots.iter().flatten().any(|k| k.uid == uid && alive(k.owner))
-    }
-
-    /// Whether any key is held for `uid`: what keeps a session opened under
-    /// that user's credential open (step 8).
-    pub fn holds(&self, uid: u32) -> bool {
         self.seed_for(uid).is_some()
     }
 

@@ -1820,12 +1820,24 @@ fn park_session(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, uid: u32, verb: u64, 
     // logout, or after the login was killed and before the idle pass reaps its
     // key, would be served as the attested user. Asked HERE, in the one lookup
     // every verb goes through, rather than relying on each path that loses a
-    // key to have called `close_unheld` first (high review of step 8); that
-    // still closes the session, promptly, but nothing depends on it having run.
+    // key to have called `close_unheld` first (high review of step 8). Such a
+    // session for this endpoint and uid is CLOSED here, not passed over: one
+    // passed over stayed Established beside the fresh session this verb
+    // opens, and a later login of the same user made it usable again, the
+    // first in slot order, so the fresh session's fids were sent down it
+    // (medium review of step 8). Liveness is asked once, for the one uid.
+    let key_live = held.holds_live(uid);
+    if !key_live {
+        for c in sessions.iter_mut().flatten() {
+            if c.peer_ip == ip && c.peer_port == port && c.uid == uid && c.keys[0].attested {
+                close_one_unheld(c);
+            }
+        }
+    }
     let live = sessions.iter().position(|s| {
         matches!(s, Some(s) if s.peer_ip == ip && s.peer_port == port && s.uid == uid
             && matches!(s.state, DialState::Connecting | DialState::Established)
-            && !(s.keys[0].attested && !held.holds_live(uid)))
+            && !(s.keys[0].attested && !key_live))
     });
     if let Some(i) = live {
         let s = sessions[i].as_mut().unwrap();
@@ -2253,18 +2265,6 @@ fn service_remotes<const S: usize, const H: usize, const K: usize>(remotes: &mut
             let n = if verified && np_status == 0 { status_only(&mut r, syscall_abi::FS_ERROR) } else { n };
             reply(parked.call, &r[..n]);
         } else {
-            // An open that succeeded on a session `close_unheld` closed while
-            // it was on the wire: its fid dies with the session, so the caller
-            // is told the open failed, not handed a fid whose first read fails
-            // (high review of step 8). Only `close_unheld` sets a session
-            // Closing with a verb in flight.
-            let n = if verified && parked.verb == ninep_abi::NP_OPEN && np_status < syscall_abi::FS_ERR_MIN
-                && c.state == DialState::Closing
-            {
-                status_only(&mut r, syscall_abi::FS_ERR_AUTH)
-            } else {
-                n
-            };
             let heard = reply(parked.call, &r[..n]) != syscall_abi::REPLY_STALE;
             // Refcount the fid this verb made or freed. The NP status is the
             // reply body's first word. An open whose caller left the call
@@ -2299,41 +2299,47 @@ fn service_remotes<const S: usize, const H: usize, const K: usize>(remotes: &mut
 /// its fids are gone with it; the next verb from that uid opens a fresh
 /// session, uncredentialed, which the far side judges afresh.
 ///
-/// A verb parked on it and not yet sent (still raw, or the verb held behind
-/// an opening `NP_SESSION`) is refused now, `FS_ERR_AUTH`: it would otherwise
-/// be signed, or sent keyed, on a session whose user has gone. A verb already
-/// on the wire was signed while the key was held, and is left to finish;
-/// an `NP_OPEN` among them is answered as refused, since its fid dies with
-/// the session (`service_remotes`).
+/// A verb parked on it is refused now, `FS_ERR_AUTH`, sent or not. One not
+/// yet sent would otherwise be signed, or sent keyed, on a session whose user
+/// has gone. One already on the wire cannot be left to finish: the FIN goes
+/// once the request is acked, and the far export drops a connection on its
+/// peer's FIN with the reply unsent, so its caller would wait out the
+/// deadline for an `FS_ERROR` (medium review of step 8); and an open among
+/// them would hand back a fid that died with the session.
 ///
 /// Called wherever the table can lose a key: after each key op
 /// (`handle_client`) and after the idle pass's `reap_dead` (`serve`). It is
-/// the prompt close, not the guard: `park_session`'s lookup refuses such a
-/// session itself (`Held::holds_live`), so a path that drops a key without
-/// calling this leaves a session open a little longer, never usable.
+/// the prompt close, not the guard: `park_session` closes such a session for
+/// the uid it parks (`Held::holds_live`), and `sign_parked` refuses to send
+/// a keyed verb on one, so a path that drops a key without calling this
+/// leaves a session open a little longer, never usable.
 fn close_unheld(sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], held: &held::Held) {
     for c in sessions.iter_mut().flatten() {
         let attested = c.keys.first().is_some_and(|a| a.attested);
-        if !attested || held.holds(c.uid) || c.state == DialState::Closed {
-            continue;
+        if attested && !held.holds_live(c.uid) {
+            close_one_unheld(c);
         }
-        if c.parked.as_ref().is_some_and(|pk| pk.raw != 0 || pk.opening) {
-            let pk = c.parked.take().unwrap();
-            let mut r = [0u8; 8];
-            let n = status_only(&mut r, syscall_abi::FS_ERR_AUTH);
-            reply(pk.call, &r[..n]);
-            c.held_len = 0;
-        }
-        // The keys go too, unless a verb on the wire still needs them to
-        // check its reply; `Drop` wipes them when the slot is reaped.
-        if c.parked.is_none() {
-            if let Some(ka) = c.keys.first_mut() {
-                ka.forget();
-            }
-        }
-        c.fids = 0;
-        close_politely(c);
     }
+}
+
+/// Close one attested session whose user is no longer held: the body of
+/// `close_unheld`, and of `park_session`'s close of a session it will not
+/// use. A session already Closed is left as it is.
+fn close_one_unheld(c: &mut SessionConn) {
+    if c.state == DialState::Closed {
+        return;
+    }
+    if let Some(pk) = c.parked.take() {
+        let mut r = [0u8; 8];
+        let n = status_only(&mut r, syscall_abi::FS_ERR_AUTH);
+        reply(pk.call, &r[..n]);
+        c.held_len = 0;
+    }
+    if let Some(ka) = c.keys.first_mut() {
+        ka.forget();
+    }
+    c.fids = 0;
+    close_politely(c);
 }
 
 /// Done with a client connection: a live one is closed politely (a FIN once
@@ -2871,6 +2877,16 @@ fn sign_parked<const S: usize, const R: usize, const H: usize, const K: usize>(c
     let pk = c.parked.as_mut().unwrap();
     if let Some(ka) = c.keys.first_mut() {
         if let KeyState::Keyed { k_c2s, seq, .. } = &mut ka.state {
+            // A session opened under a user's credential sends nothing keyed
+            // once that user is not held: the frame carries no credential,
+            // so it would be served as them. Asked here, at the send, and not
+            // only at the park, so that no path which loses a key between the
+            // two has to have closed the session first (medium review of
+            // step 8). Refused as a frame that does not fit is.
+            if ka.attested && !held.holds_live(pk.uid) {
+                pk.raw = 0;
+                return false;
+            }
             let total = frame_keyed_in_place(k_c2s, seq, NP_SIGNED_NP_OFF, pk.raw as usize, &mut c.sbuf);
             pk.raw = 0;
             if total == 0 {
