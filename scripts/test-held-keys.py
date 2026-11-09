@@ -101,8 +101,9 @@ def after(command, rx, nth=1):
 
 
 # Each scenario: a list of ("s", wait, type) console steps, ("h", uids, what)
-# host checks of the table, ("t", regex, what) checks of the transcript, and
-# ("n", text, count, what) counts of a text in it.
+# host checks of the table, ("t", regex, what) checks of the transcript,
+# ("x", regex, what) checks that it does NOT match, and ("n", text, count,
+# what) counts of a text in it. A regex may be a callable, made when checked.
 SCENARIOS = {
     # The step's check: a login holds its user's key, a logout drops it.
     "login-logout": [
@@ -177,6 +178,14 @@ SCENARIOS = {
         ("s", "# ", ""),
         ("t", after("clusterkey user ann", registry_line("ann", "ann")), "clusterkey user prints the same line"),
         ("t", after("clusterkey user ann", lambda: r"passwords do not match", nth=2), "a mismatched retype is refused"),
+        ("x", after("clusterkey user ann", lambda: r"ann [0-9a-f]{64}", nth=2), "and prints no line"),
+        # An empty password is no account's, so it makes no line either.
+        ("s", "", "clusterkey user ann"),
+        ("s", "Password", "<ENTER>"),
+        ("s", "Retype", "<ENTER>"),
+        ("s", "# ", ""),
+        ("t", after("clusterkey user ann", lambda: r"may not be empty", nth=3), "an empty password is refused"),
+        ("x", after("clusterkey user ann", lambda: r"ann [0-9a-f]{64}", nth=3), "and makes no line"),
         ("s", "", "passwd user"),
         *new_password("pw2", "# "),
         ("t", registry_line("user", "pw2"), "root's passwd prints the changed user's line"),
@@ -242,8 +251,9 @@ def run(name, plan):
                 print(f"[{'PASS' if ok else 'FAIL'}] {name}: {what}: {got} of {text!r}, want {want}", flush=True)
                 failures += 0 if ok else 1
             else:
-                _, rx, what = step
-                ok = re.search(rx() if callable(rx) else rx, g.transcript()) is not None
+                kind, rx, what = step
+                found = re.search(rx() if callable(rx) else rx, g.transcript()) is not None
+                ok = found if kind == "t" else not found
                 print(f"[{'PASS' if ok else 'FAIL'}] {name}: {what}", flush=True)
                 failures += 0 if ok else 1
         # A run whose guest died proves nothing either way.

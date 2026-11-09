@@ -7,9 +7,6 @@ edition = "2021"
 syscall-abi = { path = "../syscall-abi" }
 ninep-abi = { path = "../ninep-abi" }
 keyseq = { path = "../keyseq" }
-# The user-key registry line (user_registry_line), for useradd, passwd and
-# clusterkey (docs/roadmap/roadmap-user-keys.md, Decision 9).
-clusterkeys = { path = "../clusterkeys" }
 
 [lib]
 name = "ulib"

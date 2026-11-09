@@ -207,25 +207,53 @@ pub const REALM_PATH: &str = "/etc/cluster/realm";
 /// [`user_registry_line`] writes into.
 pub const USER_LINE_MAX: usize = NP_NAME_LEN + 1 + KEY_HEX_LEN;
 
+/// What [`user_registry_line`] made.
+#[derive(Debug, PartialEq, Eq)]
+pub enum UserLine {
+    /// The realm file holds no realm ([`parse_realm`]): the node derives no
+    /// user keys, so there is no line.
+    NoRealm,
+    /// A name no registry line can carry ([`user_line_name_ok`]).
+    NameRefused,
+    /// The line, this many bytes of the buffer.
+    Line(usize),
+}
+
 /// The registry line (`<name> <pubkey-hex>`, no newline) for `name` with
-/// `password` in `realm` (already parsed, [`parse_realm`]), into `out`: what
-/// `useradd`, `passwd` and `clusterkey user` print for the admin to add to
+/// `password`, in the realm `realm_file` holds, into `out`: what `useradd`,
+/// `passwd` and `clusterkey user` print for the admin to add to
 /// `/etc/cluster/users` on every export that should require the user's
-/// credential (Decision 9). `None` for a name a line cannot carry (empty,
-/// over [`NP_NAME_LEN`] bytes, with a space, or starting with `#`), checked
-/// before anything is derived. One derivation: about a second on the guest.
+/// credential (Decision 9). The name and the realm are checked before
+/// anything is derived, and `before` runs just before the derivation (about
+/// a second on the guest), for a caller to say it is coming.
 ///
 /// The key material is wiped: the seed and the PBKDF2 output where they were
 /// held, and then the stack below this frame, where Ed25519's expansion of
 /// the seed (as good as the key) was left by the frames that made it. The
 /// same scrub `netd`'s `user_sign` runs, for the same reason.
-pub fn user_registry_line(out: &mut [u8; USER_LINE_MAX], name: &[u8], realm: &[u8], password: &[u8]) -> Option<usize> {
+pub fn user_registry_line(
+    out: &mut [u8; USER_LINE_MAX],
+    name: &[u8],
+    realm_file: &[u8],
+    password: &[u8],
+    before: impl FnOnce(),
+) -> UserLine {
     if !user_line_name_ok(name) {
-        return None;
+        return UserLine::NameRefused;
     }
+    let Some(realm) = parse_realm(realm_file) else {
+        return UserLine::NoRealm;
+    };
+    before();
     let public = user_public_key(name, realm, password);
     scrub_stack();
-    format_user_line(out, name, &public?)
+    // Neither can refuse here: the name and the realm were both checked above,
+    // and `out` is sized for the longest name. Answered as a refused name
+    // rather than trusted, should either rule ever change.
+    match public.and_then(|k| format_user_line(out, name, &k)) {
+        Some(n) => UserLine::Line(n),
+        None => UserLine::NameRefused,
+    }
 }
 
 /// The derivation of [`user_registry_line`], on its own frame so that the
@@ -290,17 +318,26 @@ mod tests {
     #[test]
     fn the_registry_line_is_the_dev_registrys() {
         let mut out = [0u8; USER_LINE_MAX];
-        let realm = parse_realm(b"ouroboros-dev\n").expect("the dev realm");
-        let n = user_registry_line(&mut out, b"user", realm, b"user").expect("a line");
+        let realm = b"ouroboros-dev\n";
+        let mut derived = 0;
+        let UserLine::Line(n) = user_registry_line(&mut out, b"user", realm, b"user", || derived += 1) else {
+            panic!("a line");
+        };
         let want = format!("user {}", DEV_USER_KEYS[1].2);
         assert_eq!(&out[..n], want.as_bytes());
-        assert_eq!(user_registry_line(&mut out, b"user", realm, b"wrong").map(|n| out[..n] == *want.as_bytes()), Some(false));
-        // A name no line can carry is refused before anything is derived.
-        assert_eq!(user_registry_line(&mut out, &[b'a'; NP_NAME_LEN + 1], realm, b"user"), None);
-        assert_eq!(user_registry_line(&mut out, b"#user", realm, b"user"), None);
+        let UserLine::Line(n) = user_registry_line(&mut out, b"user", realm, b"wrong", || derived += 1) else {
+            panic!("a line");
+        };
+        assert_ne!(&out[..n], want.as_bytes());
+        // No realm, or a name no line can carry: refused before anything is
+        // derived (`before` never runs).
+        assert_eq!(user_registry_line(&mut out, b"user", b"", b"user", || derived += 1), UserLine::NoRealm);
+        assert_eq!(user_registry_line(&mut out, &[b'a'; NP_NAME_LEN + 1], realm, b"user", || derived += 1), UserLine::NameRefused);
+        assert_eq!(user_registry_line(&mut out, b"#user", realm, b"user", || derived += 1), UserLine::NameRefused);
+        assert_eq!(derived, 2);
         // The longest name fits the buffer exactly.
         let long = [b'a'; NP_NAME_LEN];
-        assert_eq!(user_registry_line(&mut out, &long, realm, b"user"), Some(USER_LINE_MAX));
+        assert_eq!(user_registry_line(&mut out, &long, realm, b"user", || ()), UserLine::Line(USER_LINE_MAX));
     }
 
     /// The step's check: the Rust derivation, at the real count, agrees with

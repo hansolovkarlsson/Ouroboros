@@ -1976,48 +1976,36 @@ fn panic(_info: &PanicInfo) -> ! {
     }
 }
 
-/// What [`user_registry_line`] found.
-pub enum UserLine {
-    /// No realm here (no `/etc/cluster/realm`, or one that is not a realm):
-    /// the node derives no user keys, so there is no line to print.
-    NoRealm,
-    /// The realm file is there but could not be read. The caller cannot tell
-    /// whether the node is in a cluster, and must say so.
-    RealmUnreadable,
-    /// A name no registry line can carry (`clusterkeys::user_registry_line`).
-    NameRefused,
-    /// The line, this many bytes of the buffer.
-    Line(usize),
+/// What [`read_file_status`] found.
+pub enum FileStatus {
+    /// Definitely not there.
+    Absent,
+    /// There may or may not be a file: the read failed for another reason.
+    Unreadable,
+    /// Read this many bytes (an empty file is `Bytes(0)`).
+    Bytes(usize),
 }
 
-/// The `/etc/cluster/users` line for `name` with `password` in this node's
-/// realm, into `out` (user-keys Decision 9): the ONE copy of what `useradd`,
-/// `passwd` and `clusterkey user` do, each wording its own messages from the
-/// answer. `notice` is printed just before the derivation, about a second on
-/// the guest, and only when there is one to make.
-pub fn user_registry_line(
-    name: &[u8],
-    password: &[u8],
-    notice: &[u8],
-    out: &mut [u8; clusterkeys::USER_LINE_MAX],
-) -> UserLine {
-    let mut rbuf = [0u8; clusterkeys::REALM_FILE_MAX + 1];
-    let r = fs_read_bulk(clusterkeys::REALM_PATH, 0, &mut rbuf);
+/// Read a whole small file, telling a missing file from one that could not be
+/// read: the difference between "this node has no realm" and "this node may
+/// have one". `clusterkey`, `useradd` and `passwd` read `/etc/cluster/realm`
+/// through it.
+pub fn read_file_status(path: &str, buf: &mut [u8]) -> FileStatus {
+    let r = fs_read_bulk(path, 0, buf);
     if r == syscall_abi::FS_ERR_NOT_FOUND {
-        return UserLine::NoRealm;
+        FileStatus::Absent
+    } else if is_fs_error(r) {
+        FileStatus::Unreadable
+    } else {
+        FileStatus::Bytes((r as usize).min(buf.len()))
     }
-    if is_fs_error(r) {
-        return UserLine::RealmUnreadable;
-    }
-    let Some(realm) = clusterkeys::parse_realm(&rbuf[..(r as usize).min(rbuf.len())]) else {
-        return UserLine::NoRealm;
-    };
-    if !clusterkeys::user_line_name_ok(name) {
-        return UserLine::NameRefused;
-    }
-    con_write(notice);
-    match clusterkeys::user_registry_line(out, name, realm, password) {
-        Some(n) => UserLine::Line(n),
-        None => UserLine::NameRefused,
+}
+
+/// Zero a buffer that held a secret (a password typed at a prompt), volatile
+/// so it is not optimised away as a dead store.
+pub fn wipe(b: &mut [u8]) {
+    for x in b.iter_mut() {
+        // SAFETY: a byte of a live slice.
+        unsafe { core::ptr::write_volatile(x, 0) };
     }
 }

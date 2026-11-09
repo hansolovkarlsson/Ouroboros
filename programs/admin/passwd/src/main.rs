@@ -132,6 +132,9 @@ pub extern "C" fn _start() -> ! {
         ulib::con_write(b"passwd: password updated\r\n");
         print_registry_line(name, &pw[..pwl]);
     }
+    ulib::wipe(&mut old);
+    ulib::wipe(&mut pw);
+    ulib::wipe(&mut pw2);
     report(status)
 }
 
@@ -147,7 +150,8 @@ fn print_registry_line(name: &[u8], password: &[u8]) {
     let mut pbuf = [0u8; 2048];
     let mut own = [0u8; clusterkeys::NAME_MAX];
     let name = if name.is_empty() {
-        let plen = ulib::read_file_all("/etc/passwd", &mut pbuf);
+        // By uid, as `accountd` found the account whose password it changed.
+        let plen = ulib::read_file_checked("/etc/passwd", &mut pbuf).unwrap_or(0);
         match accounts::find_user_by_uid(&pbuf[..plen], ulib::getuid()) {
             Some(acct) if acct.name.len() <= own.len() => {
                 own[..acct.name.len()].copy_from_slice(acct.name);
@@ -162,15 +166,24 @@ fn print_registry_line(name: &[u8], password: &[u8]) {
         name
     };
     let mut reg = [0u8; clusterkeys::USER_LINE_MAX];
-    match ulib::user_registry_line(name, password, b"passwd: deriving the cluster key...\r\n", &mut reg) {
-        ulib::UserLine::Line(n) => {
+    let mut rbuf = [0u8; clusterkeys::REALM_FILE_MAX + 1];
+    let realm = match ulib::read_file_status(clusterkeys::REALM_PATH, &mut rbuf) {
+        ulib::FileStatus::Absent => return,
+        ulib::FileStatus::Unreadable => {
+            ulib::con_write(b"passwd: /etc/cluster/realm is unreadable, so no /etc/cluster/users line was\r\n  printed. If this node is in a cluster, the key changed: `clusterkey user\r\n  <name>` prints the new line.\r\n");
+            return;
+        }
+        ulib::FileStatus::Bytes(n) => &rbuf[..n],
+    };
+    let notice = || ulib::con_write(b"passwd: deriving the cluster key...\r\n");
+    match clusterkeys::user_registry_line(&mut reg, name, realm, password, notice) {
+        clusterkeys::UserLine::Line(n) => {
             ulib::con_write(b"passwd: the cluster key changed with the password. Every export that lists\r\n  this user in /etc/cluster/users refuses them until that line is replaced by:\r\n");
             ulib::con_write(&reg[..n]);
             ulib::con_write(b"\r\n");
         }
-        ulib::UserLine::NoRealm => {}
-        ulib::UserLine::RealmUnreadable => ulib::con_write(b"passwd: /etc/cluster/realm is unreadable, so no /etc/cluster/users line was\r\n  printed. If this node is in a cluster, the key changed: `clusterkey user\r\n  <name>` prints the new line.\r\n"),
-        ulib::UserLine::NameRefused => ulib::con_write(b"passwd: this account's name cannot be written in /etc/cluster/users (over\r\n  32 bytes, a space, or a leading #), so it cannot be registered there.\r\n"),
+        clusterkeys::UserLine::NoRealm => {}
+        clusterkeys::UserLine::NameRefused => ulib::con_write(b"passwd: this account's name cannot be written in /etc/cluster/users (over\r\n  32 bytes, a space, or a leading #), so it cannot be registered there.\r\n"),
     }
 }
 

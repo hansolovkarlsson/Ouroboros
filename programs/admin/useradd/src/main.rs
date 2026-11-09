@@ -280,16 +280,26 @@ pub extern "C" fn _start() -> ! {
     // The new user's registry line (Decision 9). A node with no realm prints
     // none; every other way of not printing it says so.
     let mut reg = [0u8; clusterkeys::USER_LINE_MAX];
-    match ulib::user_registry_line(name, &pw[..pwl], b"useradd: deriving the cluster key...\r\n", &mut reg) {
-        ulib::UserLine::Line(n) => {
+    let mut rbuf = [0u8; clusterkeys::REALM_FILE_MAX + 1];
+    let realm = match ulib::read_file_status(clusterkeys::REALM_PATH, &mut rbuf) {
+        ulib::FileStatus::Absent => &rbuf[..0],
+        ulib::FileStatus::Unreadable => {
+            ulib::con_write(b"useradd: /etc/cluster/realm is unreadable, so no /etc/cluster/users line was\r\n  printed: `clusterkey user <name>` prints it.\r\n");
+            &rbuf[..0]
+        }
+        ulib::FileStatus::Bytes(n) => &rbuf[..n],
+    };
+    let notice = || ulib::con_write(b"useradd: deriving the cluster key...\r\n");
+    match clusterkeys::user_registry_line(&mut reg, name, realm, &pw[..pwl], notice) {
+        clusterkeys::UserLine::Line(n) => {
             ulib::con_write(b"useradd: to require this user's own key at an export, add this line to\r\n  /etc/cluster/users there:\r\n");
             ulib::con_write(&reg[..n]);
             ulib::con_write(b"\r\n");
         }
-        ulib::UserLine::NoRealm => {}
-        ulib::UserLine::RealmUnreadable => ulib::con_write(b"useradd: /etc/cluster/realm is unreadable, so no /etc/cluster/users line was\r\n  printed: `clusterkey user <name>` prints it.\r\n"),
-        ulib::UserLine::NameRefused => ulib::con_write(b"useradd: this name cannot be written in /etc/cluster/users (a space or a\r\n  leading #), so the user cannot be registered there.\r\n"),
+        clusterkeys::UserLine::NoRealm => {}
+        clusterkeys::UserLine::NameRefused => ulib::con_write(b"useradd: this name cannot be written in /etc/cluster/users (a space or a\r\n  leading #), so the user cannot be registered there.\r\n"),
     }
+    ulib::wipe(&mut pw);
     ulib::exit(0);
 }
 

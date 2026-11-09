@@ -331,13 +331,12 @@ fn held(target: u64) -> u64 {
 /// short by an `fsd` restart leaves exactly that, and folding it into
 /// `Unreadable` made `realm new -f` refuse to replace it for good.
 fn read_realm_file(buf: &mut [u8]) -> FileRead {
-    let r = ulib::fs_read_bulk(REALM_PATH, 0, buf);
-    if r == syscall_abi::FS_ERR_NOT_FOUND {
-        FileRead::Absent
-    } else if ulib::is_fs_error(r) {
-        FileRead::Unreadable
-    } else {
-        FileRead::Bytes((r as usize).min(buf.len()))
+    // The reader `useradd` and `passwd` read the realm through too, so the
+    // three agree on what an absent and an unreadable realm are.
+    match ulib::read_file_status(REALM_PATH, buf) {
+        ulib::FileStatus::Absent => FileRead::Absent,
+        ulib::FileStatus::Unreadable => FileRead::Unreadable,
+        ulib::FileStatus::Bytes(n) => FileRead::Bytes(n),
     }
 }
 
@@ -625,30 +624,47 @@ fn user(target: u64) -> u64 {
     let mut pw2 = [0u8; 64];
     let pwl2 = ulib::read_line(&mut pw2, false);
     ulib::con_write(b"\r\n");
-    if pw[..pwl] != pw2[..pwl2] {
-        ulib::con_write(b"clusterkey: passwords do not match\r\n");
+    let matched = pw[..pwl] == pw2[..pwl2];
+    ulib::wipe(&mut pw2);
+    if !matched || pwl == 0 {
+        ulib::wipe(&mut pw);
+        // An empty password is no account's: useradd and passwd refuse one,
+        // so a line made from it could only ever be refused (medium review).
+        ulib::con_write(if matched { b"clusterkey: a password may not be empty\r\n" } else { b"clusterkey: passwords do not match\r\n" });
         return 1;
     }
     let mut reg = [0u8; clusterkeys::USER_LINE_MAX];
-    match ulib::user_registry_line(name, &pw[..pwl], b"clusterkey: deriving the key...\r\n", &mut reg) {
-        ulib::UserLine::Line(n) => {
-            out(target, &reg[..n]);
-            out(target, b"\r\n");
-            0
-        }
-        ulib::UserLine::NoRealm => {
+    let mut rbuf = [0u8; clusterkeys::REALM_FILE_MAX + 1];
+    let code = match read_realm_file(&mut rbuf) {
+        FileRead::Absent => {
             ulib::con_write(b"clusterkey: no realm here (/etc/cluster/realm), so no user keys: 'clusterkey realm new'\r\n");
             1
         }
-        ulib::UserLine::RealmUnreadable => {
+        FileRead::Unreadable => {
             ulib::con_write(b"clusterkey: /etc/cluster/realm is unreadable\r\n");
             1
         }
-        ulib::UserLine::NameRefused => {
-            ulib::con_write(b"clusterkey: a registry line cannot carry that name\r\n");
-            2
+        FileRead::Bytes(n) => {
+            let notice = || ulib::con_write(b"clusterkey: deriving the key...\r\n");
+            match clusterkeys::user_registry_line(&mut reg, name, &rbuf[..n], &pw[..pwl], notice) {
+                clusterkeys::UserLine::Line(n) => {
+                    out(target, &reg[..n]);
+                    out(target, b"\r\n");
+                    0
+                }
+                clusterkeys::UserLine::NoRealm => {
+                    ulib::con_write(b"clusterkey: /etc/cluster/realm holds no realm: 'clusterkey realm new -f'\r\n");
+                    1
+                }
+                clusterkeys::UserLine::NameRefused => {
+                    ulib::con_write(b"clusterkey: a registry line cannot carry that name\r\n");
+                    2
+                }
+            }
         }
-    }
+    };
+    ulib::wipe(&mut pw);
+    code
 }
 
 fn out(target: u64, bytes: &[u8]) {
