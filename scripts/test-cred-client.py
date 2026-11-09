@@ -23,9 +23,13 @@ The checks, in the plan's words:
   finds the fid dead), and the su'd request opens a NEW session, signed
   `AUTHNP03`, never riding the old one; the same with a nested login shell
   killed instead of logged out, the FIN within one idle period;
-- the uid captured at the park: `user`'s reads are served while root, also
-  logged in on B, floods netd with messages of its own (`cfidwait -n`), so
-  the last message netd received before signing is very likely root's.
+- under load from another uid: `user`'s reads are served while root, also
+  logged in on B with a key held, floods netd with messages of its own
+  (`cfidwait -n`). Written as the control for "signed for the uid captured at
+  the park", it is NOT one: a mutation reading `SENDER_ID` at sign time still
+  passes it, because the park and the sign happen in one drain of netd's
+  mailbox and the flood never landed between them (measured, user-keys step
+  8). It stays as a check that a second uid's traffic changes nothing.
 
 It also prints the added cost of a credential, from the capture: the round
 trip of a one-shot request and of a session's opening, `user` (credentialed)
@@ -308,7 +312,7 @@ def run_b(b, marks):
         served += PRIVATE_TEXT in out
     nudged = b.wait_for(r"cfidwait: nudged netd \d+ times", timeout=60)
     m = re.findall(r"cfidwait: nudged netd (\d+) times", b.transcript())
-    check("the uid captured at the park: user's five reads are served while root floods netd",
+    check("under load from another uid: user's five reads are served while root floods netd",
           served == 5 and nudged, f"{served} of 5 served, root sent {m[-1] if m else '?'} messages")
     # The killed login: a fid held by a program the nested shell started.
     marks["exec2"] = time.time()

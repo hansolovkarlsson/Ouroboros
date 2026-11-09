@@ -2070,7 +2070,7 @@ fn park_rmount(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, verb: u64, caller: u64
 /// here is affordable because this runs at the top level of `serve`, never
 /// from the re-entrant drain (the depth that made parking there over-reach,
 /// see the plan's ledger).
-fn service_remotes<const H: usize, const K: usize>(remotes: &mut [Option<Wire<REMOTE_SBUF, REMOTE_RBUF, H, K>>], auth: &Auth, held: &held::Held, dead: u64, mut pending: Option<&mut PendingRun>) {
+fn service_remotes<const S: usize, const H: usize, const K: usize>(remotes: &mut [Option<Wire<S, REMOTE_RBUF, H, K>>], auth: &Auth, held: &held::Held, dead: u64, mut pending: Option<&mut PendingRun>) {
     let t = now();
     // ONE reply buffer for the whole pass, shared by the run arm and the
     // framed-reply arm below. Two arrays here cost ~768 bytes on `serve`'s own
@@ -2706,6 +2706,21 @@ const REMOTE_NP_MAX: usize = syscall_abi::MSG_MAX_LEN as usize - syscall_abi::NE
 /// a protocol error, failed at once rather than waited for. Sized to the byte
 /// because every slot sits on `serve`'s fixed stack.
 const REMOTE_SBUF: usize = ninep_abi::NP_NET_LEN_PREFIX + ninep_abi::NP_AUTH_HDR_SIGNED + CRED_BLOCK_LEN + REMOTE_NP_MAX;
+/// A session slot's send buffer: step 7's size, WITHOUT room for the
+/// credential block beside a full `REMOTE_NP_MAX` message. A session slot
+/// carries fid verbs only, and the largest any client sends is a remote
+/// `NP_PWRITE`, 48 bytes of header and `NP_REMOTE_CHUNK` (512) of data, well
+/// inside the 684 that fit with the block (the assert below). Giving it the
+/// block's 68 bytes as well cost 912 bytes of headroom on the async rig's
+/// deepest checks, not 68 a slot: `park_session` assembles a new
+/// `SessionConn` on its own frame and copies it into the slot, and past step
+/// 7's size the send buffer was assembled there too, its frame 1,824 bytes
+/// then 2,800 (measured, user-keys step 8; building it in place by
+/// `ptr::write`, or through a constructor never inlined, did not stop the
+/// copy). A fid verb too large to frame with its credential is refused
+/// `FS_ERR_AUTH`, the answer every request too large to frame gets.
+const SESSION_SBUF: usize = ninep_abi::NP_NET_LEN_PREFIX + ninep_abi::NP_AUTH_HDR_SIGNED + REMOTE_NP_MAX;
+const _: () = assert!(SESSION_SBUF >= NP_SIGNED_NP_OFF + CRED_BLOCK_LEN + ninep_abi::NP_REQ_PAYLOAD as usize + ninep_abi::NP_REMOTE_CHUNK);
 const REMOTE_RBUF: usize = 1024;
 /// Every parking slot across BOTH tables (`remotes`, then `sessions`), indexed
 /// as `remote_src_port` numbers them. Each draws its source port from its own
@@ -3060,7 +3075,7 @@ type RemoteConn = Wire<REMOTE_SBUF, REMOTE_RBUF, 0, 0>;
 /// opens (step 2 of docs/roadmap/roadmap-async-rmount.md), and the one slot of
 /// session keys (step 7 of docs/roadmap/roadmap-session-auth.md) that no other
 /// table carries.
-type SessionConn = Wire<REMOTE_SBUF, REMOTE_RBUF, REMOTE_NP_MAX, 1>;
+type SessionConn = Wire<SESSION_SBUF, REMOTE_RBUF, REMOTE_NP_MAX, 1>;
 
 #[derive(Clone, Copy, PartialEq)]
 enum DialState {
