@@ -11,6 +11,7 @@
 //! clusterkey realm        show the cluster's realm
 //! clusterkey realm new [-f]  generate a realm (refuses without real entropy)
 //! clusterkey held         the uids netd holds a user key for (root only; a diagnostic)
+//! clusterkey user NAME    print NAME's /etc/cluster/users line, from a password typed twice
 //! ```
 //!
 //! ## Why generation refuses rather than degrades
@@ -32,7 +33,7 @@ use clusterkeys::{KEY_HEX_LEN, KEY_LEN};
 const ID_PATH: &str = "/etc/cluster/id";
 const PUB_PATH: &str = "/etc/cluster/id.pub";
 const AUTHORIZED_PATH: &str = "/etc/cluster/authorized";
-const REALM_PATH: &str = "/etc/cluster/realm";
+const REALM_PATH: &str = clusterkeys::REALM_PATH;
 
 /// Mode for the private key: readable by its owner and nobody else. Enforced on
 /// ext2; FAT32 and exFAT model no mode at all, which the boot warning already
@@ -59,8 +60,10 @@ pub extern "C" fn _start() -> ! {
         realm(target)
     } else if cmd == b"held" {
         held(target)
+    } else if cmd == b"user" {
+        user(target)
     } else {
-        out(target, b"usage: clusterkey [new [-f] | peers | line <name> <ip> | realm [new [-f]] | held]\r\n");
+        out(target, b"usage: clusterkey [new [-f] | peers | line <name> <ip> | realm [new [-f]] | held | user <name>]\r\n");
         2
     };
     ulib::end_of_stream(target);
@@ -589,6 +592,63 @@ fn public_key_of_this_machine(target: u64) -> Option<[u8; KEY_LEN]> {
         return clusterkeys::parse_key_file(&pbuf[..pn]);
     }
     None
+}
+
+/// `clusterkey user <name>`: the `/etc/cluster/users` line for `name` in this
+/// node's realm, from a password typed twice (echo off), on standard output
+/// alone, so `clusterkey user ann >> /etc/cluster/users` writes just the line.
+/// The prompts and every refusal go to the console.
+///
+/// The way to register a user who already has a password, and to make every
+/// line again after a new realm, without resetting anyone's password: the user
+/// runs it, and gives the line to whoever keeps the exports' registries. The
+/// password is not checked against `/etc/shadow` (an ordinary user cannot
+/// read it), so the second prompt is what catches a typo; a wrong line only
+/// makes the export refuse the user until it is replaced (high review of
+/// user-keys step 9).
+fn user(target: u64) -> u64 {
+    let mut name = [0u8; 64];
+    let nlen = ulib::arg(2, &mut name).unwrap_or(0);
+    if nlen == 0 {
+        ulib::con_write(b"usage: clusterkey user <name>\r\n");
+        return 2;
+    }
+    let name = &name[..nlen];
+    if !clusterkeys::user_line_name_ok(name) {
+        ulib::con_write(b"clusterkey: a registry line cannot carry that name (1 to 32 bytes, no space, no leading #)\r\n");
+        return 2;
+    }
+    ulib::con_write(b"Password: ");
+    let mut pw = [0u8; 64];
+    let pwl = ulib::read_line(&mut pw, false);
+    ulib::con_write(b"\r\nRetype password: ");
+    let mut pw2 = [0u8; 64];
+    let pwl2 = ulib::read_line(&mut pw2, false);
+    ulib::con_write(b"\r\n");
+    if pw[..pwl] != pw2[..pwl2] {
+        ulib::con_write(b"clusterkey: passwords do not match\r\n");
+        return 1;
+    }
+    let mut reg = [0u8; clusterkeys::USER_LINE_MAX];
+    match ulib::user_registry_line(name, &pw[..pwl], b"clusterkey: deriving the key...\r\n", &mut reg) {
+        ulib::UserLine::Line(n) => {
+            out(target, &reg[..n]);
+            out(target, b"\r\n");
+            0
+        }
+        ulib::UserLine::NoRealm => {
+            ulib::con_write(b"clusterkey: no realm here (/etc/cluster/realm), so no user keys: 'clusterkey realm new'\r\n");
+            1
+        }
+        ulib::UserLine::RealmUnreadable => {
+            ulib::con_write(b"clusterkey: /etc/cluster/realm is unreadable\r\n");
+            1
+        }
+        ulib::UserLine::NameRefused => {
+            ulib::con_write(b"clusterkey: a registry line cannot carry that name\r\n");
+            2
+        }
+    }
 }
 
 fn out(target: u64, bytes: &[u8]) {

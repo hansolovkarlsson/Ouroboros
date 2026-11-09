@@ -45,7 +45,8 @@ about the practical trade for a would-be user.**
   it. Machines hold Ed25519 keypairs (since v0.16.0); since v0.25.0 a user
   registered at an export is served there only with a signature by their own
   password-derived key, which a machine holds only while they are logged in
-  on it, and root only from a peer flagged `root`. An unregistered user is
+  on it (or, while a `cpu` run as them is in flight, to the machine running
+  it), and root only from a peer flagged `root`. An unregistered user is
   still the machine's to claim, there is no auth server, and there is no
   on-the-wire encryption, so a captured credential can be guessed at offline.
   Trusted-LAN by design. Not self-hosting (you cross-compile from macOS).

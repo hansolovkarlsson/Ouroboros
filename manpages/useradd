@@ -44,7 +44,10 @@ CLUSTER KEY
         alice 3f5c...e21a
 
     An export without the line serves the user on the requesting machine's
-    word. With no realm, no line is printed.
+    word. The key is derived after the account is committed, so a run that
+    fails derives nothing. With no realm, no line is printed; with an
+    unreadable one useradd says so, and `clusterkey user <name>` prints the
+    line later.
 
 ORDER OF OPERATIONS
     useradd writes three things - /etc/group, the home directory, and
@@ -77,8 +80,8 @@ EXAMPLES
     New password: ****
     Retype new password: ****
     useradd: deriving the password's hash...
-    useradd: deriving the cluster key...
     useradd: created alice
+    useradd: deriving the cluster key...
     useradd: to require this user's own key at an export, add this line to
       /etc/cluster/users there:
     alice 3f5c...e21a

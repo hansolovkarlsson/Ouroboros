@@ -31,7 +31,7 @@ const SHADOW_PATH: &str = "/etc/shadow";
 const GROUP_PATH: &str = "/etc/group";
 /// The cluster's realm: present, this node derives a cluster key at login;
 /// absent or not a realm, it derives none and logs in as it always has.
-const REALM_PATH: &str = "/etc/cluster/realm";
+const REALM_PATH: &str = clusterkeys::REALM_PATH;
 /// Read cap for `/etc/passwd`, matching the account tools' write cap
 /// ([`accounts`]/`useradd` bound writes to `SAFECOPY_MAX`). fsd caps a single
 /// inline read at `FS_DATA_MAX` (512), so the shared `read_account_file` loops

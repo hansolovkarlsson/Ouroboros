@@ -388,7 +388,7 @@ private one: it requires no key and no account.
 | `/etc/cluster/authorized` | The peers this machine accepts, one per line: `<name> <ipv4> <pubkey-hex> [root]`. A trailing `root` trusts that peer to act as root (uid or gid 0) here; without it the peer is refused as root and served as anyone else. Absent or empty ⇒ the export serves nobody. Comment a line out (or delete it) to **revoke** that peer. |
 | `/etc/cluster/realm` | The cluster's **realm**, one word of at most 32 bytes, the same on every node and unique to the cluster: half the salt every user key is derived with. `clusterkey realm new` generates one (refusing without entropy); copy it to the other nodes. Absent ⇒ this node derives no user keys, and local login is unaffected. The dev images stage the public `ouroboros-dev`. |
 | (held keys) | On a node with a realm, **`login` derives the user's cluster key** from the password (about a second on the QEMU guest, on top of the password check's second) and hands it to `netd`, which holds it until **logout** and signs that user's requests with it; a killed login's key is not used from the moment its shell is gone, and leaves the table within one pass of `netd`'s loop. `clusterkey held` (root) lists whose keys are held, never the keys. No realm, no key, and login is otherwise unchanged. |
-| `/etc/cluster/users` | The **user-key registry** (0600): `<name> <pubkey-hex>` per user whose remote claims need their own credential here. Absent or without a user's line ⇒ that user is served on the machine's word. `useradd` and `passwd` print the line for the password they set; put it on every export that should require it. A password change changes the key, so the line must be replaced everywhere it is listed, and the user is refused there until it is. A line that cannot be read refuses that user rather than serving them unchecked. The dev images register `user`. |
+| `/etc/cluster/users` | The **user-key registry** (0600): `<name> <pubkey-hex>` per user whose remote claims need their own credential here. Absent or without a user's line ⇒ that user is served on the machine's word. `clusterkey user <name>` prints the line from the user's password, and `useradd` and `passwd` for the password they set; put it on every export that should require it. A password change changes the key, so the line must be replaced everywhere it is listed, and the user is refused there until it is. A line that cannot be read refuses that user rather than serving them unchecked. The dev images register `user`. |
 | `\NOEXEC` | Presence-only flag: authenticated peers may still `mount -r` the disk, but every `cpu` (remote-exec) is refused. |
 
 In the QEMU images a dev identity is staged automatically
@@ -404,9 +404,11 @@ entropy** rather than producing a guessable identity. See
 [`testing-qemu.md`](testing/testing-qemu.md) for which platforms have it.
 
 For per-user keys, run `clusterkey realm new` on one machine and copy its
-`/etc/cluster/realm` to every other, then create or re-set each user's
-password (`useradd`, or `passwd` for an existing account) so a key is
-derived in that realm. Each prints a line such as
+`/etc/cluster/realm` to every other. A user's line then comes from
+`clusterkey user <name>`, which asks for the password twice and prints the
+line alone (so `clusterkey user ann >> /etc/cluster/users` writes it); the
+user runs it and hands the line over, so nobody's password has to be reset.
+`useradd` and `passwd` print the line for the password they set, such as
 
 ```
 useradd: to require this user's own key at an export, add this line to
@@ -414,9 +416,10 @@ useradd: to require this user's own key at an export, add this line to
 ann 3f5c...e21a
 ```
 
-which goes into `/etc/cluster/users` on every export that should require
-it. Without a realm, a machine derives no keys and its users are served on
-the machine's word everywhere.
+Either way the line goes into `/etc/cluster/users` on every export that
+should require it. A new realm changes every user's key, so every line is
+made again. Without a realm, a machine derives no keys and its users are
+served on the machine's word everywhere.
 
 ### Setting up two machines
 

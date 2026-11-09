@@ -49,7 +49,7 @@
 
 mod users;
 pub use users::{
-    derive_user_seed, derive_user_seed_with, format_user_line, lookup_user, parse_realm, user_registry_line, userkey_salt,
+    derive_user_seed, derive_user_seed_with, format_user_line, lookup_user, parse_realm, user_line_name_ok, user_registry_line, userkey_salt, REALM_PATH, USER_LINE_MAX,
     UserLookup, REALM_FILE_MAX, USERKEY_SALT_MAX, USERS_MAX,
 };
 

@@ -71,17 +71,33 @@ def nested_login(slot, user, prompt):
 
 
 def registry_line(name, password):
-    """The registry line `useradd` and `passwd` must print for `name` with
-    `password` in the dev realm, derived by mkclusterkeys.py's Python, which
-    shares no code with the guest's (Decision 9; step 9)."""
-    sys.path.insert(0, HERE)
-    import mkclusterkeys
-    return f"{name} {mkclusterkeys.edref.public_key(mkclusterkeys.user_seed(name, password.encode())).hex()}"
+    """A regex for the registry line `useradd`, `passwd` and `clusterkey user`
+    must print for `name` with `password` in the dev realm, derived by
+    mkclusterkeys.py's Python, which shares no code with the guest's
+    (Decision 9; step 9). Returned as a callable, so the derivation (a full
+    PBKDF2) runs only when a check of it does, not for every scenario."""
+    def rx():
+        if HERE not in sys.path:
+            sys.path.insert(0, HERE)
+        import mkclusterkeys
+        key = mkclusterkeys.edref.public_key(mkclusterkeys.user_seed(name, password.encode()))
+        return re.escape(f"{name} {key.hex()}")
+    return rx
 
 
 def new_password(pw, prompt):
     """Answer a New/Retype password pair, then wait for `prompt`."""
     return [("s", "New password", pw), ("s", "Retype", pw), ("s", prompt, "")]
+
+
+def after(command, rx, nth=1):
+    """A regex for `rx()` in the output of the `nth` run of `command`: after
+    the command's echo, before the next prompt at a line's start."""
+    def full():
+        lead = rf"{re.escape(command)}\r?\n(?:(?!# )[^\n]*\n)*?"
+        skip = rf"(?:{re.escape(command)}[\s\S]*?)" * (nth - 1)
+        return skip + lead + rf"[^\n]*{rx()}"
+    return full
 
 
 # Each scenario: a list of ("s", wait, type) console steps, ("h", uids, what)
@@ -149,17 +165,28 @@ SCENARIOS = {
         *login("root", "# "),
         ("s", "", "useradd ann"),
         *new_password("ann", "# "),
-        ("t", re.escape(registry_line("ann", "ann")), "useradd prints the new user's registry line"),
+        ("t", registry_line("ann", "ann"), "useradd prints the new user's registry line"),
+        # The same line from `clusterkey user`, the password typed twice; and a
+        # mismatched retype refused, with no line.
+        ("s", "", "clusterkey user ann"),
+        ("s", "Password", "ann"),
+        ("s", "Retype", "ann"),
+        ("s", "# ", "clusterkey user ann"),
+        ("s", "Password", "ann"),
+        ("s", "Retype", "nna"),
+        ("s", "# ", ""),
+        ("t", after("clusterkey user ann", registry_line("ann", "ann")), "clusterkey user prints the same line"),
+        ("t", after("clusterkey user ann", lambda: r"passwords do not match", nth=2), "a mismatched retype is refused"),
         ("s", "", "passwd user"),
         *new_password("pw2", "# "),
-        ("t", re.escape(registry_line("user", "pw2")), "root's passwd prints the changed user's line"),
+        ("t", registry_line("user", "pw2"), "root's passwd prints the changed user's line"),
         ("s", "", "exit"),
         ("s", "login:", "user"),
         ("s", "assword", "pw2"),
         ("s", r"\$ ", "passwd"),
         ("s", "Current", "pw2"),
         *new_password("pw3", r"\$ "),
-        ("t", re.escape(registry_line("user", "pw3")), "a user's own passwd prints their line, found by uid"),
+        ("t", registry_line("user", "pw3"), "a user's own passwd prints their line, found by uid"),
         ("s", "", "exit"),
         *login("root", "# "),
         ("s", "", "rm /etc/cluster/realm"),
@@ -216,7 +243,7 @@ def run(name, plan):
                 failures += 0 if ok else 1
             else:
                 _, rx, what = step
-                ok = re.search(rx, g.transcript()) is not None
+                ok = re.search(rx() if callable(rx) else rx, g.transcript()) is not None
                 print(f"[{'PASS' if ok else 'FAIL'}] {name}: {what}", flush=True)
                 failures += 0 if ok else 1
         # A run whose guest died proves nothing either way.
