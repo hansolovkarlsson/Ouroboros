@@ -7,9 +7,23 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/pos
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
-## Unreleased
+## v0.25.0: per-user keys for the cluster (2026-11-09)
 
-**Not yet released.** Changes since v0.24.0, drafted as they land.
+Fifteen pull requests over three days, 2026-11-07 to 2026-11-09, #416 to
+#430. Mostly the per-user keys arc
+([`roadmap/roadmap-user-keys.md`](roadmap/roadmap-user-keys.md)), whose
+steps 0 to 4 were already on `main` and below the wire: the credential on
+the wire, both Python peers, the export and the client in `netd`, and the
+registry line and the docs. A user registered at an export is now served
+there only with a signature by their own password-derived key, which a
+machine holds only while they are logged in on it. Beside it, a mount seen
+from its parent and named by bare `mount`, and `make sdcard` keeping a
+card's boot counter. **No wire flag day**: `AUTHNP03` is still accepted,
+and an export turns the check on per user by registering them, so a
+v0.24.0 node and a v0.25.0 node work together for every user neither
+registers. A user registered at a v0.25.0 export is refused there from a
+v0.24.0 node, which sends no credential. The days' records are in
+`docs/work-journal/`, one file a day.
 
 **Per-user keys for the cluster (2026-11-08 to 2026-11-09, #426 to #429, and
 step 9).** A remote request's user was asserted by the calling machine and

@@ -45,6 +45,15 @@ This document is the one to update first when direction changes.
 > without virtio-PCI, untried; and which mechanism finds Parallels' serial
 > console, not yet read.
 
+> **Released 2026-11-09: v0.25.0, per-user keys for the cluster** (#416 to
+> #430, recorded in [`CHANGELOG.md`](CHANGELOG.md) and
+> [`roadmap-completed.md`](roadmap-completed.md)). Open from the arc, in
+> item 1: the auth server it was shaped for, and two questions for Hans
+> from step 8 (whether a `cpu` run ends when its login is killed, and the
+> 684-byte limit on a credentialed fid verb). Open next: Pi item 3, a stick
+> with no card, and the frontier's items 4 and 5 (transitive delegation,
+> per-task ASIDs).
+
 > **Released 2026-11-07: v0.24.0, one disk, and the Pi 4 on its SD card
 > alone** (#284 to #414, recorded in [`CHANGELOG.md`](CHANGELOG.md) and
 > [`roadmap-completed.md`](roadmap-completed.md)). Open from the one-disk
