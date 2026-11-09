@@ -3,8 +3,10 @@
 //!
 //! `login` derives a user's cluster key from the password and hands the seed to
 //! `netd` with `NETOP_KEY_HOLD`, then wipes its own copy. `netd` holds it while
-//! the user is logged in; from step 7 it signs that user's credentials with it,
-//! inside its own event loop, so the key never leaves this task again.
+//! the user is logged in, and since step 8 signs that user's credentials with
+//! it (`sign_parked`), inside its own event loop, so the key never leaves this
+//! task again. A session opened under a credential is closed when its uid's
+//! last key goes (`close_unheld`).
 //!
 //! The rules, each one a line below:
 //!
@@ -104,6 +106,20 @@ impl Held {
                 *slot = None;
             }
         }
+    }
+
+    /// The seed held for `uid`, for signing that user's credential (step 8).
+    /// Two logins of one user hold the same key, derived from the same name,
+    /// realm and password; if a password changed between them, either key is
+    /// one the user holds, and the first is used.
+    pub fn seed_for(&self, uid: u32) -> Option<&[u8; 32]> {
+        self.slots.iter().flatten().find(|k| k.uid == uid).map(|k| &k.seed)
+    }
+
+    /// Whether any key is held for `uid`: what keeps a session opened under
+    /// that user's credential open (step 8).
+    pub fn holds(&self, uid: u32) -> bool {
+        self.seed_for(uid).is_some()
     }
 
     /// The uids with a key held, into `out`; returns how many (the diagnostic
