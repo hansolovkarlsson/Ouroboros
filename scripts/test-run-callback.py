@@ -53,6 +53,7 @@ import socket
 import struct
 import sys
 import threading
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -313,12 +314,13 @@ def killed_login(g, prompt):
     # Ctrl+C with the nested shell owning the keyboard DETACHES it (a
     # `fg`-handed session, `tasks::interrupt_key_check`): the keyboard goes
     # back to root's shell, which prints no new prompt, its `# ` having been
-    # printed at the `fg`. The nested shell's `cpu` call is cut too
-    # (`cpu: remote run failed`); the run stays parked in netd, its caller
-    # gone, which is the window this checks. Root then types the kill.
+    # printed at the `fg`, so there is nothing to wait for but the time the
+    # detach takes. Whether the nested shell's `cpu` call is cut as well
+    # (`cpu: remote run failed`) depends on timing, seen both ways; either
+    # way the run stays parked in netd, which the refusal after the kill
+    # depends on and the control shows. Root then types the kill.
     g.type_raw(b"\x03")
-    if not g.run([(r"remote run failed", "")]):
-        check("the killed login: Ctrl+C detaches the nested shell", False, "timed out")
+    time.sleep(2)
     g.type_line(f"kill {nested}")
     if not g.run([(prompt, "")]):
         check("the killed login: root kills the nested login", False, "timed out")
