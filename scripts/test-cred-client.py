@@ -110,6 +110,19 @@ def login(g, user, prompt, at_prompt=False):
     return g.run([("" if at_prompt else "login:", user), ("assword", user), (prompt, "")])
 
 
+def await_nth(g, rx, n, timeout):
+    """The first `n` matches of `rx` in the WHOLE transcript, waiting up to
+    `timeout` for the n-th. Not `wait_for`, which matches only output since
+    its last match: a background program's line can print while the rig was
+    waiting for something else, and would then never be seen."""
+    deadline = time.time() + timeout
+    while True:
+        found = re.findall(rx, g.transcript())
+        if len(found) >= n or time.time() > deadline:
+            return found
+        time.sleep(0.5)
+
+
 def first_line(out, rx):
     m = re.search(rx, out)
     return m.group(0) if m else out.strip().replace("\r", "").split("\n")[-2:]
@@ -274,11 +287,9 @@ def run_b(b, marks):
     _, out = do(b, f"cat /mnt/b{PRIVATE}", USER_P)
     check("the key locked: uid 1000 after the logout reads by a path verb, refused at A",
           AUTH_REFUSED in out and PRIVATE_TEXT not in out, first_line(out, PRIVATE_TEXT + "|[^\r\n]*" + AUTH_REFUSED))
-    ok = b.wait_for(r"cfidwait: second read (ok|failed[^\r\n]*)", timeout=HOLD_S + 30)
-    tail = b.transcript()[-400:]
-    m = re.findall(r"cfidwait: second read (ok|failed[^\r\n]*)", tail)
+    m = await_nth(b, r"cfidwait: second read (ok|failed[^\r\n]*)", 1, HOLD_S + 30)
     check("the session case: the fid held across the logout is dead after it",
-          ok and m and m[-1].startswith("failed"), m[-1] if m else "no second read seen")
+          m and m[0].startswith("failed"), m[0] if m else "no second read seen")
     b.run([("", "<ENTER>"), (USER_P, "")])
     do(b, "exit", "login:")
 
@@ -294,7 +305,7 @@ def run_b(b, marks):
     marks["guest_cost_end"] = time.time()
     do(b, "exit", "login:")
 
-    # 5. The uid captured at the park, then the killed nested login. Root logs
+    # 5. Load from another uid, then the killed nested login. Root logs
     # in on the boot shell and holds a key too; a nested shell logs `user` in.
     login(b, "root", ROOT_P, at_prompt=True)
     _, out = do(b, "exec /bin/sh", "login:")
@@ -315,10 +326,9 @@ def run_b(b, marks):
     for _ in range(5):
         _, out = do(b, f"cat /mnt/c{PRIVATE}", USER_P)
         served += PRIVATE_TEXT in out
-    nudged = b.wait_for(r"cfidwait: nudged netd \d+ times", timeout=60)
-    m = re.findall(r"cfidwait: nudged netd (\d+) times", b.transcript())
+    m = await_nth(b, r"cfidwait: nudged netd (\d+) times", 1, 60)
     check("under load from another uid: user's five reads are served while root floods netd",
-          served == 5 and nudged, f"{served} of 5 served, root sent {m[-1] if m else '?'} messages")
+          served == 5 and m and int(m[0]) > 0, f"{served} of 5 served, root sent {m[0] if m else '?'} messages")
     # The killed login: a fid held by a program the nested shell started.
     marks["exec2"] = time.time()
     _, out = do(b, f"exec /bin/cfidwait /mnt/c{PRIVATE} {HOLD_S}", r"cfidwait: (held|open failed)[^\r\n]*")
@@ -328,10 +338,9 @@ def run_b(b, marks):
     marks["kill"] = time.time()
     do(b, f"kill {nested}", ROOT_P)
     marks["killed"] = time.time()
-    ok = b.wait_for(r"cfidwait: second read (ok|failed[^\r\n]*)", timeout=HOLD_S + 30)
-    m = re.findall(r"cfidwait: second read (ok|failed[^\r\n]*)", b.transcript())
+    m = await_nth(b, r"cfidwait: second read (ok|failed[^\r\n]*)", 2, HOLD_S + 30)
     check("the killed login: the fid held under it is dead after the kill",
-          ok and len(m) >= 2 and m[-1].startswith("failed"), m[-1] if len(m) >= 2 else "no second read seen")
+          len(m) >= 2 and m[1].startswith("failed"), m[1] if len(m) >= 2 else "no second read seen")
 
 
 def grade_capture(marks):
