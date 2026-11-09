@@ -664,7 +664,7 @@ fn serve(packed_mac: u64) -> ! {
         // connections, and the TCP server.
         if packed_mac != syscall_abi::NET_ERROR {
             while let Some(n) = recv(&mut frame) {
-                on_frame(&mac, &frame[..n], &mut conns, &mut dials, &mut remotes, &mut sessions, &auth);
+                on_frame(&mac, &frame[..n], &mut conns, &mut dials, &mut remotes, &mut sessions, &auth, &held);
             }
             // Answer every parked remote mount and session verb whose reply is
             // complete (or whose peer is gone), then drive the client
@@ -699,7 +699,7 @@ fn serve(packed_mac: u64) -> ! {
                     conns[i] = None;
                     continue;
                 }
-                if run_ended(&mac, conns[i].as_ref().unwrap(), &remotes) {
+                if run_ended(&mac, conns[i].as_ref().unwrap(), &remotes, &held) {
                     conns[i] = None;
                     continue;
                 }
@@ -1718,7 +1718,7 @@ fn park_remote(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, verb: u64, caller: u64
     // `service_remotes` both of those things; no extra field is needed.
     // `since: 0` for the reason `park_rmount` gives: the clock starts at the
     // first send, never at the park.
-    wire.parked = Some(Parked { caller, call, nonce: [0; ninep_abi::NP_NONCE_LEN], expect_key: anchor, since: 0, who: *who, uid, verb, opening: false, raw });
+    wire.parked = Some(Parked { caller, call, nonce: [0; ninep_abi::NP_NONCE_LEN], expect_key: anchor, since: 0, who: *who, uid, verb, opening: false, attested: false, raw });
     Ok(())
 }
 
@@ -1876,7 +1876,7 @@ fn park_session(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, uid: u32, verb: u64, 
         // parked at `now()` would answer FS_ERROR and destroy a live session's
         // fids over a peer that was never asked (review of #152). This is the
         // same rule, and the same reason, as `park_rmount`'s.
-        s.parked = Some(Parked { caller, call, nonce: [0; ninep_abi::NP_NONCE_LEN], expect_key, since: 0, who: *who, uid, verb, opening: false, raw });
+        s.parked = Some(Parked { caller, call, nonce: [0; ninep_abi::NP_NONCE_LEN], expect_key, since: 0, who: *who, uid, verb, opening: false, attested: false, raw });
         return Ok(());
     }
     let Some(slot) = sessions.iter().position(|s| s.is_none()) else {
@@ -1903,7 +1903,7 @@ fn park_session(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, uid: u32, verb: u64, 
     s.state = DialState::Connecting; // the pump sends the SYN
     // since = 0: the deadline clock starts at the first SYN send, in
     // `pump_dials`, for the reason `park_rmount` gives.
-    s.parked = Some(Parked { caller, call, nonce: [0; ninep_abi::NP_NONCE_LEN], expect_key, since: 0, who: *who, uid, verb, opening: true, raw: SESSION_LEN as u16 });
+    s.parked = Some(Parked { caller, call, nonce: [0; ninep_abi::NP_NONCE_LEN], expect_key, since: 0, who: *who, uid, verb, opening: true, attested: false, raw: SESSION_LEN as u16 });
     Ok(())
 }
 
@@ -2053,7 +2053,7 @@ fn park_rmount(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, verb: u64, caller: u64
     // the run to return (review of #149). Once the SYN goes out, it ages
     // normally. (A park whose SYN is sent and is THEN starved by a long run can
     // still age; that residual closes at step 3, which removes the run drain.)
-    wire.parked = Some(Parked { caller, call, nonce: [0; ninep_abi::NP_NONCE_LEN], expect_key, since: 0, who: *who, uid, verb, opening: false, raw });
+    wire.parked = Some(Parked { caller, call, nonce: [0; ninep_abi::NP_NONCE_LEN], expect_key, since: 0, who: *who, uid, verb, opening: false, attested: false, raw });
     Ok(())
 }
 
@@ -2150,7 +2150,20 @@ fn service_remotes<const S: usize, const H: usize, const K: usize>(remotes: &mut
             let finished = c.peer_fin || c.state == DialState::Closed;
             let since = c.parked.as_ref().unwrap().since;
             let silent = since != 0 && t.wrapping_sub(since) > RUN_DEADLINE_TICKS;
-            if !(finished || silent) {
+            // A run sent with its user's credential ends when that user is no
+            // longer held here, as their sessions do: Decision 7's `/host`
+            // window was opened by the user typing `cpu`, and closes with the
+            // user. The caller gets the output so far and a line saying why.
+            // The child on the far machine is not stopped: a peer's close
+            // reaps no child there (`TcpConn`'s `Drop`), a gap of its own.
+            let unheld = !run_counts(c.parked.as_ref().unwrap(), held);
+            if unheld {
+                let note = b"\r\ncpu: the run was ended here: its user is no longer logged in\r\n";
+                let take = note.len().min(RUN_OUT_MAX.saturating_sub(p.len));
+                p.buf[p.len..p.len + take].copy_from_slice(&note[..take]);
+                p.len += take;
+            }
+            if !(finished || silent || unheld) {
                 continue;
             }
             let parked = c.parked.take().unwrap();
@@ -2828,6 +2841,12 @@ struct Parked {
     /// the `NP_SESSION`, and the verb the caller sent waits in `Wire::held`.
     /// Never set on a path slot.
     opening: bool,
+    /// The request went out with the user's credential (`sign_parked`). Read
+    /// for a `cpu` run alone: an attested run is in flight, for Decision 7's
+    /// `/host` callback, only while its user is still held here, and ends
+    /// when their last key goes, as an attested session does (Hans,
+    /// 2026-11-09, the question step 8's high review left open).
+    attested: bool,
     /// Bytes of a raw NP request waiting in `Wire::sbuf` at `NP_SIGNED_NP_OFF`,
     /// the place its framed form will put it, to be framed and signed by
     /// `service_remotes` (`sign_parked`); 0 once it has been. A park never signs:
@@ -2906,6 +2925,7 @@ fn sign_parked<const S: usize, const R: usize, const H: usize, const K: usize>(c
         }
     }
     let cred = user_cred(held, pk.uid, &pk.expect_key);
+    pk.attested = cred.is_some();
     if pk.opening && cred.is_some() {
         if let Some(ka) = c.keys.first_mut() {
             ka.attested = true;
@@ -3388,7 +3408,8 @@ struct TcpIn {
 /// Dispatch one received frame: answer ARP requests for our IP, and feed TCP
 /// segments to the HTTP server. Everything else (including our own client
 /// ops' replies, which the synchronous handlers already consumed) is ignored.
-fn on_frame(mac: &[u8; 6], frame: &[u8], conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], auth: &Auth) {
+#[allow(clippy::too_many_arguments)]
+fn on_frame(mac: &[u8; 6], frame: &[u8], conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], auth: &Auth, held: &held::Held) {
     if frame.len() < 14 {
         return;
     }
@@ -3415,7 +3436,7 @@ fn on_frame(mac: &[u8; 6], frame: &[u8], conns: &mut [Option<TcpConn>; MAX_CONNS
                 return;
             }
             if let Some(seg) = parse_tcp_in(frame) {
-                handle_tcp(mac, frame, &seg, conns, dials, auth, remotes);
+                handle_tcp(mac, frame, &seg, conns, dials, auth, remotes, held);
             }
         }
         _ => {}
@@ -3535,7 +3556,8 @@ fn parse_tcp_in(frame: &[u8]) -> Option<TcpIn> {
 /// matching connection via [`handle_conn_segment`], and a returned "close" (the
 /// peer's FIN, or an RST) frees the slot. None of those paths validates a
 /// sequence number; see `docs/ROADMAP.md` on the receive path.
-fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], auth: &Auth, runs: &[Option<RemoteConn>; MAX_REMOTE]) {
+#[allow(clippy::too_many_arguments)]
+fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], auth: &Auth, runs: &[Option<RemoteConn>; MAX_REMOTE], held: &held::Held) {
     // RST tears down a matching connection on the 4-TUPLE ALONE: no sequence
     // check, no RFC 5961 challenge, and `find_conn` does not even key on the
     // local port. So a stale RST from a previous incarnation (SERVER_ISN is a
@@ -3625,7 +3647,7 @@ fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conns: &mut [Option<TcpC
     // can be budgeted against the whole table.
     let sessions = conns.iter().filter(|c| matches!(c, Some(c) if c.session)).count();
     if let Some(i) = find_conn(conns, seg) {
-        if handle_conn_segment(mac, frame, seg, conns[i].as_mut().unwrap(), dials, auth, sessions, runs) {
+        if handle_conn_segment(mac, frame, seg, conns[i].as_mut().unwrap(), dials, auth, sessions, runs, held) {
             conns[i] = None;
         }
     }
@@ -3712,8 +3734,8 @@ fn reap_idle(mac: &[u8; 6], c: &TcpConn, now: u64) -> bool {
 /// frame or the idle reap: until then its fids would stay open as the run's
 /// user with no rule left to justify them (the medium review of step 7).
 /// `handle_9p`'s per-frame check stays, for a frame that arrives first.
-fn run_ended(mac: &[u8; 6], c: &TcpConn, runs: &[Option<RemoteConn>; MAX_REMOTE]) -> bool {
-    if !matches!(c.keyed.as_ref().and_then(|k| k.run), Some(run) if !run_live(runs, run)) {
+fn run_ended(mac: &[u8; 6], c: &TcpConn, runs: &[Option<RemoteConn>; MAX_REMOTE], held: &held::Held) -> bool {
+    if !matches!(c.keyed.as_ref().and_then(|k| k.run), Some(run) if !run_live(runs, held, run)) {
         return false;
     }
     log(b"netd: 9p: keyed session: the run it was opened under has ended; closing\r\n");
@@ -3728,7 +3750,7 @@ fn run_ended(mac: &[u8; 6], c: &TcpConn, runs: &[Option<RemoteConn>; MAX_REMOTE]
 /// actual sending (`pump_send`) is *not* done here - it runs once per
 /// event-loop wake so the health-ping stays promptly acked (see `serve`).
 #[allow(clippy::too_many_arguments)]
-fn handle_conn_segment(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, c: &mut TcpConn, dials: &mut [Option<DialConn>; MAX_DIAL], auth: &Auth, sessions: usize, runs: &[Option<RemoteConn>; MAX_REMOTE]) -> bool {
+fn handle_conn_segment(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, c: &mut TcpConn, dials: &mut [Option<DialConn>; MAX_DIAL], auth: &Auth, sessions: usize, runs: &[Option<RemoteConn>; MAX_REMOTE], held: &held::Held) -> bool {
     c.last_rx = now();
     // Track the peer's ACK (frees send window), count duplicate ACKs, and
     // update the advertised window.
@@ -3819,7 +3841,7 @@ fn handle_conn_segment(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, c: &mut TcpConn
         // export gateway (cluster Phase 1). Both stage a response in `c.prefix`
         // for pump_send to stream.
         if c.local_port == ninep_abi::NP_NET_PORT {
-            if handle_9p(c, request, dials, mac, auth, sessions, runs) {
+            if handle_9p(c, request, dials, mac, auth, sessions, runs, held) {
                 // An authentication failure on a keyed session, or a key
                 // offered where none may be: close with NO reply (ninep-abi,
                 // "Keyed sessions"). An RST rather than a FIN, so the client's
@@ -4101,7 +4123,8 @@ const DATA_INLINE: usize = syscall_abi::FS_DATA_MAX as usize;
 /// with a second caller for the keyed format, `build_9p_reply` stopped being
 /// inlined here and every export verb, signed ones included, peaked 1,760
 /// bytes deeper than on `main` (step 6's probe, per verb).
-fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX_DIAL], mac: &[u8; 6], auth: &Auth, sessions: usize, runs: &[Option<RemoteConn>; MAX_REMOTE]) -> bool {
+#[allow(clippy::too_many_arguments)]
+fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX_DIAL], mac: &[u8; 6], auth: &Auth, sessions: usize, runs: &[Option<RemoteConn>; MAX_REMOTE], held: &held::Held) -> bool {
     let first = !c.carried;
     c.carried = true;
     let (msg, proxy, seal, run) = if let Some(k) = c.keyed.as_mut() {
@@ -4115,7 +4138,7 @@ fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX
         // ends nothing would still justify the claim. Checked on every frame,
         // before the frame is verified, so no frame is served after the run
         // ends; the close is the refusal.
-        if matches!(k.run, Some(run) if !run_live(runs, run)) {
+        if matches!(k.run, Some(run) if !run_live(runs, held, run)) {
             return close_keyed(b"netd: 9p: keyed session: the run it was opened under has ended; closing\r\n");
         }
         let (seq, end) = match verify_keyed(k, request) {
@@ -4181,7 +4204,7 @@ fn handle_9p(c: &mut TcpConn, request: &[u8], dials: &mut [Option<DialConn>; MAX
     // user's own credential, and a compromised node can no longer act as a
     // user it does not hold the key of.
     let nonce = a.nonce;
-    let (proxy, run) = match admit(auth, &a, runs) {
+    let (proxy, run) = match admit(auth, &a, runs, held) {
         Ok(v) => v,
         Err(cause) => {
             // NOT deny_9p: that reports a key failure, and the signature
@@ -7185,7 +7208,7 @@ struct RunTag {
 /// 4. Unregistered: served on the machine's word, the credential unread. A
 ///    broken registry line is not "unregistered": refused.
 #[inline(never)]
-fn admit(auth: &Auth, a: &Authenticated, runs: &[Option<RemoteConn>; MAX_REMOTE]) -> Result<(Proxy, Option<RunTag>), Refused> {
+fn admit(auth: &Auth, a: &Authenticated, runs: &[Option<RemoteConn>; MAX_REMOTE], held: &held::Held) -> Result<(Proxy, Option<RunTag>), Refused> {
     if matches!(a.cred, Cred::Bad) {
         return Err(Refused::Credential);
     }
@@ -7224,7 +7247,7 @@ fn admit(auth: &Auth, a: &Authenticated, runs: &[Option<RemoteConn>; MAX_REMOTE]
             _ => Refused::BadCredential,
         },
     };
-    match run_in_flight(runs, &a.caller_key, &a.name) {
+    match run_in_flight(runs, held, &a.caller_key, &a.name) {
         Some(run) => Ok((p, Some(run))),
         None => Err(refused),
     }
@@ -7308,18 +7331,28 @@ fn user_sig_verifies(auth: &Auth, key: &[u8; clusterkeys::KEY_LEN], a: &Authenti
 /// has no anchor (all zeros) and lets nothing in. "In flight" is the parked
 /// slot: it is freed when the run ends, and with it the rule. At most one
 /// matches: `park_run` refuses a second run while one is in flight.
-fn run_in_flight(runs: &[Option<RemoteConn>; MAX_REMOTE], caller_key: &[u8; ninep_abi::NP_PUBKEY_LEN], name: &[u8; ninep_abi::NP_NAME_LEN]) -> Option<RunTag> {
+fn run_in_flight(runs: &[Option<RemoteConn>; MAX_REMOTE], held: &held::Held, caller_key: &[u8; ninep_abi::NP_PUBKEY_LEN], name: &[u8; ninep_abi::NP_NAME_LEN]) -> Option<RunTag> {
     runs.iter().flatten().filter_map(|r| r.parked.as_ref()).find_map(|pk| {
         let anchored = pk.expect_key != [0u8; clusterkeys::KEY_LEN];
-        (pk.verb == ninep_abi::NP_RUN && anchored && &pk.expect_key == caller_key && &pk.who == name)
+        (run_counts(pk, held) && anchored && &pk.expect_key == caller_key && &pk.who == name)
             .then_some(RunTag { caller: pk.caller, call: pk.call })
     })
 }
 
 /// Whether the run `tag` names is still in flight.
-fn run_live(runs: &[Option<RemoteConn>; MAX_REMOTE], tag: RunTag) -> bool {
+fn run_live(runs: &[Option<RemoteConn>; MAX_REMOTE], held: &held::Held, tag: RunTag) -> bool {
     runs.iter().flatten().filter_map(|r| r.parked.as_ref())
-        .any(|pk| pk.verb == ninep_abi::NP_RUN && pk.caller == tag.caller && pk.call == tag.call)
+        .any(|pk| run_counts(pk, held) && pk.caller == tag.caller && pk.call == tag.call)
+}
+
+/// Whether a parked request is a `cpu` run that still counts as in flight:
+/// one sent with its user's credential counts only while a live login holds
+/// that user's key (`Held::holds_live`, asked here, not after the idle pass),
+/// so Decision 7's window closes the moment the user goes, in the same pass
+/// (Hans, 2026-11-09). A run sent without one is unaffected: its user was
+/// never attested, and the far side served it on the machine's word.
+fn run_counts(pk: &Parked, held: &held::Held) -> bool {
+    pk.verb == ninep_abi::NP_RUN && !(pk.attested && !held.holds_live(pk.uid))
 }
 
 /// WHO a call to `fsd` is made on behalf of - a **required parameter** of every

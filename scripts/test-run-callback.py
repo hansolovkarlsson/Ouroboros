@@ -27,6 +27,10 @@ to the host). That gives every bound a check:
   credentialed one still serves;
 - the squash: a run as root to the UNFLAGGED machine, whose callback claims
   root, refused (a run never lifts the squash); to the flagged one, served.
+- the killed login: a run sent with `user`'s credential from a nested login
+  ends when that login is killed: the run's machine's claim of `user`,
+  served before the kill, is refused after it, and the guest closes the run
+  (Hans, 2026-11-09).
 
 And, since netd reads `/etc/cluster/users` per claim rather than once at
 boot, the registry edited live from the guest's root shell: a broken line for
@@ -131,7 +135,7 @@ def stat_on(s):
 # Every check the rig records on a full run. A thread that died, or a phase
 # that never ran, records fewer, and that is a failure: a rig that counts only
 # the FAILs it saw passes when its checks never ran.
-EXPECTED = 18
+EXPECTED = 22
 
 
 def stand_in(port, during, ready):
@@ -241,6 +245,79 @@ def user_run():
     return during, after
 
 
+def killed_login(g, prompt):
+    """A run ends with its user (Hans, 2026-11-09): logged in as `user` in a
+    nested shell, `cpu` to the flagged machine; while the stand-in holds the
+    run open, Ctrl+C hands the keyboard back to root, who kills that login.
+    The run went out with `user`'s credential, so from the kill on it no
+    longer counts as in flight: the run's machine's claim of `user`, served
+    before the kill, is refused after it, and the guest closes the run."""
+    g.run([("", "exec /bin/sh"), ("login:", ""), ("", "ps"), (prompt, "")])
+    tail = g.transcript().rsplit("ps", 1)[-1]
+    slots = [int(n) for n, st in re.findall(r"task (\d+): (blocked|runnable|running)", tail) if int(n) >= 6]
+    if not slots:
+        check("the killed login: a nested shell is running", False, "no task 6 or above in ps")
+        return
+    nested = max(slots)
+    if not g.run([("", f"fg {nested}"), ("", "user"), ("assword", "user"), (r"\$ ", "")]):
+        check("the killed login: `user` logs in on the nested shell", False, "timed out")
+        return
+    reached, killed, ready = threading.Event(), threading.Event(), threading.Event()
+
+    def stand():
+        ls = socket.socket()
+        ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        ls.bind(("127.0.0.1", FLAGGED))
+        ls.listen(1)
+        ready.set()
+        ls.settimeout(120)
+        try:
+            conn, _ = ls.accept()
+        except socket.timeout:
+            check("the killed login: the run reached the stand-in", False, "no connection in 120 s")
+            reached.set()
+            return
+        finally:
+            ls.close()
+        with conn:
+            conn.settimeout(15)
+            (n,) = struct.unpack("<I", _recv_exact(conn, 4))
+            body = _recv_exact(conn, n)
+            check("the killed login: the run carries `user`'s credential (AUTHNP05)",
+                  body[:8] == b"AUTHNP05"[::-1], f"magic {body[:8][::-1]!r}")
+            st, data = read(PRIVATE, HOST, b"user")
+            check("the killed login: before the kill, the run's machine's claim of `user` is served",
+                  st is not None and c.served(st) and data == PRIVATE_TEXT, shown(st, data))
+            reached.set()
+            if not killed.wait(90):
+                check("the killed login: the login was killed", False, "timed out")
+                return
+            st, data = read(PRIVATE, HOST, b"user")
+            check("the killed login: after the kill, the same claim is refused",
+                  st == c.FS_ERR_AUTH, shown(st, data))
+            conn.settimeout(10)
+            try:
+                closed = conn.recv(1) == b""
+                how = "closed (FIN)" if closed else "data arrived"
+            except ConnectionResetError:
+                closed, how = True, "reset (RST)"
+            except OSError as e:
+                closed, how = False, f"still open after 10 s ({type(e).__name__})"
+            check("the killed login: the guest ends the run", closed, how)
+
+    t = threading.Thread(target=stand, daemon=True)
+    t.start()
+    ready.wait(10)
+    g.type_line(f"cpu 10.0.2.2:{FLAGGED} id")
+    reached.wait(150)
+    # Ctrl+C detaches the nested shell to its parent, alive; root kills it.
+    g.type_raw(b"\x03")
+    if not g.run([(prompt, f"kill {nested}"), (prompt, "")]):
+        check("the killed login: root kills the nested login", False, "timed out")
+    killed.set()
+    t.join(timeout=60)
+
+
 def root_run(flagged):
     def during(claimed):
         check("the run carries root", claimed == b"root", f"claimed {claimed!r}")
@@ -312,6 +389,10 @@ def main():
                 # stand-in's FIN, which is where the run's park is freed.
                 after()
             if user == "root":
+                # Before the registry checks, which end with no registry: a
+                # killed login's run is only a window while `user` is
+                # registered (an unregistered claim is served regardless).
+                killed_login(g, prompt)
                 registry_checks(g, prompt)
             g.run([("", "exit")])
         alive = g.proc.poll() is None
