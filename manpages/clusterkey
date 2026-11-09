@@ -44,9 +44,16 @@ DESCRIPTION
     other nodes. A node with no realm derives no user keys, and logs in as it
     always did.
 
+    A user's key in the realm is registered at an export by a line in its
+    /etc/cluster/users (0600): "<name> <public key>". useradd and passwd
+    print the line for the password they set. An export serves a registered
+    user only with a request signed by that key, which a machine can make
+    only while the user is logged in on it; an unregistered user is served
+    on the machine's word. A new realm changes every key, so every line.
+
     held (root only) lists the users whose cluster keys netd holds right now:
-    login derives a user's key and hands it over, and logout drops it. It
-    names uids, never keys.
+    login derives a user's key and hands it over, netd signs that user's
+    requests with it, and logout drops it. It names uids, never keys.
 
 EXIT STATUS
     0   success
@@ -54,4 +61,5 @@ EXIT STATUS
     2   bad usage
 
 SEE ALSO
+    useradd, passwd, login - where a user's key is derived
     id - the calling task's user identity, a different thing entirely

@@ -1120,6 +1120,42 @@ test` exits 0. The probe's headroom: async 2,656, run-callback 2,992, gate
 5,360, cred-client 2,656 on both nodes, 48 bytes below the high review's
 tree on the client paths (the close loop in `park_session`).
 
+### Step 9's results (2026-11-09): docs, the registry line, the release
+
+**One thing in the plan was never built: the registry line.** Decision 9 has
+`useradd` and `passwd` print the `/etc/cluster/users` line for the password
+they set, and neither did, and no step owned it. Without it only the dev
+images, whose registry `mkclusterkeys.py` stages, could use the arc: a real
+admin had no way to learn a user's public key, which only the password
+gives. `clusterkeys::user_registry_line` derives it from the realm file,
+wipes the seed and formats the line; `useradd` prints it once the account
+exists, and `passwd` after a change, finding the caller's own name by uid
+when none is given. A node with no realm prints nothing. The line is a
+second derivation, another second on the guest.
+
+*Check:* `test-held-keys` gains `registry-lines`: the line `useradd` prints
+for a new user, and the lines `passwd` prints for root changing `user` and
+for `user` changing their own, each equal to the line `mkclusterkeys.py`'s
+independent Python derives, and with the realm removed, no line. A host test
+pins the helper to the dev registry's `user` line. *Controls:* `passwd`
+looking up uid 0 instead of the caller fails the own-name check; `passwd`
+deriving in the dev realm when there is no realm file fails the count. Both
+caught.
+
+**The docs.** The normative block's scope paragraph, the `NP_NAME_LEN` doc
+and a client rule (when to send `AUTHNP05`, and that a session opened with
+it ends with the user's key); `manual.md`'s trust section rewritten around
+the two rules, its strong-password paragraph and the realm and registry
+setup; `architecture.md`'s new key-agent section; the `login`, `passwd`,
+`useradd` and `clusterkey` man pages (`login`'s still described inline
+SHA-256 secrets and "no `passwd` yet"); `testing-qemu.md` and
+`make-targets.md` for the sixth scenario; the cluster roadmap's per-user and
+encryption items, the second with the offline-guessing exposure as a reason
+its trigger matters more; `comparison.md`, `gap-analysis.md`, `ROADMAP.md`
+item 1 and the site's two pages; the arc moved to `roadmap-completed.md`;
+and the changelog. The minor version, v0.25.0, is its own PR, as v0.24.0's
+was, and publishing it waits on Hans.
+
 ## Decisions
 
 Scored on the project's standing order: **stable, safe, and not blocking

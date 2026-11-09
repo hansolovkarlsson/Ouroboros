@@ -328,12 +328,16 @@ the FAT32 image once per scenario, drives the console, and reads `netd`'s
 table of held user keys FROM THE HOST between steps, with
 `np9p_client.py run "clusterkey held"` (the diagnostic runs on the guest as
 root through the export, so it needs no keyboard and can look while the boot
-shell sits at a login prompt). Five scenarios: a login holds the user's key and
+shell sits at a login prompt). Six scenarios: a login holds the user's key and
 a logout drops it; two logins of one user, one logs out and the other's key is
 still held, then that shell is killed and its key goes; `keyprobe` (an ordinary
 user's hold, list and drops, each refused) and a nested login started by a
 non-root shell, whose hold is refused; a fifth hold with four live keys is
-refused and that login still succeeds; and a node with no realm holds nothing.
+refused and that login still succeeds; a node with no realm holds nothing; and
+`registry-lines` (step 9): the `/etc/cluster/users` line `useradd` prints for a
+new user, and `passwd` for root changing `user`'s password and for `user`
+changing their own, each equal to the line `mkclusterkeys.py`'s independent
+Python derives, and none printed once the realm is removed.
 Transcripts land in `build/held-<scenario>.txt`.
 
 **The impersonation gate** (user-keys step 0, 2026-09-26): `impersonate-gate

@@ -326,20 +326,51 @@ root. Two consequences worth knowing:
   primary group only, so a file reachable *only* through a supplementary group is
   refused remotely and allowed locally.
 
-This is still auth at the **machine** level: a machine the cluster authorizes
-can claim any user who has an account on the exporting machine, so this
-protects you from the *users* of a machine you trust, not from a machine you
-don't. **Root is the exception (root squash):** a claim that resolves to uid 0
-or gid 0 on the exporting machine is refused unless that machine's
-`authorized` line for the peer ends with `root`. So a compromised machine is
-root only on the exports that chose to trust it with root, and every other
-account remains claimable. Per-user keys, which close the rest, are planned in
-`docs/roadmap/roadmap-user-keys.md`. It assumes a **trusted LAN** for the
-parts still deferred (a passive sniffer reads your files and can replay an
-observed one-shot request; encryption, replay protection for one-shot requests
-and per-user *keys* are gated behind a "leaving a trusted network" trigger on
-the roadmap). Don't expose an
-Ouroboros export to a genuinely hostile network yet.
+**Per-user keys: a user is vouched for by their own password.** On its own,
+the machine's signature lets a machine the cluster authorizes claim any user
+who has an account on the exporting machine. Two rules narrow that:
+
+- **Root squash.** A claim that resolves to uid 0 or gid 0 on the exporting
+  machine is refused unless that machine's `authorized` line for the peer ends
+  with `root`, or root is registered there (below) and the request carries
+  root's own credential.
+- **Registered users need their own credential.** Every user has a cluster
+  key, derived from their password and the cluster's **realm**. When they log
+  in, `login` derives it and hands it to `netd`, which holds it until they log
+  out. While it is held, their requests carry a second signature, made with
+  that key. An export that lists the user in `/etc/cluster/users` serves them
+  only with that signature. So a compromised machine can act as a registered
+  user only while that user is logged in on it, and at rest it has nothing to
+  steal but public keys and slow password hashes. A held connection opened
+  with the credential closes when the user logs out, and their programs
+  still running there are refused from then on.
+
+A user with **no** line in `/etc/cluster/users` is served on the machine's
+word, as before: registering a user at an export is what turns the check on
+for them there, so a mixed cluster works and nothing has to change at once.
+A `cpu` run is the one delegation: while machine B runs a command for you
+from A, A serves B's `/host` reads as you, until the run ends (never as root
+without the `root` flag).
+
+**Strong passwords are part of the cluster's model now.** A credential is a
+signature by a password-derived key, sent in cleartext. Anyone who captures
+one, anywhere it crosses, can test password guesses offline. The derivation
+is deliberately slow (about a second a guess on the QEMU guest) and the
+realm, unique to your cluster, stops a dictionary precomputed for one
+cluster serving another, but a weak password still falls. What a guessed
+password gives an outsider is your console login on machines where you use
+it, and to a compromised machine it gives your cluster identity. So choose a
+password nobody will guess, and use a realm of your own (`clusterkey realm
+new`), never the dev images' public `ouroboros-dev`.
+
+A user who logs in **on** a compromised machine is exposed: it sees the
+password as it is typed. No design without a trusted terminal can prevent
+that. The cluster also assumes a **trusted LAN** for the parts still
+deferred: a passive sniffer reads your files and can replay an observed
+one-shot request, and encryption and replay protection for one-shot
+requests are gated behind a "leaving a trusted network" trigger on the
+roadmap. Don't expose an Ouroboros export to a genuinely hostile network
+yet.
 
 **The built-in HTTP server is anonymous, and unprivileged.** `netd` also serves
 the disk over plain HTTP on port 80 (`make run-image-server`), which has no user
@@ -356,8 +387,8 @@ private one: it requires no key and no account.
 | `/etc/cluster/id.pub` | The public half, for pasting into a peer's `authorized`. `clusterkey` with no arguments prints it. |
 | `/etc/cluster/authorized` | The peers this machine accepts, one per line: `<name> <ipv4> <pubkey-hex> [root]`. A trailing `root` trusts that peer to act as root (uid or gid 0) here; without it the peer is refused as root and served as anyone else. Absent or empty ⇒ the export serves nobody. Comment a line out (or delete it) to **revoke** that peer. |
 | `/etc/cluster/realm` | The cluster's **realm**, one word of at most 32 bytes, the same on every node and unique to the cluster: half the salt every user key is derived with. `clusterkey realm new` generates one (refusing without entropy); copy it to the other nodes. Absent ⇒ this node derives no user keys, and local login is unaffected. The dev images stage the public `ouroboros-dev`. |
-| (held keys) | On a node with a realm, **`login` derives the user's cluster key** from the password (about a second on the QEMU guest, on top of the password check's second) and hands it to `netd`, which holds it until **logout**; a killed login shell's key goes within one pass of `netd`'s loop. `clusterkey held` (root) lists whose keys are held, never the keys. No realm, no key, and login is otherwise unchanged. |
-| `/etc/cluster/users` | The **user-key registry** (0600): `<name> <pubkey-hex>` per user whose remote claims will need their own credential here. Nothing reads it yet: the per-user keys arc (`docs/roadmap/roadmap-user-keys.md`) builds that in stages. The dev images register `user`. |
+| (held keys) | On a node with a realm, **`login` derives the user's cluster key** from the password (about a second on the QEMU guest, on top of the password check's second) and hands it to `netd`, which holds it until **logout** and signs that user's requests with it; a killed login's key is not used from the moment its shell is gone, and leaves the table within one pass of `netd`'s loop. `clusterkey held` (root) lists whose keys are held, never the keys. No realm, no key, and login is otherwise unchanged. |
+| `/etc/cluster/users` | The **user-key registry** (0600): `<name> <pubkey-hex>` per user whose remote claims need their own credential here. Absent or without a user's line ⇒ that user is served on the machine's word. `useradd` and `passwd` print the line for the password they set; put it on every export that should require it. A password change changes the key, so the line must be replaced everywhere it is listed, and the user is refused there until it is. A line that cannot be read refuses that user rather than serving them unchecked. The dev images register `user`. |
 | `\NOEXEC` | Presence-only flag: authenticated peers may still `mount -r` the disk, but every `cpu` (remote-exec) is refused. |
 
 In the QEMU images a dev identity is staged automatically
@@ -371,6 +402,21 @@ the other should hold, and paste it into that machine's
 accepts and flags a line that cannot work. Key generation **refuses without real
 entropy** rather than producing a guessable identity. See
 [`testing-qemu.md`](testing/testing-qemu.md) for which platforms have it.
+
+For per-user keys, run `clusterkey realm new` on one machine and copy its
+`/etc/cluster/realm` to every other, then create or re-set each user's
+password (`useradd`, or `passwd` for an existing account) so a key is
+derived in that realm. Each prints a line such as
+
+```
+useradd: to require this user's own key at an export, add this line to
+  /etc/cluster/users there:
+ann 3f5c...e21a
+```
+
+which goes into `/etc/cluster/users` on every export that should require
+it. Without a realm, a machine derives no keys and its users are served on
+the machine's word everywhere.
 
 ### Setting up two machines
 

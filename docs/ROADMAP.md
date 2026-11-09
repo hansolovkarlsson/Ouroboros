@@ -51,11 +51,10 @@ This document is the one to update first when direction changes.
 > plan: its step 0 on Parallels and steps 6 and 7 (Pi item 3 below). Pi
 > item 1, more than one partition in use, was finished on 2026-11-08 (#422,
 > #423, seen on the card) and moved to `roadmap-completed.md`. Per-user keys
-> steps 5 and 6, the wire and the Python peers, went in the same day, then
-> step 7, the export in `netd`, and step 8, `netd`'s client; step 9 (item 1),
-> the docs, rigs and release, is next by the roadmap, or the next Pi item.
-> Steps 7 and 8 belong in one release: between them a `user` on one guest is
-> refused at another's export.
+> (item 1) were finished on 2026-11-08 and 2026-11-09: the wire and the
+> Python peers, the export and the client in `netd` (#426 to #429), then
+> step 9, the docs and the registry line `useradd` and `passwd` print. They
+> belong in one release, v0.25.0, which waits on Hans's go-ahead.
 
 > **Released 2026-10-13: v0.23.0, multi-core, and DevTools's preprocessor
 > and editor run here** (#209 to #281, recorded in [`CHANGELOG.md`](CHANGELOG.md)
@@ -94,19 +93,25 @@ recovery, and grant/safecopy bulk IPC (all in
 So is the users/permissions arc, whose last item, per-user *cluster* identity,
 shipped 2026-08-31, and the per-machine-keypair arc that followed it
 ([`roadmap-cluster-keys.md`](roadmap/roadmap-cluster-keys.md)), which retired the shared
-cluster key entirely. What is left is the tier below: keys are per-*machine*,
-not per-*user*, which is item 1. In rough order of value (2 and 3 are what
+cluster key entirely. The tier below, per-*user* keys, was item 1 and is
+done (2026-11-09); what item 1 keeps is the auth server it was built to be
+the foundation for. In rough order of value (2 and 3 are what
 the microkernel arc itself still leaves open):
 
-1. **Per-user keys for the cluster.** **Planned 2026-09-26:
-   [`roadmap-user-keys.md`](roadmap/roadmap-user-keys.md)** (password-derived
-   keys held by `netd` while the user is logged in, root squash first, shaped as the foundation for the
-   auth server below). **Steps 0 to 4 on `main` 2026-09-27** (#170 to #174:
-   the impersonation gate, root squash, PBKDF2, the user key and realm, and
-   keys held by `netd` from login to logout). **Steps 5 and 6, the wire
-   (`AUTHNP05`) and both Python peers, 2026-11-08**, and **steps 7 and 8, the
-   export and the client in `netd`, the same day**; step 9, the docs, rigs
-   and release, is next. Per-user cluster *identity* shipped
+1. **Per-user keys for the cluster. DONE 2026-11-09
+   ([`roadmap-user-keys.md`](roadmap/roadmap-user-keys.md), recorded in
+   [`roadmap-completed.md`](roadmap-completed.md)).** A key derived from the
+   user's password, held by `netd` while the user is logged in, signs a
+   credential (`AUTHNP05`); an export serves a user it registers in
+   `/etc/cluster/users` only with it, and root only from a peer flagged
+   `root` or with root's own. Steps 0 to 4 on `main` 2026-09-27 (#170 to
+   #174), steps 5 to 8 2026-11-08 (#426 to #429), step 9 (the docs, the
+   registry line `useradd` and `passwd` print, and the release) 2026-11-09.
+   **What stays open:** an unregistered user is still the machine's to
+   claim; a captured credential can be guessed at offline until the
+   encryption tier; a `cpu` run whose login is killed goes on (Hans's
+   question in the plan's step 8 review); and the auth server below, which
+   would remove the hand-distributed registry. Per-user cluster *identity* shipped
    2026-08-31 (see [`CHANGELOG.md`](CHANGELOG.md) and
    [`unspellable-postmortem.md`](postmortems/unspellable-postmortem.md)): a remote request
    carries the requesting user's **name** inside the signature, the far side resolves
@@ -115,21 +120,14 @@ the microkernel arc itself still leaves open):
    an opt-in wrapper and a latch. `cpu` is covered too: `netd` assumes the
    mapped user's identity for the spawn, so a remote command inherits it.
 
-   **What is left is the tier below it: keys are per-machine, not per-user.**
-   The shared secret is gone: each machine has its own Ed25519 keypair and
-   authorizes peers by public key, so a member can be revoked by deleting a
-   line. But an authorized *machine* can still claim any user who has an account
-   on the export, **root included** (the export checks only that the name exists
-   there; `map_user` has no uid-0 case, and `fsd`'s root bypass applies). So the
-   model defends against the users of a trusted node, which is the real
-   exposure, but not against a compromised node: one is root on every export
-   that lists it. Per-user keys would close that, and the design forks are
-   real: whether each user gets a key or the machine key signs a per-user
-   credential; where those live (`/etc/cluster/keys/<name>`? a factotum-style
-   agent, as Plan 9 does it?); how a node learns a peer user's key without a
-   distribution mechanism this project does not have; and whether any of it is
-   worth building before Ouroboros leaves a trusted network, which is the
-   trigger the rest of the security tier already sits behind.
+   **As it stood before the plan** (kept for the evaluation below, which
+   argues from it): each machine had its own Ed25519 keypair, but an
+   authorized *machine* could claim any user who had an account on the
+   export, **root included**, so one compromised node was root on every
+   export that listed it. The design forks the plan settled were whether each
+   user gets a key or the machine key signs a per-user credential, where
+   those live, how a node learns a peer user's key, and whether any of it was
+   worth building before Ouroboros leaves a trusted network.
 
    **A designated auth server: the Plan 9 answer, evaluated 2026-08-31.** Hans
    asked whether one machine could be the cluster's identity master, with the
@@ -3165,10 +3163,9 @@ crate, plus creator-owned new inodes.
   promoted to "What's next" above on 2026-08-30** once `accountd` gave the hole
   a privileged writer on the far end. **Shipped 2026-08-31**: the export now
   carries the requesting user's name inside the signature and resolves it
-  through the far side's own `/etc/passwd`. What remains is the tier below:
-  the export authenticates the *machine* (its keypair), so an authorized
-  machine can still claim any user with an account on the export, root
-  included; see item 1 above.
+  through the far side's own `/etc/passwd`. The tier below, a machine's key
+  claiming any user, was closed for root (root squash) and for every user an
+  export registers (per-user keys, 2026-11-09); see item 1 above.
 - ~~**Symbolic-mode `chmod`** (`u+x`)~~ **shipped 2026-08-29** (`u+x`, `go-w`,
   `a=rx`, `u+rw,go+r`, copy-source `g=u`, conditional `X`, `s`/`t`; octal still
   works and stays absolute). A real `/etc/skel` for `useradd` **also shipped
@@ -3780,9 +3777,9 @@ would otherwise silently shrink into looking like nothing was ever found.
   `effective_caller` now REFUSES a `NET_TASK` request that states no identity
   rather than falling back to netd's root, and `netd`'s `AsUser::enter` makes a
   `cpu` child inherit the mapped user, so both doors below are shut. The
-  residual, that an authorized *machine* may still claim any user with an
-  account on the export, root included, is frontier item 1 above, not this
-  entry. The finding as originally
+  residual, that an authorized *machine* could claim any user with an account
+  on the export, was frontier item 1 above, closed 2026-11-09 for root and
+  every registered user. The finding as originally
   recorded, left in present tense rather than rewritten:
 
   `netd` relays a remote
