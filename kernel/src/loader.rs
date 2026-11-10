@@ -293,6 +293,40 @@ pub(crate) fn stack_area(base: u64, size: u64) -> (u64, u64) {
     tail(base, size).map_or((0, 0), |t| t.stack)
 }
 
+/// The byte a loaded program's whole stack holds before its first
+/// instruction ([`populate_region`] paints it), so the lowest address the
+/// program ever wrote can be found afterwards: [`stack_untouched`]. Zero
+/// would not do, though the region is zeroed anyway: a frame's zeroed buffer
+/// would read as never reached, and `netd`'s deepest frames hold several.
+/// A byte of this value written at the deepest point of a run is the one
+/// write the count cannot see.
+const STACK_PAINT: u8 = 0xA5;
+
+/// How many bytes at the low end of the stack in region `(base, size)` still
+/// hold [`STACK_PAINT`]: the stack the program has never written since it was
+/// loaded, its low-water headroom (`TASK_STACK_FREE`). `None` for a region
+/// with no stack (the idle task's page, an ended task's `(0, 0)`).
+///
+/// A count of writes, not of where the stack pointer went: a frame that
+/// reserved a buffer and never wrote its low end is counted only as deep as
+/// it wrote. Read with no lock on the task: on another core it may be
+/// writing its stack as this reads, and the answer is then the mark of a
+/// moment ago.
+///
+/// # Safety
+/// `(base, size)` must be a region [`populate_region`] loaded and nothing
+/// has freed, as a live task's `tasks::task_region` is.
+pub(crate) unsafe fn stack_untouched(base: u64, size: u64) -> Option<u64> {
+    let (stack_base, stack_size) = tail(base, size)?.stack;
+    let mut n = 0u64;
+    // SAFETY: the stack lies inside the region, which the caller holds
+    // loaded; a volatile read, since the task may be writing it.
+    while n < stack_size && unsafe { core::ptr::read_volatile((stack_base + n) as *const u8) } == STACK_PAINT {
+        n += 1;
+    }
+    Some(n)
+}
+
 /// The stack guard page's address for an EL0 region, or `None` for a
 /// region with no tail. `mmu.rs`'s `build_view` maps that one page
 /// EL1-only so a stack overflow into it faults cleanly. Lives here rather
@@ -990,6 +1024,12 @@ pub(crate) unsafe fn populate_region(
     // SAFETY: the region is `region_size` writable bytes, this function's
     // own contract.
     unsafe { core::ptr::write_bytes(region_base as *mut u8, 0, region_size as usize) };
+    // The stack painted over the zeros, for `stack_untouched`. Nothing is
+    // on it yet: the arguments reach a program by syscall, not on its stack.
+    if let Some(t) = tail(region_base, region_size) {
+        // SAFETY: the stack lies inside the region just zeroed.
+        unsafe { core::ptr::write_bytes(t.stack.0 as *mut u8, STACK_PAINT, t.stack.1 as usize) };
+    }
     // SAFETY: forwarded from this function's own contract.
     unsafe { copy_segments(program, phdrs, region_base, region_size)? };
 

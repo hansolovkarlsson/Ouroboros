@@ -14,18 +14,20 @@
 //! ```text
 //!   /              ->  cpus 0/ 1/ 2/ ... the cores file, then one dir per scheduler slot
 //!   /cpus          ->  "4\n"             how many cores take tasks (CORE_INFO_UP; since 2026-10-11)
-//!   /<n>           ->  state core        the slot's files
+//!   /<n>           ->  state core stackfree   the slot's files
 //!   /<n>/state     ->  "runnable\n" | "blocked\n" | "zombie\n" | "unused\n"
 //!   /<n>/core      ->  "1\n" | "none\n"   the core executing the task now (CORE_INFO_TASK_CORE; since 2026-10-11)
+//!   /<n>/stackfree ->  "2496\n" | "none\n"  the bytes of its stack the task has never written (TASK_STACK_FREE; since 2026-11-10)
 //! ```
 //!
 //! Every file here is generated at the instant it is read, and its size in a
-//! listing or a `stat` is that instant's too: `state` is 8 or 9 bytes and
-//! `core` 2 to 5 as the task moves, so a reader that sizes first and then
+//! listing or a `stat` is that instant's too: `state` is 8 or 9 bytes,
+//! `core` 2 to 5 as the task moves and `stackfree` shorter as the mark falls, so a reader that sizes first and then
 //! reads a moment later can read short. Read to the short read, as `cat` does.
 //!
 //! Read-only: every write/mutate method returns [`Error::ReadOnly`]. A slot
-//! exposes its scheduler state and the core executing it; a `name` file could
+//! exposes its scheduler state, the core executing it and its stack's
+//! low-water headroom; a `name` file could
 //! join them, since the kernel's `TASK_NAME` answers for any slot (the shell's
 //! `ps` reads it), and nobody has asked for one.
 //! `/cpus` is the first top-level entry with a name rather than a slot number:
@@ -53,17 +55,19 @@ enum Node {
     /// `/` - the set of task slots.
     Root,
     /// `/<n>` - one task slot's directory. `parse` has checked the slot
-    /// exists, and every slot's directory lists the same two files, so the
+    /// exists, and every slot's directory lists the same three files, so the
     /// number is not kept.
     Task,
     /// `/<n>/state` - the slot's state file.
     State(u64),
     /// `/<n>/core` - the core executing the slot's task now, or `none`.
     Core(u64),
+    /// `/<n>/stackfree` - the bytes of the slot's stack never written, or `none`.
+    StackFree(u64),
     /// `/cpus` - how many cores take tasks.
     Cpus,
     /// A path beneath one of the files (`/cpus/x`, `/<n>/state/x`,
-    /// `/<n>/core/x`): not a directory, as a path under a file answers on the
+    /// `/<n>/core/x`, `/<n>/stackfree/x`): not a directory, as a path under a file answers on the
     /// disk arms (the high reviews of #270 and #271).
     UnderFile,
     /// A path that resolves to nothing here.
@@ -113,13 +117,13 @@ impl Fs {
                 Ok(())
             }
             Node::Task => {
-                // A slot's directory holds `state` and `core`.
-                if f("state", false).is_continue() {
-                    let _ = f("core", false);
+                // A slot's directory holds `state`, `core` and `stackfree`.
+                if f("state", false).is_continue() && f("core", false).is_continue() {
+                    let _ = f("stackfree", false);
                 }
                 Ok(())
             }
-            Node::State(_) | Node::Core(_) | Node::Cpus | Node::UnderFile => Err(Error::NotADirectory),
+            Node::State(_) | Node::Core(_) | Node::StackFree(_) | Node::Cpus | Node::UnderFile => Err(Error::NotADirectory),
             Node::NotFound => Err(Error::NotFound),
         }
     }
@@ -211,6 +215,7 @@ fn file_bytes(node: &Node, buf: &mut [u8; LINE_MAX]) -> usize {
             bytes.len()
         }
         Node::Core(n) => core_bytes(*n, buf),
+        Node::StackFree(n) => stackfree_bytes(*n, buf),
         Node::Cpus => cpus_bytes(buf),
         // Not files; the callers' matches keep them out.
         Node::Root | Node::Task | Node::UnderFile | Node::NotFound => 0,
@@ -229,7 +234,7 @@ fn state_bytes(n: u64) -> &'static [u8] {
 }
 
 /// The most any file here holds: twenty digits and a newline for the
-/// decimal lines (`/cpus`, `/<n>/core`), more than `state`'s longest word.
+/// decimal lines (`/cpus`, `/<n>/core`, `/<n>/stackfree`), more than `state`'s longest word.
 /// The one buffer size every file is formatted into.
 const LINE_MAX: usize = 21;
 
@@ -241,7 +246,8 @@ fn cpus_bytes(buf: &mut [u8; LINE_MAX]) -> usize {
 }
 
 /// `v` as a decimal line, `"4\n"`, into `buf`; the length written. The one
-/// spelling of a synthetic file's number (`/cpus`, `/<n>/core`).
+/// spelling of a synthetic file's number (`/cpus`, `/<n>/core`,
+/// `/<n>/stackfree`).
 fn decimal_line(v: u64, buf: &mut [u8; LINE_MAX]) -> usize {
     let n = u64_decimal(v, &mut buf[..LINE_MAX - 1]);
     buf[n] = b'\n';
@@ -263,6 +269,21 @@ fn core_bytes(n: u64, buf: &mut [u8; LINE_MAX]) -> usize {
     }
 }
 
+/// The bytes of `/<n>/stackfree`: how many bytes of slot `n`'s stack its task
+/// has never written since it was loaded, from the kernel's
+/// `TASK_STACK_FREE`, or `none` for a slot with no stack (unused, a zombie,
+/// the idle task). The low-water mark of the whole run so far: it only
+/// falls, and what it counts and misses is said at the syscall.
+fn stackfree_bytes(n: u64, buf: &mut [u8; LINE_MAX]) -> usize {
+    match crate::syscall4::<{ syscall_abi::TASK_STACK_FREE }>(n, 0, 0, 0) {
+        syscall_abi::TASK_STACK_NONE => {
+            buf[..5].copy_from_slice(b"none\n");
+            5
+        }
+        free => decimal_line(free, buf),
+    }
+}
+
 /// Copy `src[offset..]` into `buf`, returning the byte count (0 at/past the end).
 fn copy_out(src: &[u8], offset: u64, buf: &mut [u8]) -> u32 {
     let off = offset as usize;
@@ -275,7 +296,8 @@ fn copy_out(src: &[u8], offset: u64, buf: &mut [u8]) -> u32 {
 }
 
 /// Parse a `/proc`-relative path (byte scanning; relocation-safe). Accepts `/`,
-/// `/cpus`, `/<digits>`, `/<digits>/state` and `/<digits>/core` for a slot the
+/// `/cpus`, `/<digits>`, `/<digits>/state`, `/<digits>/core` and
+/// `/<digits>/stackfree` for a slot the
 /// scheduler has; a path below any of the files is [`Node::UnderFile`] and
 /// anything else [`Node::NotFound`].
 fn parse(path: &str) -> Node {
@@ -327,7 +349,9 @@ fn parse(path: &str) -> Node {
         Node::State(n)
     } else if rest == b"core" {
         Node::Core(n)
-    } else if rest.starts_with(b"state/") || rest.starts_with(b"core/") {
+    } else if rest == b"stackfree" {
+        Node::StackFree(n)
+    } else if rest.starts_with(b"state/") || rest.starts_with(b"core/") || rest.starts_with(b"stackfree/") {
         Node::UnderFile
     } else {
         Node::NotFound
