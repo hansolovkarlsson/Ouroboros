@@ -1289,7 +1289,8 @@ refuses at the run itself. Where the executing machine does not register
 the user and the dispatching one does, the window lends that machine the
 user's standing on the dispatching machine's files, which root there, who
 started the run, holds already. The rule is about runs a user's key vouched for,
-and there is no key to lose for the others.
+and there is no key to lose for the others. Hans confirmed it the same day:
+an uncredentialed run stays as it is.
 
 ## Decisions
 
