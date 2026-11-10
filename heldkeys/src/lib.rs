@@ -22,7 +22,8 @@
 //! - **A dead owner's key goes** in the idle pass: an owner is alive while its
 //!   slot still holds the same packed identity and is not a zombie. Until then
 //!   it is held but never used: `seed_for` and `holds_live` ask liveness
-//!   themselves.
+//!   themselves, a list (`uids`) does not show it, and the next hold reaps it,
+//!   so the dead never fill the table against the living.
 //! - **Every seed is wiped** when its entry goes, whichever way it goes.
 //!
 //! What a held key means: while `user` is logged in here, anything running as
@@ -97,8 +98,11 @@ impl<T: Tasks> Held<T> {
 
     /// Hold `seed` for `uid` on behalf of `owner`, replacing any key `owner`
     /// already holds. `Some(handle)`, or `None` when every slot is another
-    /// owner's live key.
+    /// owner's live key: the dead are reaped here first, so a table full of
+    /// killed logins' keys does not refuse a live login in the wake that
+    /// killed them.
     pub fn hold(&mut self, uid: u32, seed: &[u8; 32], owner: u64) -> Option<usize> {
+        self.reap_dead();
         self.drop_mine(owner);
         let i = self.slots.iter().position(|s| s.is_none())?;
         self.slots[i] = Some(HeldKey { uid, seed: *seed, owner, seq: self.next });
@@ -174,16 +178,16 @@ impl<T: Tasks> Held<T> {
     /// ([`Held::at_send`]) where it would otherwise go out unattested and
     /// outlive its user.
     pub fn park_run(&self, uid: u32, anchored: bool) -> Standing {
-        Standing { uid, attested: anchored && self.holds_live(uid) }
+        Standing { uid, anchored, attested: anchored && self.holds_live(uid) }
     }
 
     /// What a parked request's signed frame carries, decided at the send for
     /// the uid its park recorded. A credential when a live login holds that
-    /// user's key and the export's key is known (`anchored`), and the
+    /// user's key and the export's key was known at the park, and the
     /// request is attested from then on; nothing when none is held; and a
     /// request attested at its park whose key has gone since is not sent.
-    pub fn at_send(&self, standing: &mut Standing, anchored: bool) -> AtSend<'_> {
-        match self.seed_of(standing, anchored) {
+    pub fn at_send(&self, standing: &mut Standing) -> AtSend<'_> {
+        match self.seed_of(standing) {
             Some(seed) => {
                 standing.attested = true;
                 AtSend::Credential(seed)
@@ -194,11 +198,17 @@ impl<T: Tasks> Held<T> {
     }
 
     /// The seed that signs for a parked request's user, if a live login
-    /// holds one and the export's key is known. The one way from a request
-    /// to a seed: there is none from a bare uid, so nothing outside a park
-    /// can name whose key signs.
-    pub fn seed_of(&self, standing: &Standing, anchored: bool) -> Option<&[u8; 32]> {
-        if !anchored {
+    /// holds one and the export's key was known at the park. For a frame
+    /// whose sending is already decided (a session's second phase, the verb
+    /// held behind an `NP_SESSION` that went out): it refuses nothing, which
+    /// is [`Held::at_send`]'s to do.
+    ///
+    /// Every way to a seed takes a [`Standing`], and none takes a uid. That
+    /// is a shape for review to hold, not a guarantee: a `Standing` can be
+    /// made wherever a uid is, so a `Standing::parked` outside a park is the
+    /// thing to look for.
+    pub fn seed_of(&self, standing: &Standing) -> Option<&[u8; 32]> {
+        if !standing.anchored {
             return None;
         }
         self.seed_for(standing.uid)
@@ -212,11 +222,13 @@ impl<T: Tasks> Held<T> {
         !standing.attested || self.holds_live(standing.uid)
     }
 
-    /// The uids with a key held, into `out`; returns how many (the diagnostic
-    /// `NETOP_KEY_LIST`). Never the keys.
+    /// The uids with a key held by a live login, into `out`; returns how many
+    /// (the diagnostic `NETOP_KEY_LIST`). Never the keys. A dead login's key
+    /// is not listed, reaped or not: a list answered in the wake of a kill
+    /// shows what signs, as `seed_for` reads it.
     pub fn uids(&self, out: &mut [u32; NET_KEY_MAX]) -> usize {
         let mut n = 0;
-        for k in self.slots.iter().flatten() {
+        for k in self.slots.iter().flatten().filter(|k| self.tasks.alive(k.owner)) {
             out[n] = k.uid;
             n += 1;
         }
@@ -226,23 +238,28 @@ impl<T: Tasks> Held<T> {
 
 /// Whose a parked request is, and whether that user's key vouches for it.
 ///
-/// Made at the park and nowhere else ([`Standing::parked`],
-/// [`Held::park_run`]), from the uid of the message being handled then. The
-/// send, which runs later in the same drain of the mailbox or in another,
-/// has only this to go by: it cannot ask who sent last, because nothing here
-/// takes a uid at the send (user-keys step 8, "the uid is captured at the
-/// park"; no driven boot could land another user's message between the two,
-/// so the rule had no check, and has this shape in its place).
+/// To be made at the park and nowhere else ([`Standing::parked`],
+/// [`Held::park_run`]), from the uid of the message being handled then and
+/// from whether the export's key is known. The send, which runs later in the
+/// same drain of the mailbox or in another, is given only this: nothing here
+/// takes a uid or an anchor at the send, so the park and the send cannot
+/// disagree on either (user-keys step 8, "the uid is captured at the park";
+/// no driven boot could land another user's message between the two, so the
+/// rule had no check, and has this shape in its place). The type cannot stop
+/// one being made elsewhere; see [`Held::seed_of`].
 pub struct Standing {
     uid: u32,
+    /// The export's key was known at the park: there is something to bind a
+    /// credential to.
+    anchored: bool,
     attested: bool,
 }
 
 impl Standing {
     /// A park of anything but a run: not attested until its send carries a
     /// credential.
-    pub const fn parked(uid: u32) -> Self {
-        Standing { uid, attested: false }
+    pub const fn parked(uid: u32, anchored: bool) -> Self {
+        Standing { uid, anchored, attested: false }
     }
 
     /// The uid the park recorded.
@@ -269,9 +286,11 @@ pub enum AtSend<'a> {
 
 /// Whether a run is cut short here because its user has gone: it no longer
 /// stands, and it has not finished in this same pass. A run that finished is
-/// complete, whatever became of its user since, and is told nothing more.
-pub const fn cut_short(finished: bool, stands: bool) -> bool {
-    !finished && !stands
+/// complete, whatever became of its user since, and is told nothing more;
+/// `stands` is not asked for it, since asking costs the kernel's answer for
+/// each of the user's keys.
+pub fn cut_short(finished: bool, stands: impl FnOnce() -> bool) -> bool {
+    !finished && !stands()
 }
 
 /// End a cut-short run's output with `note`, returning the new length. The
@@ -325,12 +344,27 @@ mod tests {
         assert!(h.holds_live(USER));
 
         dead.borrow_mut().insert(LOGIN_A);
-        assert_eq!(uids(&h), [USER], "not reaped yet: the key is still in the table");
+        assert!(h.slots.iter().flatten().any(|k| k.uid == USER), "not reaped yet: the key is still in the table");
         assert_eq!(h.seed_for(USER), None, "a dead login's key signed");
         assert!(!h.holds_live(USER), "a dead login's key counted as held");
+        assert_eq!(uids(&h), [] as [u32; 0], "a dead login's key was listed");
 
         h.reap_dead();
-        assert_eq!(uids(&h), [] as [u32; 0]);
+        assert!(h.slots.iter().all(|k| k.is_none()));
+    }
+
+    /// A table full of dead logins' keys, none reaped: a live login is held
+    /// all the same, and the dead ones' seeds are gone with their entries.
+    #[test]
+    fn a_table_full_of_the_dead_takes_a_live_login() {
+        let dead = RefCell::new(BTreeSet::new());
+        let mut h = Held::new(Dead(&dead));
+        for i in 0..NET_KEY_MAX as u64 {
+            h.hold(GUEST, &[i as u8; 32], (1 << 8) | (10 + i)).unwrap();
+            dead.borrow_mut().insert((1 << 8) | (10 + i));
+        }
+        assert!(h.hold(USER, &[7; 32], LOGIN_A).is_some(), "the dead refused the living");
+        assert_eq!(uids(&h), [USER]);
     }
 
     /// One user's death is not another's: the dead login's uid loses its
@@ -458,7 +492,7 @@ mod tests {
         assert!(run.attested());
 
         dead.borrow_mut().insert(LOGIN_A);
-        assert_eq!(h.at_send(&mut run, true), AtSend::Refused);
+        assert_eq!(h.at_send(&mut run), AtSend::Refused);
         assert!(run.attested(), "the refusal is read as a run's, by this flag");
         assert!(!h.stands(&run));
     }
@@ -471,7 +505,7 @@ mod tests {
         h.hold(USER, &[1; 32], LOGIN_A).unwrap();
         let mut run = h.park_run(USER, true);
         h.drop_mine(LOGIN_A);
-        assert_eq!(h.at_send(&mut run, true), AtSend::Refused);
+        assert_eq!(h.at_send(&mut run), AtSend::Refused);
     }
 
     /// A run parked with no key held was never its user's key's to vouch
@@ -483,13 +517,13 @@ mod tests {
         let mut h = Held::new(Dead(&dead));
         let mut run = h.park_run(USER, true);
         assert!(!run.attested());
-        assert_eq!(h.at_send(&mut run, true), AtSend::Bare);
+        assert_eq!(h.at_send(&mut run), AtSend::Bare);
         assert!(!run.attested());
         assert!(h.stands(&run));
 
         let mut later = h.park_run(USER, true);
         h.hold(USER, &[3; 32], LOGIN_A).unwrap();
-        assert_eq!(h.at_send(&mut later, true), AtSend::Credential(&[3; 32]));
+        assert_eq!(h.at_send(&mut later), AtSend::Credential(&[3; 32]));
         assert!(later.attested());
     }
 
@@ -503,8 +537,8 @@ mod tests {
         h.hold(USER, &[1; 32], LOGIN_A).unwrap();
         let mut run = h.park_run(USER, false);
         assert!(!run.attested());
-        assert_eq!(h.at_send(&mut run, false), AtSend::Bare);
-        assert_eq!(h.seed_of(&run, false), None);
+        assert_eq!(h.at_send(&mut run), AtSend::Bare);
+        assert_eq!(h.seed_of(&run), None);
         assert!(!run.attested());
     }
 
@@ -515,9 +549,9 @@ mod tests {
         let dead = RefCell::new(BTreeSet::new());
         let mut h = Held::new(Dead(&dead));
         h.hold(USER, &[1; 32], LOGIN_A).unwrap();
-        let mut verb = Standing::parked(USER);
+        let mut verb = Standing::parked(USER, true);
         assert!(!verb.attested());
-        assert_eq!(h.at_send(&mut verb, true), AtSend::Credential(&[1; 32]));
+        assert_eq!(h.at_send(&mut verb), AtSend::Credential(&[1; 32]));
         assert!(verb.attested());
         assert!(h.stands(&verb));
         dead.borrow_mut().insert(LOGIN_A);
@@ -532,15 +566,15 @@ mod tests {
     fn the_key_that_signs_is_the_parked_uids() {
         let dead = RefCell::new(BTreeSet::new());
         let mut h = Held::new(Dead(&dead));
-        let mut user = Standing::parked(USER);
-        let mut guest = Standing::parked(GUEST);
-        let mut root = Standing::parked(0);
+        let mut user = Standing::parked(USER, true);
+        let mut guest = Standing::parked(GUEST, true);
+        let mut root = Standing::parked(0, true);
         h.hold(USER, &[1; 32], LOGIN_A).unwrap();
         h.hold(0, &[9; 32], LOGIN_B).unwrap();
-        assert_eq!(h.at_send(&mut user, true), AtSend::Credential(&[1; 32]));
-        assert_eq!(h.at_send(&mut root, true), AtSend::Credential(&[9; 32]));
-        assert_eq!(h.at_send(&mut guest, true), AtSend::Bare);
-        assert_eq!(h.seed_of(&user, true), Some(&[1; 32]));
+        assert_eq!(h.at_send(&mut user), AtSend::Credential(&[1; 32]));
+        assert_eq!(h.at_send(&mut root), AtSend::Credential(&[9; 32]));
+        assert_eq!(h.at_send(&mut guest), AtSend::Bare);
+        assert_eq!(h.seed_of(&user), Some(&[1; 32]));
         assert_eq!(user.uid(), USER);
     }
 
@@ -548,10 +582,29 @@ mod tests {
     /// no note; one still running is cut short; one that stands is neither.
     #[test]
     fn only_an_unfinished_run_is_cut_short() {
-        assert!(!cut_short(true, false), "a finished run was told it was ended");
-        assert!(cut_short(false, false));
-        assert!(!cut_short(false, true));
-        assert!(!cut_short(true, true));
+        assert!(!cut_short(true, || false), "a finished run was told it was ended");
+        assert!(cut_short(false, || false));
+        assert!(!cut_short(false, || true));
+        assert!(!cut_short(true, || true));
+    }
+
+    /// A finished run's standing is not asked at all.
+    #[test]
+    fn a_finished_run_asks_nothing() {
+        assert!(!cut_short(true, || panic!("a finished run's standing was asked")));
+    }
+
+    /// An ordinary park with no known export key carries no credential, key
+    /// held or not, and is not marked attested by its send.
+    #[test]
+    fn an_unanchored_park_goes_bare() {
+        let dead = RefCell::new(BTreeSet::new());
+        let mut h = Held::new(Dead(&dead));
+        h.hold(USER, &[1; 32], LOGIN_A).unwrap();
+        let mut verb = Standing::parked(USER, false);
+        assert_eq!(h.at_send(&mut verb), AtSend::Bare);
+        assert!(!verb.attested());
+        assert_eq!(h.seed_of(&verb), None);
     }
 
     #[test]

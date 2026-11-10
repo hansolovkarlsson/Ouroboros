@@ -3761,8 +3761,9 @@ would otherwise silently shrink into looking like nothing was ever found.
       until it exits. **A follow-up it names:** a `KILL` that takes a packed
       identity, which the kernel already keeps (`DOOMED`), would close the
       two-syscall window in `kill_run_child` and in any later caller; and
-      `kill_run_child`'s identity test is the second copy in `netd` of
-      `held.rs`'s `alive`, to be one once the `heldkeys` crate has merged.
+      `kill_run_child`'s identity test reads like a second copy of
+      `held.rs`'s `alive`, and is not one: `alive` refuses a zombie, which
+      holds no key, and the kill must reach one, to reap it. They stay two.
     - **No zero-window persist timer** (RFC 1122 4.2.2.17). Nothing probes a
       receiver that shuts its window, so nothing elicits the update that would
       reopen it: with the window shut the first RTO expiry's `rewind_to` drives

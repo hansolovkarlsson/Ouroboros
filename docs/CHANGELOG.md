@@ -43,9 +43,10 @@ moment inside one pass of `netd`'s event loop that no driven boot can reach:
 a dead login's key signing before the idle pass reaps it, a run whose key
 goes between its park and its send, and a credential signed for whoever
 sent last. The table and those decisions are now the `heldkeys` crate, pure,
-with task liveness passed in, and `make test` runs its eighteen tests. A
-parked request's uid and attested flag became one `Standing`, made only at a
-park, and no seed can be had from a bare uid. No behaviour changed.
+with task liveness passed in, and `make test` runs its twenty-one tests. A
+parked request's uid, its anchor and its attested flag became one
+`Standing`, made at the park, and every way to a seed takes one; that a
+`Standing` is made nowhere else is review's to hold. No behaviour changed.
 
 ## v0.25.0: per-user keys for the cluster (2026-11-09)
 

@@ -834,12 +834,10 @@ fn key_op(req: &[u8], held: &mut held::Held, r: &mut [u8]) -> usize {
     let has_task = task != syscall_abi::GET_ID_ERR;
     let uid = if id == syscall_abi::GET_ID_ERR { u32::MAX } else { (id & 0xffff_ffff) as u32 };
     let op = read_u64(req, 0);
-    // Reap dead owners FIRST for a hold and a list: a list answered in the same
-    // wake as a kill must not show the dead login's key, and a table full of
-    // dead owners' keys must not refuse a live login.
-    if op == syscall_abi::NETOP_KEY_HOLD || op == syscall_abi::NETOP_KEY_LIST {
-        held.reap_dead();
-    }
+    // A list answered in the same wake as a kill does not show the dead
+    // login's key, and a table full of dead owners' keys does not refuse a
+    // live login: `heldkeys` asks liveness in `uids` and reaps in `hold`,
+    // where its tests hold both.
     match op {
         syscall_abi::NETOP_KEY_HOLD => {
             if !is_root || !has_task {
@@ -1696,7 +1694,7 @@ fn park_run(packed_mac: u64, call: u64, buf: &[u8], len: usize, out: &mut [u8], 
     // the run decision): the run is theirs from the moment they typed `cpu`,
     // so a key lost before the send ends it, rather than letting it go out
     // unattested and outlive them (`sign_parked`).
-    let standing = held.park_run(uid, anchor != [0u8; clusterkeys::KEY_LEN]);
+    let standing = held.park_run(uid, anchored(&anchor));
     match park_remote(&dst_mac, ip, port, ninep_abi::NP_RUN, owner, call, &who, standing, &np[..hdr + clen], anchor, remotes) {
         Ok(()) => None,
         Err(msg) => fail(out, msg),
@@ -1886,7 +1884,7 @@ fn park_session(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, uid: u32, verb: u64, 
         // parked at `now()` would answer FS_ERROR and destroy a live session's
         // fids over a peer that was never asked (review of #152). This is the
         // same rule, and the same reason, as `park_rmount`'s.
-        s.parked = Some(Parked { caller, call, nonce: [0; ninep_abi::NP_NONCE_LEN], expect_key, since: 0, who: *who, standing: heldkeys::Standing::parked(uid), verb, opening: false, raw });
+        s.parked = Some(Parked { caller, call, nonce: [0; ninep_abi::NP_NONCE_LEN], expect_key, since: 0, who: *who, standing: heldkeys::Standing::parked(uid, anchored(&expect_key)), verb, opening: false, raw });
         return Ok(());
     }
     let Some(slot) = sessions.iter().position(|s| s.is_none()) else {
@@ -1913,7 +1911,7 @@ fn park_session(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, uid: u32, verb: u64, 
     s.state = DialState::Connecting; // the pump sends the SYN
     // since = 0: the deadline clock starts at the first SYN send, in
     // `pump_dials`, for the reason `park_rmount` gives.
-    s.parked = Some(Parked { caller, call, nonce: [0; ninep_abi::NP_NONCE_LEN], expect_key, since: 0, who: *who, standing: heldkeys::Standing::parked(uid), verb, opening: true, raw: SESSION_LEN as u16 });
+    s.parked = Some(Parked { caller, call, nonce: [0; ninep_abi::NP_NONCE_LEN], expect_key, since: 0, who: *who, standing: heldkeys::Standing::parked(uid, anchored(&expect_key)), verb, opening: true, raw: SESSION_LEN as u16 });
     Ok(())
 }
 
@@ -2063,7 +2061,7 @@ fn park_rmount(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, verb: u64, caller: u64
     // the run to return (review of #149). Once the SYN goes out, it ages
     // normally. (A park whose SYN is sent and is THEN starved by a long run can
     // still age; that residual closes at step 3, which removes the run drain.)
-    wire.parked = Some(Parked { caller, call, nonce: [0; ninep_abi::NP_NONCE_LEN], expect_key, since: 0, who: *who, standing: heldkeys::Standing::parked(uid), verb, opening: false, raw });
+    wire.parked = Some(Parked { caller, call, nonce: [0; ninep_abi::NP_NONCE_LEN], expect_key, since: 0, who: *who, standing: heldkeys::Standing::parked(uid, anchored(&expect_key)), verb, opening: false, raw });
     Ok(())
 }
 
@@ -2174,7 +2172,7 @@ fn service_remotes<const S: usize, const H: usize, const K: usize>(remotes: &mut
             // nothing more. The note always fits: where the output has filled
             // `RUN_OUT_MAX` it replaces the output's tail, since a run cut off
             // with no reason given reads as one that ended on its own.
-            let unheld = heldkeys::cut_short(finished, run_counts(c.parked.as_ref().unwrap(), held));
+            let unheld = heldkeys::cut_short(finished, || run_counts(c.parked.as_ref().unwrap(), held));
             if unheld {
                 p.len = heldkeys::end_with_note(&mut p.buf, p.len, RUN_UNHELD_NOTE);
             }
@@ -2893,8 +2891,8 @@ struct Parked {
     /// (`heldkeys::Standing`): the caller's uid (`SENDER_ID`), captured at
     /// the park beside `who`, the name it resolved to, and the flag below.
     /// The credential is signed with the key held for THIS uid (user-keys
-    /// step 8), and the type gives the send nothing else to ask: no seed
-    /// comes from a bare uid, so whoever sent last cannot be signed for.
+    /// step 8), and the send is given nothing else to ask with: every way
+    /// to a seed takes this, made here at the park, and none takes a uid.
     ///
     /// Attested: the request went out with the user's credential
     /// (`sign_parked`). Read for a `cpu` run alone: an attested run is in
@@ -2993,7 +2991,7 @@ fn sign_parked<const S: usize, const R: usize, const H: usize, const K: usize>(c
     // The credential is for the uid the park recorded, and a run attested at
     // the park whose user's key went before the send is not sent: unattested,
     // it would outlive them (`run_counts`). Both rules are `heldkeys`'.
-    let cred = match held.at_send(&mut pk.standing, anchored(&pk.expect_key)) {
+    let cred = match held.at_send(&mut pk.standing) {
         heldkeys::AtSend::Credential(seed) => Some(UserCred { seed, export: &pk.expect_key }),
         heldkeys::AtSend::Bare => None,
         heldkeys::AtSend::Refused => {
@@ -5132,7 +5130,7 @@ struct UserCred<'a> {
 /// run to an address no `authorized` line names, whose export key is unknown
 /// (all zeros: `park_run`'s "no anchor").
 fn user_cred<'a>(held: &'a held::Held, standing: &heldkeys::Standing, export: &'a [u8; clusterkeys::KEY_LEN]) -> Option<UserCred<'a>> {
-    held.seed_of(standing, anchored(export)).map(|seed| UserCred { seed, export })
+    held.seed_of(standing).map(|seed| UserCred { seed, export })
 }
 
 /// Whether an export's key is known: all zeros is `park_run`'s "no anchor",
@@ -7411,8 +7409,7 @@ fn user_sig_verifies(auth: &Auth, key: &[u8; clusterkeys::KEY_LEN], a: &Authenti
 /// matches: `park_run` refuses a second run while one is in flight.
 fn run_in_flight(runs: &[Option<RemoteConn>; MAX_REMOTE], held: &held::Held, caller_key: &[u8; ninep_abi::NP_PUBKEY_LEN], name: &[u8; ninep_abi::NP_NAME_LEN]) -> Option<RunTag> {
     runs.iter().flatten().filter_map(|r| r.parked.as_ref()).find_map(|pk| {
-        let anchored = pk.expect_key != [0u8; clusterkeys::KEY_LEN];
-        (run_counts(pk, held) && anchored && &pk.expect_key == caller_key && &pk.who == name)
+        (run_counts(pk, held) && anchored(&pk.expect_key) && &pk.expect_key == caller_key && &pk.who == name)
             .then_some(RunTag { caller: pk.caller, call: pk.call })
     })
 }
