@@ -61,8 +61,10 @@ included. Now:
 Graded by `make test-held-keys`, `make test-run-callback`, `make
 test-cred-client`, `impersonate-gate 7` and the wire and peer checks in
 `make test`, each with the mutation controls the plan records. Open from it,
-in `ROADMAP.md`'s item 1: the auth server it was shaped for, and Hans's
-question whether a `cpu` run should end when its login is killed.
+in `ROADMAP.md`'s item 1: the auth server it was shaped for. Hans's two
+questions from step 8 were settled the same day (#433): a `cpu` run sent
+with the user's credential ends with their last key, and the 684-byte limit
+on a credentialed fid verb stands.
 
 ## More than one partition in use, and mounts seen ✅ DONE (2026-11-08)
 

@@ -11,7 +11,7 @@ here actually works today, see [`architecture.md`](architecture.md) and
 
 **Not yet released.** Changes since v0.25.0, drafted as they land.
 
-**A `cpu` run ends with its user (2026-11-09).** A run sent with the user's
+**A `cpu` run ends with its user (2026-11-09, #433).** A run sent with the user's
 credential counted as in flight until it finished, so if the user's login
 was killed while it ran, the dispatching node went on serving the
 executing machine's `/host` reads as that user (Decision 7's window). Hans
@@ -19,8 +19,10 @@ decided it closes with the user, as their sessions do: the run counts as in
 flight only while a live login holds the user's key, and ends when the last
 one goes, its caller given the output so far and a line saying why. The
 command on the far machine is not stopped, since a peer's close reaps no
-child there; its `/host` reads are refused. `make test-run-callback` gains
-the killed login. The other open question, the 684-byte limit on a
+child there; its `/host` reads are refused. A run whose user logs out
+after typing `cpu` but before it is sent is not sent, with the same line. A
+run sent without a credential (no realm, or root's `su`) lasts until it
+ends, as before. `make test-run-callback` gains the killed login. The other open question, the 684-byte limit on a
 credentialed fid verb, was answered too: it stands, since `fsd` refuses
 any fid path over 96 bytes, so no request it refuses would be served.
 
