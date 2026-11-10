@@ -7,6 +7,23 @@ what broke, how it was diagnosed), see the debugging postmortems under `docs/pos
 here actually works today, see [`architecture.md`](architecture.md) and
 [`processes.md`](processes.md).
 
+## Unreleased
+
+**Not yet released.** Changes since v0.25.0, drafted as they land.
+
+**A `cpu` run ends with its user (2026-11-09).** A run sent with the user's
+credential counted as in flight until it finished, so if the user's login
+was killed while it ran, the dispatching node went on serving the
+executing machine's `/host` reads as that user (Decision 7's window). Hans
+decided it closes with the user, as their sessions do: the run counts as in
+flight only while a live login holds the user's key, and ends when the last
+one goes, its caller given the output so far and a line saying why. The
+command on the far machine is not stopped, since a peer's close reaps no
+child there; its `/host` reads are refused. `make test-run-callback` gains
+the killed login. The other open question, the 684-byte limit on a
+credentialed fid verb, was answered too: it stands, since `fsd` refuses
+any fid path over 96 bytes, so no request it refuses would be served.
+
 ## v0.25.0: per-user keys for the cluster (2026-11-09)
 
 Fifteen pull requests over three days, 2026-11-07 to 2026-11-09, #416 to

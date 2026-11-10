@@ -838,7 +838,10 @@ pub const NP_REMOTE_CHUNK: usize = 512;
 //      verifies. A run in flight (rule 2) never lifts this.
 //   2. A claim of user U from machine A while this export has an `NP_RUN` as
 //      U in flight to A (Decision 7, a `cpu` child's `/host` reads): served on
-//      the machine's word until that run ends, the credential unread. A keyed
+//      the machine's word until that run ends, the credential unread. A run
+//      sent with U's credential is in flight only while U is held on this
+//      node (a live login holds U's key): the client ends it when U's last
+//      key goes, as it closes U's sessions. A keyed
 //      session that ONLY this rule lets open (rules 3 and 4 would refuse it)
 //      is bound to the run: the export closes it when the run ends, since its
 //      keyed frames carry no credential to re-check and would otherwise
