@@ -30,6 +30,12 @@
 //! this node can do already; what the plan closes is a node acting for users
 //! who are NOT logged in on it.
 //!
+//! Since step 8 the table also says what a parked request may do with a
+//! key: [`Standing`] is whose request it is, made at the park; [`Held::at_send`]
+//! is the credential its frame carries, or that it is not sent; and
+//! [`Held::stands`] is whether a run sent under a credential is still its
+//! user's. [`cut_short`] and [`end_with_note`] are how such a run ends here.
+//!
 //! **A crate of its own since 2026-11-10**, moved out of `netd`'s `held.rs`.
 //! The table asked the kernel itself whether an owner was alive, so nothing
 //! but a booted `netd` could run it, and no driven boot can place a request
@@ -146,7 +152,7 @@ impl<T: Tasks> Held<T> {
     /// step 8). A dead login's key is not used, though the idle pass has not
     /// reaped it yet: a killed login's user is not attested by it (medium
     /// review of step 8).
-    pub fn seed_for(&self, uid: u32) -> Option<&[u8; 32]> {
+    fn seed_for(&self, uid: u32) -> Option<&[u8; 32]> {
         self.slots.iter().flatten().filter(|k| k.uid == uid && self.tasks.alive(k.owner)).max_by_key(|k| k.seq).map(|k| &k.seed)
     }
 
@@ -161,6 +167,51 @@ impl<T: Tasks> Held<T> {
         self.seed_for(uid).is_some()
     }
 
+    /// A `cpu` run's park: the run is its user's from the moment they typed
+    /// `cpu`, so it is attested from here on if a key is held for them now
+    /// and the machine dialled has a known key to bind the credential to
+    /// (`anchored`). A key lost before the send then ends the run
+    /// ([`Held::at_send`]) where it would otherwise go out unattested and
+    /// outlive its user.
+    pub fn park_run(&self, uid: u32, anchored: bool) -> Standing {
+        Standing { uid, attested: anchored && self.holds_live(uid) }
+    }
+
+    /// What a parked request's signed frame carries, decided at the send for
+    /// the uid its park recorded. A credential when a live login holds that
+    /// user's key and the export's key is known (`anchored`), and the
+    /// request is attested from then on; nothing when none is held; and a
+    /// request attested at its park whose key has gone since is not sent.
+    pub fn at_send(&self, standing: &mut Standing, anchored: bool) -> AtSend<'_> {
+        match self.seed_of(standing, anchored) {
+            Some(seed) => {
+                standing.attested = true;
+                AtSend::Credential(seed)
+            }
+            None if standing.attested => AtSend::Refused,
+            None => AtSend::Bare,
+        }
+    }
+
+    /// The seed that signs for a parked request's user, if a live login
+    /// holds one and the export's key is known. The one way from a request
+    /// to a seed: there is none from a bare uid, so nothing outside a park
+    /// can name whose key signs.
+    pub fn seed_of(&self, standing: &Standing, anchored: bool) -> Option<&[u8; 32]> {
+        if !anchored {
+            return None;
+        }
+        self.seed_for(standing.uid)
+    }
+
+    /// Whether a parked request still stands: one that went out, or was
+    /// parked, under its user's credential stands only while a live login
+    /// holds that user's key, asked now and not after the idle pass. One
+    /// never attested stands whatever is held: nobody's key vouched for it.
+    pub fn stands(&self, standing: &Standing) -> bool {
+        !standing.attested || self.holds_live(standing.uid)
+    }
+
     /// The uids with a key held, into `out`; returns how many (the diagnostic
     /// `NETOP_KEY_LIST`). Never the keys.
     pub fn uids(&self, out: &mut [u32; NET_KEY_MAX]) -> usize {
@@ -171,6 +222,68 @@ impl<T: Tasks> Held<T> {
         }
         n
     }
+}
+
+/// Whose a parked request is, and whether that user's key vouches for it.
+///
+/// Made at the park and nowhere else ([`Standing::parked`],
+/// [`Held::park_run`]), from the uid of the message being handled then. The
+/// send, which runs later in the same drain of the mailbox or in another,
+/// has only this to go by: it cannot ask who sent last, because nothing here
+/// takes a uid at the send (user-keys step 8, "the uid is captured at the
+/// park"; no driven boot could land another user's message between the two,
+/// so the rule had no check, and has this shape in its place).
+pub struct Standing {
+    uid: u32,
+    attested: bool,
+}
+
+impl Standing {
+    /// A park of anything but a run: not attested until its send carries a
+    /// credential.
+    pub const fn parked(uid: u32) -> Self {
+        Standing { uid, attested: false }
+    }
+
+    /// The uid the park recorded.
+    pub const fn uid(&self) -> u32 {
+        self.uid
+    }
+
+    /// Whether the request was parked, or sent, under its user's credential.
+    pub const fn attested(&self) -> bool {
+        self.attested
+    }
+}
+
+/// [`Held::at_send`]'s answer.
+#[derive(Debug, PartialEq, Eq)]
+pub enum AtSend<'a> {
+    /// Sign the user's credential with this seed.
+    Credential(&'a [u8; 32]),
+    /// No key is held for the user: the frame goes on the machine's word.
+    Bare,
+    /// Attested at the park and the key has gone: do not send.
+    Refused,
+}
+
+/// Whether a run is cut short here because its user has gone: it no longer
+/// stands, and it has not finished in this same pass. A run that finished is
+/// complete, whatever became of its user since, and is told nothing more.
+pub const fn cut_short(finished: bool, stands: bool) -> bool {
+    !finished && !stands
+}
+
+/// End a cut-short run's output with `note`, returning the new length. The
+/// note always fits: where the output has filled `out` it replaces the
+/// output's tail, since a run cut off with no reason given reads as one that
+/// ended on its own. `note` is no longer than `out` (the caller asserts it at
+/// build time; a longer one is cut to fit here rather than trusted).
+pub fn end_with_note(out: &mut [u8], len: usize, note: &[u8]) -> usize {
+    let n = note.len().min(out.len());
+    let at = len.min(out.len() - n);
+    out[at..at + n].copy_from_slice(&note[..n]);
+    at + n
 }
 
 #[cfg(test)]
@@ -332,5 +445,137 @@ mod tests {
         // SAFETY: dropped once, here, and never again (ManuallyDrop).
         unsafe { core::mem::ManuallyDrop::drop(&mut k) };
         assert_eq!(k.seed, [0; 32]);
+    }
+
+    /// The window between a run's park and its send: the key went, so the
+    /// run is not sent, and stays attested so its caller is told why.
+    #[test]
+    fn a_run_whose_key_went_before_the_send_is_not_sent() {
+        let dead = RefCell::new(BTreeSet::new());
+        let mut h = Held::new(Dead(&dead));
+        h.hold(USER, &[1; 32], LOGIN_A).unwrap();
+        let mut run = h.park_run(USER, true);
+        assert!(run.attested());
+
+        dead.borrow_mut().insert(LOGIN_A);
+        assert_eq!(h.at_send(&mut run, true), AtSend::Refused);
+        assert!(run.attested(), "the refusal is read as a run's, by this flag");
+        assert!(!h.stands(&run));
+    }
+
+    /// The same window with the key dropped outright, a logout, not a death.
+    #[test]
+    fn a_run_whose_user_logged_out_before_the_send_is_not_sent() {
+        let dead = RefCell::new(BTreeSet::new());
+        let mut h = Held::new(Dead(&dead));
+        h.hold(USER, &[1; 32], LOGIN_A).unwrap();
+        let mut run = h.park_run(USER, true);
+        h.drop_mine(LOGIN_A);
+        assert_eq!(h.at_send(&mut run, true), AtSend::Refused);
+    }
+
+    /// A run parked with no key held was never its user's key's to vouch
+    /// for: it goes bare, stands whatever is held, and a key held later
+    /// makes its send a credentialed one.
+    #[test]
+    fn a_run_parked_with_no_key_goes_bare_and_stands() {
+        let dead = RefCell::new(BTreeSet::new());
+        let mut h = Held::new(Dead(&dead));
+        let mut run = h.park_run(USER, true);
+        assert!(!run.attested());
+        assert_eq!(h.at_send(&mut run, true), AtSend::Bare);
+        assert!(!run.attested());
+        assert!(h.stands(&run));
+
+        let mut later = h.park_run(USER, true);
+        h.hold(USER, &[3; 32], LOGIN_A).unwrap();
+        assert_eq!(h.at_send(&mut later, true), AtSend::Credential(&[3; 32]));
+        assert!(later.attested());
+    }
+
+    /// No known key for the machine dialled, nothing to bind a credential
+    /// to: the run is not attested at the park and its send is bare, key
+    /// held or not.
+    #[test]
+    fn no_anchor_no_credential() {
+        let dead = RefCell::new(BTreeSet::new());
+        let mut h = Held::new(Dead(&dead));
+        h.hold(USER, &[1; 32], LOGIN_A).unwrap();
+        let mut run = h.park_run(USER, false);
+        assert!(!run.attested());
+        assert_eq!(h.at_send(&mut run, false), AtSend::Bare);
+        assert_eq!(h.seed_of(&run, false), None);
+        assert!(!run.attested());
+    }
+
+    /// An attested request stands while its user is held and not after; the
+    /// send marks an ordinary park attested.
+    #[test]
+    fn an_attested_request_stands_only_while_its_user_is_held() {
+        let dead = RefCell::new(BTreeSet::new());
+        let mut h = Held::new(Dead(&dead));
+        h.hold(USER, &[1; 32], LOGIN_A).unwrap();
+        let mut verb = Standing::parked(USER);
+        assert!(!verb.attested());
+        assert_eq!(h.at_send(&mut verb, true), AtSend::Credential(&[1; 32]));
+        assert!(verb.attested());
+        assert!(h.stands(&verb));
+        dead.borrow_mut().insert(LOGIN_A);
+        assert!(!h.stands(&verb), "an attested run counted past its user's death");
+    }
+
+    /// The credential is for the uid the park recorded, whoever else holds a
+    /// key and whoever was held last: root's key never signs for `user`, nor
+    /// `user`'s for `guest`, and a user with none goes bare beside two who
+    /// have one.
+    #[test]
+    fn the_key_that_signs_is_the_parked_uids() {
+        let dead = RefCell::new(BTreeSet::new());
+        let mut h = Held::new(Dead(&dead));
+        let mut user = Standing::parked(USER);
+        let mut guest = Standing::parked(GUEST);
+        let mut root = Standing::parked(0);
+        h.hold(USER, &[1; 32], LOGIN_A).unwrap();
+        h.hold(0, &[9; 32], LOGIN_B).unwrap();
+        assert_eq!(h.at_send(&mut user, true), AtSend::Credential(&[1; 32]));
+        assert_eq!(h.at_send(&mut root, true), AtSend::Credential(&[9; 32]));
+        assert_eq!(h.at_send(&mut guest, true), AtSend::Bare);
+        assert_eq!(h.seed_of(&user, true), Some(&[1; 32]));
+        assert_eq!(user.uid(), USER);
+    }
+
+    /// A run that finished in the pass its user went is complete, and gets
+    /// no note; one still running is cut short; one that stands is neither.
+    #[test]
+    fn only_an_unfinished_run_is_cut_short() {
+        assert!(!cut_short(true, false), "a finished run was told it was ended");
+        assert!(cut_short(false, false));
+        assert!(!cut_short(false, true));
+        assert!(!cut_short(true, true));
+    }
+
+    #[test]
+    fn the_note_follows_the_output_when_there_is_room() {
+        let mut out = [b'.'; 16];
+        out[..3].copy_from_slice(b"abc");
+        assert_eq!(end_with_note(&mut out, 3, b"NOTE"), 7);
+        assert_eq!(&out[..7], b"abcNOTE");
+    }
+
+    /// Output that filled the buffer, or came within a note of filling it,
+    /// loses its tail to the note: the reason is never the part dropped.
+    #[test]
+    fn the_note_replaces_the_tail_of_a_full_output() {
+        let mut out = [b'x'; 8];
+        assert_eq!(end_with_note(&mut out, 8, b"NOTE"), 8);
+        assert_eq!(&out, b"xxxxNOTE");
+        let mut out = [b'x'; 8];
+        assert_eq!(end_with_note(&mut out, 6, b"NOTE"), 8);
+        assert_eq!(&out, b"xxxxNOTE");
+        let mut out = [b'x'; 8];
+        assert_eq!(end_with_note(&mut out, 0, b"NOTE"), 4);
+        assert_eq!(&out[..4], b"NOTE");
+        let mut out = [b'x'; 2];
+        assert_eq!(end_with_note(&mut out, 2, b"NOTE"), 2, "a note longer than the buffer is cut, not a panic");
     }
 }
