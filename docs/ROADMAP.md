@@ -50,9 +50,11 @@ This document is the one to update first when direction changes.
 > [`roadmap-completed.md`](roadmap-completed.md)). Open from the arc, in
 > item 1: the auth server it was shaped for. Hans's two questions from step
 > 8 were answered the same day, after the release: a `cpu` run ends with its
-> user's last key (Unreleased), and the 684-byte limit stands. Open next: Pi item 3, a stick
-> with no card, and the frontier's items 4 and 5 (transitive delegation,
-> per-task ASIDs).
+> user's last key (Unreleased), and the 684-byte limit stands. Open next,
+> by Hans's order of 2026-11-10: the outstanding fixes first, then Pi item
+> 7, a driver for the Pi 4's NIC, as the first new work; after it Pi item
+> 3, a stick with no card, and the frontier's items 4 and 5 (transitive
+> delegation, per-task ASIDs).
 
 > **Released 2026-11-07: v0.24.0, one disk, and the Pi 4 on its SD card
 > alone** (#284 to #414, recorded in [`CHANGELOG.md`](CHANGELOG.md) and
@@ -753,8 +755,9 @@ poor value).
 The first full session on the Pi 4 ran on 2026-10-03 (`testing-pi4.md` §6):
 the kernel and boot programs from the SD card, then a USB keyboard and a USB
 stick that `fsd` mounted and ran `/bin` from. Hans listed six directions to
-keep in the pipeline before the current tests go on. Not sequenced against
-the rest of this roadmap; the dependencies between them are stated. Claims
+keep in the pipeline before the current tests go on, and added a seventh
+on 2026-11-10. Not sequenced against the rest of this roadmap, item 7
+apart; the dependencies between them are stated. Claims
 not yet checked on this tree are marked (predicted).
 
 - [x] **1. More than one partition in use, on the card or a stick. DONE
@@ -848,7 +851,7 @@ not yet checked on this tree are marked (predicted).
       are under "Remaining follow-ups" (splitting the kernel lock, a
       pipeline's lifetime, the ping timeout for a server mid-call).
 - [ ] **5. SSH, to reach a Pi remotely.** **Needs networking on the Pi
-      first**, which it has none of: the Pi 4's on-board Ethernet is GENET,
+      first** (item 7 below), which it has none of: the Pi 4's on-board Ethernet is GENET,
       not virtio (see the Pi test plan note above), so either a GENET driver
       or a USB-Ethernet adapter through the existing xHCI stack (a CDC-ECM or
       CDC-NCM class driver; the adapter chip decides which). Then an SSH
@@ -878,6 +881,35 @@ not yet checked on this tree are marked (predicted).
       is a serial-console port with two new drivers before it has a
       keyboard, a disk or a tick. Worth a boot to see how far it gets; not
       worth the drivers before items 2 to 5.
+- [ ] **7. Networking on the Pi 4: a driver for its NIC. Set by Hans on
+      2026-11-10 as the first new work after the outstanding fixes**, ahead
+      of item 3 and the frontier's items 4 and 5. The Pi has no network
+      today (`testing-pi4.md` section 2): `netd` reports no NIC, so `ping`,
+      `resolve`, `fetch`, `mount -r`, `cpu` and the whole cluster are
+      QEMU-only, and a second board is a spare and not a peer. Item 5 (SSH)
+      waits on this, and so does the two-node cluster on real hardware, the
+      north star's first proof off an emulator. Not planned yet; what a plan
+      has to settle first:
+      - **Which NIC.** The on-board Ethernet is Broadcom GENET v5 with a
+        BCM54213PE PHY over MDIO, plain MMIO ((predicted) at CPU address
+        `0xfd580000`, to be discovered from the firmware's tables as EMMC2
+        was, never hardcoded). The other way is a USB Ethernet adapter on
+        the xHCI stack that already runs on the board (CDC-ECM, CDC-NCM or
+        an ASIX chip), which would also give Parallels a NIC. Recommended:
+        GENET, since it needs no hardware beyond the board and is the
+        device every Pi 4 has; the choice is Hans's.
+      - **What tests it off the board.** The SD arc was built on QEMU's
+        `sdhci-pci` before EMMC2 saw it. Whether any QEMU machine this
+        kernel boots can model GENET has not been read; if none can, every
+        step is a card round trip, and the plan must say what check can
+        fail without the board.
+      - **Where the driver sits.** `virtio_net.rs` is the DMA-owning half
+        in the kernel behind the `NET_*` syscalls, and `netd` holds the
+        stack. A second NIC wants the shape `block.rs` gave disks: one
+        enum, `netd` unchanged.
+      - **What the firmware leaves behind.** The Pi's UEFI drives the NIC
+        itself for network boot, so the MAC address may be readable from
+        it, and the device may arrive mid-use at the exit, as the xHCI did.
 
 ## Completed arcs (moved out)
 
