@@ -185,7 +185,9 @@ const CONFIG_PATH: &str = "\\EFI\\ORBS\\INIT.CFG";
 // handle_client's fetch/resolve ones), and sharing one reply buffer in
 // `service_remotes` changed this chain not at all. 14 stays, with ~6.3 KB of
 // headroom; the pages come back when the resident tables shrink, not when a
-// function is deleted.
+// function is deleted. (That figure is of its day. The headroom now is a
+// reading and not a comment: `/proc/4/stackfree`, which `make
+// test-async-rmount` reports at the end of each boot.)
 const STACK_PAGES: u64 = 14;
 /// One inaccessible guard page between the heap and the stack. The stack
 /// grows down from the top of the region; an overflow past the

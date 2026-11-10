@@ -47,6 +47,9 @@
 #   make test-async-rmount        # rebuilds the image first, then boots
 #   ./scripts/test-async-rmount.sh   # by hand, against build/esp.img
 #
+# Each boot ends by reading netd's stack low-water mark (see `stack` below),
+# reported and not graded.
+#
 # Six boots, about a minute each. Not part of `make test` (host only,
 # seconds); run it when netd's client paths or the kernel's reply path
 # (MSG_REPLY, SENDER_CALL, tasks::reply_target) change.
@@ -76,11 +79,30 @@ boot() {
     tries=0
     while :; do
         tries=$((tries + 1))
-        out=$(python3 scripts/drive-qemu.py "$IMG" --slirp 'login:@@root' 'assword@@root' "$@" 2>&1)
+        out=$(python3 scripts/drive-qemu.py "$IMG" --slirp 'login:@@root' 'assword@@root' "$@" \
+            '# @@mount -p /proc' '# @@cat /proc/4/stackfree' '# @@' 2>&1)
         case $out in *"BdsDxe: starting"*) break ;; esac
         [ $tries -lt 3 ] || break
         echo "     (firmware never reached its boot entry, retrying)" >&2
     done
+    stack
+}
+# netd's stack low-water mark at the end of the boot just driven: the bytes
+# of its stack it never wrote (/proc/4/stackfree, the kernel's
+# TASK_STACK_FREE; 4 is netd's slot), read after every graded step so the
+# reading can disturb none. Reported, with the lowest of the six at the end;
+# a boot it could not be read from fails, since a reading silently missing
+# would look like nothing to report.
+lowest=""
+stack() {
+    free=$(printf '%s\n' "$out" | tr -d '\r' | awk 'p && /^[0-9]+$/ { print; exit } index($0, "cat /proc/4/stackfree") { p = 1 }')
+    if [ -n "$free" ]; then
+        echo "     netd's stack after this boot: $free bytes never written"
+        if [ -z "$lowest" ] || [ "$free" -lt "$lowest" ]; then lowest=$free; fi
+    else
+        echo "FAIL netd's stack could not be read after this boot (cat /proc/4/stackfree)"
+        fail=1
+    fi
 }
 after() { awk -v m="# $1" 'p || $0 == m { p = 1; print }'; }
 grade() { # name, transcript, marker, must-regex, must-not-regex
@@ -101,7 +123,7 @@ grade() { # name, transcript, marker, must-regex, must-not-regex
 
 # 1. served
 peer $PEER; sleep 3
-boot '# @@mount -r 10.0.2.2:5641 /mnt/h' '# @@cat /mnt/h/SUB/NOTE.TXT' '# @@uptime' '# @@'
+boot '# @@mount -r 10.0.2.2:5641 /mnt/h' '# @@cat /mnt/h/SUB/NOTE.TXT' '# @@uptime'
 grade "a path verb is served from a parked slot" "$out" 'cat /mnt/h/SUB/NOTE.TXT' \
     'a nested file, read remotely' 'out of room|no filesystem|not running'
 printf '%s\n' "$out" | tr -d '\r' | after 'uptime' | grep -q 'ticks since boot' || { echo "FAIL the shell never got its prompt back after the read"; fail=1; }
@@ -111,7 +133,7 @@ stop_peers
 # the second cat's, which the transcript confirms.
 peer $PEER --delay 3.5; sleep 3
 boot '# @@mount -r 10.0.2.2:5641 /mnt/h' '# @@exec /bin/cat /mnt/h/HELLO.TXT' '# @@kill 6' \
-     '# @@cat /mnt/h/SUB/NOTE.TXT' '# @@'
+     '# @@cat /mnt/h/SUB/NOTE.TXT'
 grade "a parked reply outlives its caller and reaches nobody else" "$out" 'cat /mnt/h/SUB/NOTE.TXT' \
     'a nested file, read remotely' 'hello from the host|not running'
 stop_peers
@@ -119,7 +141,7 @@ stop_peers
 # 3. concurrent
 peer $PEER; peer $SLOW --delay 30; sleep 3
 boot '# @@mount -r 10.0.2.2:5641 /mnt/h' '# @@mount -r 10.0.2.2:5642 /mnt/s' \
-     '# @@exec /bin/cat /mnt/s/HELLO.TXT' '# @@cat /mnt/h/SUB/NOTE.TXT' '# @@uptime' '# @@'
+     '# @@exec /bin/cat /mnt/s/HELLO.TXT' '# @@cat /mnt/h/SUB/NOTE.TXT' '# @@uptime'
 n=$((n + 1)); log=build/async-$n.txt
 printf '%s\n' "$out" | tr -d '\r' > "$log"
 tail=$(after 'cat /mnt/h/SUB/NOTE.TXT' < "$log")
@@ -147,7 +169,7 @@ stop_peers
 # construction; a SYN-drop control needs a live node on an L2 link, noted in
 # docs/roadmap/roadmap-async-rmount.md. 10.0.2.2 is authorized (the dev host
 # peer), so the request reaches the park rather than failing auth first.
-boot '# @@mount -r 10.0.2.2:5599 /mnt/d' '# @@cat /mnt/d/X' '# @@uptime' '# @@'
+boot '# @@mount -r 10.0.2.2:5599 /mnt/d' '# @@cat /mnt/d/X' '# @@uptime'
 grade "a refused connection fails NO_FS, the caller is not hung" "$out" 'cat /mnt/d/X' \
     'no filesystem mounted this boot' 'out of room'
 printf '%s\n' "$out" | tr -d '\r' | after 'uptime' | grep -q 'ticks since boot' || { echo "FAIL the shell never got its prompt back: the parked caller hung"; fail=1; }
@@ -158,7 +180,7 @@ printf '%s\n' "$out" | tr -d '\r' | after 'uptime' | grep -q 'ticks since boot' 
 # session slot rather than a blocking round trip. The first line names the
 # fid path served; the last says every check in the program passed.
 peer $PEER; sleep 3
-boot '# @@mount -r 10.0.2.2:5641 /mnt/a' '# @@cremote' '# @@uptime' '# @@'
+boot '# @@mount -r 10.0.2.2:5641 /mnt/a' '# @@cremote' '# @@uptime'
 grade "a fid verb sequence is served from a parked session slot" "$out" 'cremote' \
     '/mnt/a/HELLO.TXT: fd=[0-9]+ size=[0-9]+ first=' 'HELLO.TXT: (open|fstat|read) failed|out of room|not running'
 printf '%s\n' "$out" | tr -d '\r' | after 'cremote' | grep -q 'cremote: all checks passed' || { echo "FAIL cremote did not pass every check ($log)"; fail=1; }
@@ -172,7 +194,7 @@ peer $PEER; peer $SLOW --delay 30; sleep 3
 # cremote's first line (a LOCAL read, SH.BIN is its first bytes) races the
 # prompt `exec` gives back, so the next step waits for that line, not for `# `.
 boot '# @@mount -r 10.0.2.2:5642 /mnt/a' '# @@mount -r 10.0.2.2:5641 /mnt/h' \
-     '# @@exec /bin/cremote' 'SH.BIN@@cat /mnt/h/SUB/NOTE.TXT' '# @@uptime' '# @@'
+     '# @@exec /bin/cremote' 'SH.BIN@@cat /mnt/h/SUB/NOTE.TXT' '# @@uptime'
 n=$((n + 1)); log=build/async-$n.txt
 printf '%s\n' "$out" | tr -d '\r' > "$log"
 # Anchored on the exec line: the cat's own echo has the prompt merged into
@@ -190,4 +212,5 @@ else
 fi
 stop_peers
 
+echo "     netd's stack low-water mark over the six boots: ${lowest:-not read} bytes never written"
 exit $fail

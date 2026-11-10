@@ -229,6 +229,7 @@ make test-fpsimd              # a task's FP/SIMD registers across the kernel
 make test-spawn-owner         # the owner of the kernel's spawn staging
 make test-spawn-size          # the size of a program file spawn accepts
 make test-proc-cpus           # /proc/cpus, the cores that take tasks as a file
+make test-stack-free          # a stack's never-written bytes, counted by the kernel and read as /proc/<n>/stackfree
 make test-sd                  # an SD card as the root disk: QEMU's sdhci-pci, two cards, writes across a power off, the firmware partition refused
 make bootstick BOOTSTICK=/dev/diskN # write disk.img's layout to a whole disk or image file (PI=1 for the Pi 4)
 make test-bootstick           # bootstick against image files
@@ -454,7 +455,7 @@ programs/            ALL userland programs, grouped by role. Annotated in full i
   textutils/         the pipeline filters: upper wc grep head tail nl rev uniq sort (sort is the one that
                      cannot stream, so it is the one that uses the heap)
   netutils/          ping resolve fetch dial serve - reach netd via the TO_NET cap the shell delegates at spawn
-  shellutils/        echo uptime clear pwd readkey send recv selftest bootid man printenv id args edtest rdprobe fpprobe coreprobe vtprobe syscost stageprobe cursorprobe dirprobe mountprobe openprobe
+  shellutils/        echo uptime clear pwd readkey send recv selftest bootid man printenv id args edtest rdprobe fpprobe coreprobe vtprobe syscost stageprobe cursorprobe dirprobe mountprobe stackprobe openprobe
   admin/             passwd useradd groupadd usermod clusterkey - root-only account + cluster-identity tools
   demos/             hello (how a program ends itself), pong (the IPC echo-server shape)
 
@@ -492,7 +493,7 @@ scripts/             test-parallels.sh (real-hardware smoke test), drive-qemu.py
                      FOREIGN OBSERVER for both directions of the export)
 ```
 
-Seventy-eight-crate workspace (`cargo metadata`'s count, 2026-11-10). `kernel` and the shared libs (`ulib`,
+Seventy-nine-crate workspace (`cargo metadata`'s count, 2026-11-10). `kernel` and the shared libs (`ulib`,
 `syscall-abi`, `ninep-abi`, `accounts`, `regex`, `ed25519`, `clusterkeys`, `heldkeys`, `keyseq`, `parttable`, `amlscan`, `nsresolve`) sit at the repo root; **every userland
 program lives under `programs/`, grouped by role** (`programs/shell`,
 `programs/servers/{fsd,cond,netd,accountd}`, `programs/demos/{hello,pong}`,
