@@ -26,6 +26,17 @@ ends, as before. `make test-run-callback` gains the killed login. The other open
 credentialed fid verb, was answered too: it stands, since `fsd` refuses
 any fid path over 96 bytes, so no request it refuses would be served.
 
+**A `cpu` run's command dies with the run's connection (2026-11-10).** On
+the executing machine, a peer that closed mid-run left the command running
+with nothing to reap it, holding a task slot until someone typed `wait N`;
+known since 2026-09-12, and reached by every logout since the entry above.
+`netd` now kills the run's child when its connection is freed, in
+`TcpConn`'s `Drop`, so the six sites that free one all do, and only if the
+slot still holds the identity captured at the spawn. A run that ends in the
+ordinary way is reaped by its `WAIT`, as before. `make test-run-orphan`
+(new) has the host dispatch `cpu recv` and close by a FIN and by a RST; it
+fails with the kill left out.
+
 **`netd`'s held-key rules run on the host (2026-11-10).** Three rules of the
 per-user keys arc had no check that could fail, because each turns on a
 moment inside one pass of `netd`'s event loop that no driven boot can reach:

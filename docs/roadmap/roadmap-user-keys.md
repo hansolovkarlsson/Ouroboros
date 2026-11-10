@@ -1255,6 +1255,9 @@ held) is unaffected, since its user was never attested. **Not stopped: the
 child on the executing machine.** A peer's close reaps no `cpu` child there
 (`TcpConn`'s `Drop`); it runs on into a closed connection, as it did before
 for any peer that closed mid-run, and its `/host` reads are refused.
+**Since 2026-11-10 it is stopped:** `TcpConn`'s `Drop` kills the run's child
+on the executing machine when its connection is freed, whoever closed it
+(`make test-run-orphan`).
 
 *Check:* `test-run-callback` gains the killed login: a nested shell logged in
 as `user` sends `cpu` to the stand-in; while the stand-in holds the run,
