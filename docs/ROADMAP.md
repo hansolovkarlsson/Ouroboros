@@ -123,10 +123,11 @@ the microkernel arc itself still leaves open):
    answered on 2026-11-09: a `cpu` run sent with the user's credential ends
    with their last key, and the 684-byte limit on a credentialed fid verb
    stands (the plan's "Hans's two decisions from step 8"). Ending the run
-   stops nothing on the executing machine: its child runs on into a closed
-   connection and holds a task slot there, the receive-path ledger's
-   "a peer that RSTs or FINs mid-`cpu` run orphans the child", which a
-   logout now reaches as a matter of course. Per-user cluster *identity* shipped
+   stopped nothing on the executing machine until 2026-11-10: its child ran
+   on into a closed connection and held a task slot there, the receive-path
+   ledger's "a peer that RSTs or FINs mid-`cpu` run orphans the child",
+   which a logout reached as a matter of course. The executing machine now
+   kills the child when the run's connection is freed. Per-user cluster *identity* shipped
    2026-08-31 (see [`CHANGELOG.md`](CHANGELOG.md) and
    [`unspellable-postmortem.md`](postmortems/unspellable-postmortem.md)): a remote request
    carries the requesting user's **name** inside the signature, the far side resolves
@@ -3698,6 +3699,17 @@ would otherwise silently shrink into looking like nothing was ever found.
       change. Since 2026-11-09 a routine event reaches it: the dispatching
       machine closes a run sent with its user's credential when that user
       logs out (per-user keys, Hans's two decisions from step 8).
+      **FIXED 2026-11-10**, by the `KILL`: `TcpConn`'s `Drop` ends the child
+      if its slot still holds the identity captured at the spawn, so every
+      site that frees a connection does, the duplicate SYN included.
+      `make test-run-orphan` dispatches `cpu recv` from the host and closes
+      mid-run, by a FIN and by a RST; with the kill left out the command
+      stays in `ps` and the next run's joins it. Left open, each stated in
+      `kill_run_child`'s doc: a task the child spawned is not ended (the
+      kernel kills no tree); the identity check and the kill are two
+      syscalls; and no rig cuts short a child that is running on a core at
+      that instant, which the kernel ends by the other core
+      (`test-smp` covers that kill, not this caller).
     - **No zero-window persist timer** (RFC 1122 4.2.2.17). Nothing probes a
       receiver that shuts its window, so nothing elicits the update that would
       reopen it: with the window shut the first RTO expiry's `rewind_to` drives
