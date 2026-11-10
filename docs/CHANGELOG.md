@@ -61,8 +61,10 @@ moment it chooses. It counts writes: a buffer reserved and not written at its
 low end is seen only as deep as it was written, as with the old probe. `make
 test-stack-free` (new, `/bin/stackprobe`) grades the count against a known
 depth, 19 checks and five controls. `make test-async-rmount` reads `netd`'s
-mark at the end of each boot: 2,528 of 57,344 bytes never written, where the
-old probe applied to the same tree read 2,496. At the shell's prompt after
+mark at the end of each boot, after any parked request's deadline: 2,528 of
+57,344 bytes never written, an upper bound on the room left, where the old
+probe applied to the same tree read 2,496. `/bin/edtest`, which paints its
+own stack to measure a signing, changed its byte from the kernel's. At the shell's prompt after
 boot `fsd` has 21,376 unwritten, the shell 38,672 and `cond` 55,600.
 
 ## v0.25.0: per-user keys for the cluster (2026-11-09)
