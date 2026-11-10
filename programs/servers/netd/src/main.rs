@@ -2168,8 +2168,8 @@ fn service_remotes<const S: usize, const H: usize, const K: usize>(remotes: &mut
             // longer held here, as their sessions do: Decision 7's `/host`
             // window was opened by the user typing `cpu`, and closes with the
             // user. The caller gets the output so far and a line saying why.
-            // The child on the far machine is not stopped: a peer's close
-            // reaps no child there (`TcpConn`'s `Drop`), a gap of its own.
+            // The far machine ends the child when it sees this connection
+            // close (`TcpConn`'s `Drop` there, since 2026-11-10).
             // A run that finished in this same pass is complete, and says
             // nothing more. The note always fits: where the output has filled
             // `RUN_OUT_MAX` it replaces the output's tail, since a run cut off
@@ -2670,6 +2670,19 @@ fn kill_run_child(child: u64) {
 /// What this does not reach: a task the child itself spawned (the kernel has
 /// no kill of a tree), and whatever of the child's is still queued in the
 /// mailbox, which finds no connection and is answered as an unknown request.
+/// Nor a connection that is never freed: a caller that vanishes with no FIN
+/// and no RST is not noticed while its child runs (`reap_idle` exempts it and
+/// nothing is in flight to time out), and a `netd` the supervisor restarts
+/// loses its table without a `Drop`. Both leave the child as before.
+///
+/// What it costs: every way this table frees a connection now ends a
+/// command, the receive path's unauthenticated ones included. A RST is
+/// honoured on the 4-tuple alone and a SYN rebuilds a live slot
+/// (`handle_tcp`), so a stale or forged segment that used to lose a run's
+/// output now stops the run midway. A FIN frees the connection too, so a
+/// caller that half-closes and reads on has its command ended; neither
+/// `cpu` client does that. `docs/ROADMAP.md`'s receive-path ledger carries
+/// both.
 impl Drop for TcpConn {
     fn drop(&mut self) {
         kill_run_child(self.cpu_child);

@@ -50,7 +50,13 @@ IMAGE = os.path.join(ROOT, "build", "espext2.img")
 COPY = os.path.join(ROOT, "build", "run-orphan.img")
 PORT = 5652  # its own, so the other rigs' boots can coexist
 COMMAND = "recv"  # blocks in MSG_RECV until a message nobody sends
-KILLED = r"Ouroboros kernel: task (\d+) (?:killed|ended on core)"
+# The kill's own line, one a kill: `task N killed`, or `task N killed (running
+# on core C, which ends it)` for a task on another core, whose second line
+# (`task N ended on core C`) is deliberately not matched, so one kill counts
+# once on any number of cores.
+KILLED = r"Ouroboros kernel: task (\d+) killed"
+PCAP = os.path.join(ROOT, "build", "run-orphan.pcap")
+TCP_FIN, TCP_RST = 0x01, 0x04
 
 failed = 0
 checks = 0
@@ -73,6 +79,31 @@ def ps(g):
         return None
     out = g.transcript()[mark:]
     return [int(n) for n in re.findall(rf"task (\d+): [^\r\n]*  {COMMAND}\r", out)]
+
+
+def closes():
+    """(FINs, RSTs) the guest's export port has been sent so far, read from
+    QEMU's capture of the guest's NIC. The rig's own observer of WHICH close
+    reached the guest: SLIRP sits between the host's socket and the guest,
+    and nothing says it relays a reset as a reset. Without this the RST round
+    could be a second FIN round and every check still pass."""
+    data = open(PCAP, "rb").read()
+    fins = rsts = 0
+    off = 24  # the pcap file header
+    while off + 16 <= len(data):
+        incl = struct.unpack_from("<I", data, off + 8)[0]
+        f = data[off + 16:off + 16 + incl]
+        off += 16 + incl
+        # Ethernet, IPv4, TCP, to the export's port.
+        if len(f) < 34 or f[12:14] != b"\x08\x00" or f[23] != 6:
+            continue
+        tcp = 14 + (f[14] & 0x0f) * 4
+        if len(f) < tcp + 14 or struct.unpack_from(">H", f, tcp + 2)[0] != 564:
+            continue
+        flags = f[tcp + 13]
+        fins += 1 if flags & TCP_FIN else 0
+        rsts += 1 if flags & TCP_RST else 0
+    return fins, rsts
 
 
 def until(g, want, seconds):
@@ -104,6 +135,7 @@ def cut_short(g, how):
                      f"{how}: the run's command is a task on the executing machine: `{COMMAND}` in slots {running}"):
             return
         before = len(g.transcript())
+        fins0, rsts0 = closes()
         if how == "RST":
             # SO_LINGER with a zero timeout: the close of a peer that died.
             s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
@@ -112,6 +144,10 @@ def cut_short(g, how):
         check(gone == [], f"{how}: the command is gone once its connection is closed: `{COMMAND}` in slots {gone}")
         lines = [int(n) for n in re.findall(KILLED, g.transcript()[before:])]
         check(lines == running, f"{how}: the kernel ended that task and no other: kill lines for {lines}, want {running}")
+        fins, rsts = closes()
+        fins, rsts = fins - fins0, rsts - rsts0
+        ok = (fins >= 1 and rsts == 0) if how == "FIN" else (rsts >= 1 and fins == 0)
+        check(ok, f"{how}: that close is what reached the guest: {fins} FIN(s) and {rsts} RST(s) to its export port")
     finally:
         s.close()
 
@@ -121,6 +157,7 @@ def main():
     g = drive_qemu.Guest(COPY, extra_args=(
         "-netdev", f"user,id=net0,hostfwd=tcp::{PORT}-:564",
         "-device", "virtio-net-device,netdev=net0",
+        "-object", f"filter-dump,id=f0,netdev=net0,file={PCAP}",
     ), label="[run-orphan] ")
     try:
         if not check(g.run([("login:", "root"), ("assword", "root"), ("# ", "")]), "the guest boots to root's shell"):
@@ -143,7 +180,9 @@ def main():
         with open(os.path.join(ROOT, "build", "run-orphan.txt"), "w") as f:
             f.write(transcript)
         os.unlink(COPY)
-    want = 12
+        if os.path.exists(PCAP) and not failed:
+            os.unlink(PCAP)
+    want = 14
     if checks != want and not failed:
         print(f"[FAIL] {checks} checks ran, want {want}", flush=True)
         return 1

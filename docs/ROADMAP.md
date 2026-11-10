@@ -3710,6 +3710,25 @@ would otherwise silently shrink into looking like nothing was ever found.
       syscalls; and no rig cuts short a child that is running on a core at
       that instant, which the kernel ends by the other core
       (`test-smp` covers that kill, not this caller).
+      **From the high review of #437, the same day.** Still orphaned: the
+      child of a caller that vanishes with no FIN and no RST (`reap_idle`
+      exempts a connection with a live child, nothing is in flight for the
+      RTO, and there is no keepalive, so the slot and the child are held
+      for good), and every child of a `netd` the supervisor restarts, whose
+      table goes without a `Drop`. **A new cost, accepted for now:** the
+      blind RST and the duplicate SYN above used to lose a run's output and
+      now stop the command midway, a half-written file where there was a
+      whole one; and a peer that half-closes and reads on has its command
+      ended, which neither `cpu` client does. The cure for the first is
+      the receive-path hardening this ledger is waiting on a rig for.
+      **Pre-existing, found by the same review:** `cpu_child_msg` takes any
+      zero-length message from the child as its end of stream, so a command
+      that writes nothing mid-run has netd `WAIT` on it, event loop blocked,
+      until it exits. **A follow-up it names:** a `KILL` that takes a packed
+      identity, which the kernel already keeps (`DOOMED`), would close the
+      two-syscall window in `kill_run_child` and in any later caller; and
+      `kill_run_child`'s identity test is the second copy in `netd` of
+      `held.rs`'s `alive`, to be one once the `heldkeys` crate has merged.
     - **No zero-window persist timer** (RFC 1122 4.2.2.17). Nothing probes a
       receiver that shuts its window, so nothing elicits the update that would
       reopen it: with the window shut the first RTO expiry's `rewind_to` drives
