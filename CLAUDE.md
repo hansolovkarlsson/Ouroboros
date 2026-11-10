@@ -300,7 +300,7 @@ add llvm-tools` for `llvm-objcopy` (the Makefile's `OBJCOPY` comment says why).
 
 The kernel and userland programs have no unit test suite; the **pure crates**
 (`accounts`, `regex`, `ed25519`, `clusterkeys`, `ninep-abi`, `keyseq`,
-`parttable`, `amlscan`) do, and `make test` runs them with the host-side checks. Such a
+`parttable`, `amlscan`, `heldkeys`) do, and `make test` runs them with the host-side checks. Such a
 crate is a workspace member but not a default-member, so until something
 depends on it `cargo build`, `make build` and `make esp` stay green while it
 is broken: run `make test` before pushing anything that touches one.
@@ -474,6 +474,8 @@ parttable/           partition tables, read: the MBR and GPT parsing (both CRCs,
 amlscan/             the devices an ACPI table declares present by _HID (virtio-mmio's "LNRO0005", the Pi's EMMC2 "BRCME88C"), their _CRS
                      registers and interrupt, by a bounded walk of the AML that reads two method shapes exactly; the kernel probes no
                      other virtio-mmio address. Host-tested in make test, on the Pi's own tables too
+heldkeys/            netd's held user keys: the table, whose key signs for a parked request, and when a run sent under one ends; liveness
+                     is passed in, so the rules that turn on a login dead and not yet reaped run on the host. netd is the one caller
 keyseq/              tells a key's escape sequence (ESC [ A) from ordinary input: the ONE filter every keyboard reader uses
                      (the shell's line editor, login, ulib::read_line and read_key), so two readers never disagree on what was typed;
                      the kernel uses it too, to keep keys whole in its keyboard queue
@@ -490,8 +492,8 @@ scripts/             test-parallels.sh (real-hardware smoke test), drive-qemu.py
                      FOREIGN OBSERVER for both directions of the export)
 ```
 
-Seventy-seven-crate workspace (`cargo metadata`'s count, 2026-11-04). `kernel` and the shared libs (`ulib`,
-`syscall-abi`, `ninep-abi`, `accounts`, `regex`, `ed25519`, `clusterkeys`, `keyseq`, `parttable`, `amlscan`, `nsresolve`) sit at the repo root; **every userland
+Seventy-eight-crate workspace (`cargo metadata`'s count, 2026-11-10). `kernel` and the shared libs (`ulib`,
+`syscall-abi`, `ninep-abi`, `accounts`, `regex`, `ed25519`, `clusterkeys`, `heldkeys`, `keyseq`, `parttable`, `amlscan`, `nsresolve`) sit at the repo root; **every userland
 program lives under `programs/`, grouped by role** (`programs/shell`,
 `programs/servers/{fsd,cond,netd,accountd}`, `programs/demos/{hello,pong}`,
 `programs/fileutils/*`, `programs/textutils/*`, `programs/netutils/*`,

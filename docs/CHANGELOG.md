@@ -37,6 +37,17 @@ ordinary way is reaped by its `WAIT`, as before. `make test-run-orphan`
 (new) has the host dispatch `cpu recv` and close by a FIN and by a RST; it
 fails with the kill left out.
 
+**`netd`'s held-key rules run on the host (2026-11-10).** Three rules of the
+per-user keys arc had no check that could fail, because each turns on a
+moment inside one pass of `netd`'s event loop that no driven boot can reach:
+a dead login's key signing before the idle pass reaps it, a run whose key
+goes between its park and its send, and a credential signed for whoever
+sent last. The table and those decisions are now the `heldkeys` crate, pure,
+with task liveness passed in, and `make test` runs its twenty-one tests. A
+parked request's uid, its anchor and its attested flag became one
+`Standing`, made at the park, and every way to a seed takes one; that a
+`Standing` is made nowhere else is review's to hold. No behaviour changed.
+
 ## v0.25.0: per-user keys for the cluster (2026-11-09)
 
 Fifteen pull requests over three days, 2026-11-07 to 2026-11-09, #416 to

@@ -392,7 +392,7 @@ version 1; `accountd` padding the new line by one byte is refused and the size
 does not move.
 
 **Keys (4b).** `NETOP_KEY_HOLD`/`DROP`/`DROP_MINE`/`LIST` in `netd`
-(`held.rs`): only root fills or lists the table, a hold replaces the same
+(`held.rs` then; the `heldkeys` crate since 2026-11-10): only root fills or lists the table, a hold replaces the same
 owner's key, a full table (4) refuses and never evicts, a drop is the holder's
 or root's, and every seed is wiped (volatile) whichever way it goes. An owner
 is alive while its slot still holds the same packed identity and is not a
@@ -1014,7 +1014,22 @@ Before the guard, the no-close control's first run left the two fid checks
 green: `cfidwait` held the fid 60 s, past the far export's 30 s idle reap, so
 the fid died at A whatever B did. The hold is 25 s now.
 
-**Not covered by a control: the uid captured at the park.** The plan's
+**Covered since 2026-11-10, by host tests and not by a boot.** The three
+rules this plan recorded as held by no rig, each turning on a moment inside
+one drain of `netd`'s mailbox, are the `heldkeys` crate's now, with what the
+kernel knows passed in: a dead login's key held and never used; a run whose
+key went between the park and the send not sent, and the note kept off a run
+that finished in the same pass; and the credential signed for the parked
+uid. The last is a shape as much as a test: a park makes a `Standing`, with
+the uid and whether the export's key is known, the send asks the table with
+it, and every way to a seed takes one. Seventeen mutations of the crate were
+each caught. What no test holds is `netd`'s wiring of them, which the rigs
+cover for the ordinary cases; and the shape is review's to hold, not the
+compiler's, since a `Standing` can be made wherever a uid is (the medium
+review of #438, which also moved two rules that had stayed in `key_op` into
+the crate: a hold reaps the dead first, and a list shows only the live).
+
+**Not covered by a control (as written 2026-11-08): the uid captured at the park.** The plan's
 mutation, `SENDER_ID` read at sign time, passes every check. The park and the
 sign happen in one drain of `netd`'s mailbox, so a credential is signed for
 another uid only if that uid's message lands between them, and root's flood

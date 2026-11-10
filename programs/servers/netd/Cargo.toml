@@ -13,6 +13,8 @@ accounts = { path = "../../../accounts" }
 # file format (docs/roadmap-cluster-keys.md step 7).
 ed25519 = { path = "../../../ed25519" }
 clusterkeys = { path = "../../../clusterkeys" }
+# The held user keys' table and rules, host-tested; netd supplies liveness.
+heldkeys = { path = "../../../heldkeys" }
 
 [[bin]]
 name = "netd"

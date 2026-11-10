@@ -1,165 +1,33 @@
-//! **Held user keys**: step 4 of `docs/roadmap/roadmap-user-keys.md`
-//! (Decision 4).
-//!
-//! `login` derives a user's cluster key from the password and hands the seed to
-//! `netd` with `NETOP_KEY_HOLD`, then wipes its own copy. `netd` holds it while
-//! the user is logged in, and since step 8 signs that user's credentials with
-//! it (`sign_parked`), inside its own event loop, so the key never leaves this
-//! task again. A session opened under a credential is closed when its uid's
-//! last key goes (`close_unheld`).
-//!
-//! The rules, each one a line below:
-//!
-//! - **Only root fills the table** (`SENDER_ID` uid 0: `login`, before it drops
-//!   privileges). So a full table refuses a hold rather than evicting: nothing
-//!   but a login can have put the others there.
-//! - **A hold replaces the same owner's key.** The boot shell logs in and out in
-//!   one task that `KILL` refuses, so its packed identity is the same every
-//!   session and no liveness check ever retires its key.
-//! - **A drop by handle** is the holder's or root's; anyone else is refused.
-//!   **A drop of "mine"** takes every key the sender holds (the login loop sends
-//!   it before every prompt, so a lost logout drop cannot outlive the session).
-//! - **A dead owner's key goes** in the idle pass: an owner is alive while its
-//!   slot still holds the same packed identity and is not a zombie. Until then
-//!   it is held but never used: `seed_for` and `holds_live` ask liveness
-//!   themselves.
-//! - **Every seed is wiped** when its entry goes, whichever way it goes.
-//!
-//! What a held key means: while `user` is logged in here, anything running as
-//! uid 1000 can have credentials signed with it. That is no more than root on
-//! this node can do already; what the plan closes is a node acting for users
-//! who are NOT logged in on it.
-
-use syscall_abi::NET_KEY_MAX;
+//! **Held user keys**, `netd`'s end: the table and its rules are the
+//! `heldkeys` crate (step 4 of `docs/roadmap/roadmap-user-keys.md`, Decision
+//! 4; a crate since 2026-11-10 so its rules run on the host). What is left
+//! here is the one thing that crate cannot know: whether a task is alive,
+//! which only the kernel says.
 
 use crate::syscall;
 
-/// One held key: the uid it signs for, the Ed25519 seed, the packed task
-/// identity of the login that holds it, and when it was held (`Held::next`),
-/// so the newest of a uid's keys is the one that signs.
-struct HeldKey {
-    uid: u32,
-    seed: [u8; 32],
-    owner: u64,
-    seq: u64,
+/// The kernel's word on who is alive.
+pub struct KernelTasks;
+
+/// The table `serve` keeps, asking the kernel.
+pub type Held = heldkeys::Held<KernelTasks>;
+
+/// An empty table.
+pub fn new() -> Held {
+    heldkeys::Held::new(KernelTasks)
 }
 
-impl Drop for HeldKey {
-    /// Wipe the seed. VOLATILE, so the compiler cannot drop the stores as
-    /// dead: the entry is going away, which is exactly when an optimiser would.
-    fn drop(&mut self) {
-        for b in self.seed.iter_mut() {
-            // SAFETY: a byte of this struct, which we have &mut to.
-            unsafe { core::ptr::write_volatile(b, 0) };
-        }
+impl heldkeys::Tasks for KernelTasks {
+    /// Whether the task `owner` names is still running: its slot holds the same
+    /// packed identity and is runnable or blocked, not a zombie.
+    ///
+    /// State FIRST, identity second, so a slot recycled at any point between the
+    /// two reads fails the identity comparison: a state read from the new occupant
+    /// is never paired with the old occupant's identity.
+    fn alive(&self, owner: u64) -> bool {
+        let slot = syscall_abi::task_id_slot(owner);
+        let state = syscall(syscall_abi::TASK_STATE, slot);
+        let now = syscall(syscall_abi::TASK_IDENTITY, slot);
+        now == owner && (state == syscall_abi::TASK_STATE_RUNNABLE || state == syscall_abi::TASK_STATE_BLOCKED)
     }
-}
-
-/// The table. On `serve`'s frame for the whole boot (no mutable statics); a
-/// `netd` restart loses every key, and users log in again to have one held.
-pub struct Held {
-    slots: [Option<HeldKey>; NET_KEY_MAX],
-    /// The next hold's `seq`: holds in the order they were made.
-    next: u64,
-}
-
-impl Held {
-    pub fn new() -> Self {
-        Held { slots: core::array::from_fn(|_| None), next: 0 }
-    }
-
-    /// Hold `seed` for `uid` on behalf of `owner`, replacing any key `owner`
-    /// already holds. `Some(handle)`, or `None` when every slot is another
-    /// owner's live key.
-    pub fn hold(&mut self, uid: u32, seed: &[u8; 32], owner: u64) -> Option<usize> {
-        self.drop_mine(owner);
-        let i = self.slots.iter().position(|s| s.is_none())?;
-        self.slots[i] = Some(HeldKey { uid, seed: *seed, owner, seq: self.next });
-        self.next += 1;
-        Some(i)
-    }
-
-    /// Drop the key under `handle`, if the sender is its holder or root.
-    pub fn drop_handle(&mut self, handle: u64, sender: u64, sender_uid: u32) -> u64 {
-        let Some(slot) = usize::try_from(handle).ok().and_then(|h| self.slots.get_mut(h)) else {
-            return syscall_abi::NET_KEY_NOT_HELD;
-        };
-        match slot {
-            None => syscall_abi::NET_KEY_NOT_HELD,
-            Some(k) if k.owner != sender && sender_uid != 0 => syscall_abi::NET_KEY_DENIED,
-            Some(_) => {
-                *slot = None;
-                syscall_abi::NET_KEY_OK
-            }
-        }
-    }
-
-    /// Drop every key `owner` holds, returning how many.
-    pub fn drop_mine(&mut self, owner: u64) -> usize {
-        let mut n = 0;
-        for slot in self.slots.iter_mut() {
-            if matches!(slot, Some(k) if k.owner == owner) {
-                *slot = None;
-                n += 1;
-            }
-        }
-        n
-    }
-
-    /// The idle pass: drop the key of every owner that is gone.
-    pub fn reap_dead(&mut self) {
-        for slot in self.slots.iter_mut() {
-            if matches!(slot, Some(k) if !alive(k.owner)) {
-                *slot = None;
-            }
-        }
-    }
-
-    /// The seed held for `uid` by a login that is still alive, for signing
-    /// that user's credential (step 8): the NEWEST of those keys. Two logins
-    /// of one user hold the same key, derived from the same name, realm and
-    /// password, unless the password changed between them; then only the
-    /// later login's key matches the registry the password change rewrote,
-    /// and the slot order says nothing about which that is (high review of
-    /// step 8). A dead login's key is not used, though the idle pass has not
-    /// reaped it yet: a killed login's user is not attested by it (medium
-    /// review of step 8).
-    pub fn seed_for(&self, uid: u32) -> Option<&[u8; 32]> {
-        self.slots.iter().flatten().filter(|k| k.uid == uid && alive(k.owner)).max_by_key(|k| k.seq).map(|k| &k.seed)
-    }
-
-    /// Whether a key is held for `uid` by a login that is still alive, asked
-    /// without waiting for the idle pass to reap a dead one. The one test of
-    /// "this user is held" every caller asks: what signs the credential
-    /// (`seed_for`), what lets a session opened under it be used
-    /// (`park_session`, `sign_parked`) and what keeps it open
-    /// (`close_unheld`), so no two of them disagree in the window between a
-    /// login's death and its reap (medium review of step 8).
-    pub fn holds_live(&self, uid: u32) -> bool {
-        self.seed_for(uid).is_some()
-    }
-
-    /// The uids with a key held, into `out`; returns how many (the diagnostic
-    /// `NETOP_KEY_LIST`). Never the keys.
-    pub fn uids(&self, out: &mut [u32; NET_KEY_MAX]) -> usize {
-        let mut n = 0;
-        for k in self.slots.iter().flatten() {
-            out[n] = k.uid;
-            n += 1;
-        }
-        n
-    }
-}
-
-/// Whether the task `owner` names is still running: its slot holds the same
-/// packed identity and is runnable or blocked, not a zombie.
-///
-/// State FIRST, identity second, so a slot recycled at any point between the
-/// two reads fails the identity comparison: a state read from the new occupant
-/// is never paired with the old occupant's identity.
-fn alive(owner: u64) -> bool {
-    let slot = syscall_abi::task_id_slot(owner);
-    let state = syscall(syscall_abi::TASK_STATE, slot);
-    let now = syscall(syscall_abi::TASK_IDENTITY, slot);
-    now == owner && (state == syscall_abi::TASK_STATE_RUNNABLE || state == syscall_abi::TASK_STATE_BLOCKED)
 }

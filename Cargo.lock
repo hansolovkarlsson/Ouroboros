@@ -238,6 +238,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "heldkeys"
+version = "0.1.0"
+dependencies = [
+ "syscall-abi",
+]
+
+[[package]]
 name = "hello"
 version = "0.1.0"
 dependencies = [
@@ -329,6 +336,7 @@ dependencies = [
  "accounts",
  "clusterkeys",
  "ed25519",
+ "heldkeys",
  "ninep-abi",
  "syscall-abi",
 ]
