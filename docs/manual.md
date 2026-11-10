@@ -353,8 +353,9 @@ from A, A serves B's `/host` reads as you until the run ends (never as root
 without the `root` flag). A run sent with your credential, which is every
 run you start while logged in on a machine with a realm, is also ended on A
 when your last login there goes, as your held connections are: you get the
-output so far and a line saying why, the command on B is not stopped, and
-its `/host` reads are refused from then on. A run sent without one (no
+output so far and a line saying why, and B ends the command when it sees
+the connection close. (A caller that vanishes without closing, a machine
+powered off mid-run, is not noticed: its command runs to its own end.) A run sent without one (no
 realm on A, or root's `su` to you) lasts until it ends.
 
 **Strong passwords are part of the cluster's model now.** A credential is a
