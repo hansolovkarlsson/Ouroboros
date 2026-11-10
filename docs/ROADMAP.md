@@ -3715,12 +3715,14 @@ would otherwise silently shrink into looking like nothing was ever found.
       exempts a connection with a live child, nothing is in flight for the
       RTO, and there is no keepalive, so the slot and the child are held
       for good), and every child of a `netd` the supervisor restarts, whose
-      table goes without a `Drop`. **A new cost, accepted for now:** the
+      table goes without a `Drop`. **A new cost, accepted by Hans the same day:** the
       blind RST and the duplicate SYN above used to lose a run's output and
       now stop the command midway, a half-written file where there was a
       whole one; and a peer that half-closes and reads on has its command
       ended, which neither `cpu` client does. The cure for the first is
-      the receive-path hardening this ledger is waiting on a rig for.
+      the receive-path hardening this ledger is waiting on a rig for; the
+      other choice, holding the kill until then, would have left the
+      orphan, which every logout reaches.
       **Pre-existing, found by the same review:** `cpu_child_msg` takes any
       zero-length message from the child as its end of stream, so a command
       that writes nothing mid-run has netd `WAIT` on it, event loop blocked,
