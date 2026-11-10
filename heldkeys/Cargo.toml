@@ -1,0 +1,19 @@
+[package]
+name = "heldkeys"
+version = "0.1.0"
+edition = "2021"
+
+# Pure, no_std, no I/O, no syscalls, no heap: the rules of netd's held user
+# keys (docs/roadmap/roadmap-user-keys.md, Decision 4), with what the kernel
+# knows passed in. netd is the one caller; the crate exists so the rules that
+# turn on a moment no driven boot can reach (a login dead and not yet reaped)
+# have checks that can fail.
+#
+# Host-testable: cargo test -p heldkeys --target aarch64-apple-darwin, or
+# `make test`.
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# NET_KEY_MAX and the NET_KEY_* answers, which login and clusterkey read.
+syscall-abi = { path = "../syscall-abi" }

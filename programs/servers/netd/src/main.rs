@@ -627,7 +627,7 @@ fn serve(packed_mac: u64) -> ! {
     let mut pending = PendingRun::new();
     // Held user keys (step 4 of docs/roadmap/roadmap-user-keys.md): the seeds
     // `login` hands over, on this frame like the tables above. See held.rs.
-    let mut held = held::Held::new();
+    let mut held = held::new();
     loop {
         // Block until a client message or an incoming frame is pending (or
         // return immediately if either already is). While *any* connection has
