@@ -2621,6 +2621,31 @@ fn fsd_generation() -> u64 {
     syscall(syscall_abi::TASK_IDENTITY, syscall_abi::FSD_TASK)
 }
 
+/// End the child of a `cpu` run whose connection is going away
+/// (`TcpConn`'s `Drop`). `child` is the packed identity captured at the spawn.
+///
+/// `KILL` takes a slot, and a slot outlives its occupant, so the slot's
+/// identity is read first and nothing is killed unless it is still the
+/// child's: a child that exited and was reaped by someone's `wait N` may have
+/// been replaced by another task. Two syscalls, so not atomic: a child on
+/// another core that exits, is reaped and has its slot spawned into between
+/// the two would lose the newcomer. That needs a foreign `wait` of this very
+/// slot inside one syscall's width, and closing it for good is a kill that
+/// takes an identity, which the kernel does not have.
+///
+/// A child that has exited and not been reaped still holds its identity (a
+/// zombie), and the kill reaps it. The kernel's answer is not read: every
+/// refusal means there is nothing of ours left to end.
+fn kill_run_child(child: u64) {
+    if child == CPU_NONE {
+        return;
+    }
+    let slot = syscall_abi::task_id_slot(child);
+    if syscall(syscall_abi::TASK_IDENTITY, slot) == child {
+        let _ = syscall(syscall_abi::KILL, slot);
+    }
+}
+
 /// A connection's fids die with it. `Drop`, and not a clunk at each site that
 /// frees a slot: there are six of those (the peer's FIN, its RST, the idle
 /// reap, the RTO give-up, a SYN rebuilding the slot, and the serve loop's own
@@ -2632,15 +2657,23 @@ fn fsd_generation() -> u64 {
 /// fsd no longer knows (fsd restarted) answers an error that is ignored: the
 /// handle is gone either way.
 ///
-/// The fids are the ONLY per-connection resource released here, and that is
-/// the limit of the claim above. A running `cpu_child` is not: a `WAIT` on a
-/// live child would block the event loop, and a `KILL` or a deferred reap is
-/// its own change. So a peer that RSTs or FINs mid-run leaves the child to
-/// finish into a connection that no longer exists, and nothing reaps it
-/// (`docs/ROADMAP.md`, the receive-path ledger). Pre-existing; named here so
-/// this doc is not read as the connection's whole teardown.
+/// A run's child dies with its connection too (2026-11-10). Until then a
+/// peer that closed mid-run, by a RST or a FIN, left the command running into
+/// a connection that no longer existed, and nothing reaped it: it held a task
+/// slot until someone typed `wait N`. Since per-user keys a logout on the
+/// dispatching machine closes its user's runs, so that was a routine event.
+/// It is a `KILL` and not a `WAIT`: a `WAIT` on a live child would block the
+/// event loop, and a kill reaps at once. A run that ended in the ordinary way
+/// has `cpu_child` back at `CPU_NONE` (`cpu_child_msg`, which `WAIT`s it), so
+/// nothing is killed for it.
+///
+/// What this does not reach: a task the child itself spawned (the kernel has
+/// no kill of a tree), and whatever of the child's is still queued in the
+/// mailbox, which finds no connection and is answered as an unknown request.
 impl Drop for TcpConn {
     fn drop(&mut self) {
+        kill_run_child(self.cpu_child);
+        self.cpu_child = CPU_NONE;
         let gen = fsd_generation();
         for f in self.fids.iter_mut() {
             // Only a fid still on the generation it was opened against is
