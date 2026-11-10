@@ -1202,7 +1202,7 @@ see [`manual.md`](../manual.md)'s Parallels section.
 | `run-image-ext2` | ext2 partition + FAT32 ESP (needs `e2fsprogs`); **+ virtio-rng** |
 | `run-sd` | `disk.img` on an SD card (`sdhci-pci`), the ESP on `virtio-blk-pci`: the root from the card (section 2) |
 | `run-net` | virtio-net + SLIRP + `net.pcap` |
-| `test-async-rmount` | three driven boots against host 9P peers: the parked remote mount (section 4) |
+| `test-async-rmount` | six driven boots against host 9P peers: the parked remote mount (section 4) |
 | `run-image-net` | real FAT32 **and** the NIC |
 | `run-image-server` | + `hostfwd tcp::5555->:80` (host `curl` reaches netd) |
 | `run-image-9p` | + `hostfwd tcp::5640->:564` (host reads guest's disk over 9P) |

@@ -80,13 +80,21 @@ boot() {
     while :; do
         tries=$((tries + 1))
         out=$(python3 scripts/drive-qemu.py "$IMG" --slirp 'login:@@root' 'assword@@root' "$@" \
-            '# @@mount -p /proc' '# @@cat /proc/4/stackfree' '# @@' 2>&1)
+            "$ready@@mount -p /proc" '# @@cat /proc/4/stackfree' '# @@' 2>&1)
         case $out in *"BdsDxe: starting"*) break ;; esac
         [ $tries -lt 3 ] || break
         echo "     (firmware never reached its boot entry, retrying)" >&2
     done
     stack
+    ready='# '
 }
+# What boot's own last steps wait for before they read netd's stack: a
+# prompt, or, set before a boot that leaves a request parked on a silent
+# peer, that request's failure line. The deadline's path is part of the run
+# being measured, and it prints 5 s after the request, later than a prompt
+# (until the medium review of #439 the mark was read before it, in both such
+# boots). Waiting for the line also keeps it off the reading's own lines.
+ready='# '
 # netd's stack low-water mark at the end of the boot just driven: the bytes
 # of its stack it never wrote (/proc/4/stackfree, the kernel's
 # TASK_STACK_FREE; 4 is netd's slot), read after every graded step so the
@@ -140,8 +148,9 @@ stop_peers
 
 # 3. concurrent
 peer $PEER; peer $SLOW --delay 30; sleep 3
+ready='no filesystem mounted'
 boot '# @@mount -r 10.0.2.2:5641 /mnt/h' '# @@mount -r 10.0.2.2:5642 /mnt/s' \
-     '# @@exec /bin/cat /mnt/s/HELLO.TXT' '# @@cat /mnt/h/SUB/NOTE.TXT' '# @@uptime'
+     '# @@exec /bin/cat /mnt/s/HELLO.TXT' '# @@cat /mnt/h/SUB/NOTE.TXT'
 n=$((n + 1)); log=build/async-$n.txt
 printf '%s\n' "$out" | tr -d '\r' > "$log"
 tail=$(after 'cat /mnt/h/SUB/NOTE.TXT' < "$log")
@@ -193,8 +202,9 @@ stop_peers
 peer $PEER; peer $SLOW --delay 30; sleep 3
 # cremote's first line (a LOCAL read, SH.BIN is its first bytes) races the
 # prompt `exec` gives back, so the next step waits for that line, not for `# `.
+ready='HELLO.TXT: open failed'
 boot '# @@mount -r 10.0.2.2:5642 /mnt/a' '# @@mount -r 10.0.2.2:5641 /mnt/h' \
-     '# @@exec /bin/cremote' 'SH.BIN@@cat /mnt/h/SUB/NOTE.TXT' '# @@uptime'
+     '# @@exec /bin/cremote' 'SH.BIN@@cat /mnt/h/SUB/NOTE.TXT'
 n=$((n + 1)); log=build/async-$n.txt
 printf '%s\n' "$out" | tr -d '\r' > "$log"
 # Anchored on the exec line: the cat's own echo has the prompt merged into

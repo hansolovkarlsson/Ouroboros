@@ -42,11 +42,11 @@ _spec.loader.exec_module(drive_qemu)
 IMAGE = os.path.join(ROOT, "build", "esp.img")
 TRANSCRIPT = os.path.join(ROOT, "build", "test-stack-free.txt")
 PROMPT = "# "
-CHUNK = 1024  # stackprobe's bytes a level
-FRAME_WORDS = 128  # the most a level's frame may add to its chunk
+CHUNK = 1024  # stackprobe's bytes a level (its CHUNK; a copy, and the frame check fails if they part)
+FRAME_EXTRA = 128  # the most bytes a level's frame may add to its chunk
 FRESH = 1024  # the most a program may have written before its first act
 NETD = 4  # netd's slot (syscall-abi's NET_TASK)
-IDLE = 1
+IDLE = 1  # the idle task's (kernel/src/tasks.rs)
 LINE = r"stackprobe: slot (\d+) size (\d+) free (\d+) then (\d+)"
 
 failed = 0
@@ -110,8 +110,8 @@ def main():
         if check(None not in (shallow, deep, zeros), f"the three depths print their lines: {shallow}, {deep}, {zeros}"):
             moved = shallow[3] - deep[3]
             frame, rest = divmod(moved, 16)
-            check(rest == 0 and CHUNK <= frame <= CHUNK + FRAME_WORDS,
-                  f"16 levels more write 16 frames more, each {CHUNK} to {CHUNK + FRAME_WORDS} bytes: "
+            check(rest == 0 and CHUNK <= frame <= CHUNK + FRAME_EXTRA,
+                  f"16 levels more write 16 frames more, each {CHUNK} to {CHUNK + FRAME_EXTRA} bytes: "
                   f"{shallow[3]} then {deep[3]}, {moved} bytes, {frame} a frame, {rest} over")
             check(deep[2] - deep[3] >= 24 * CHUNK,
                   f"24 levels fall the count by at least their {24 * CHUNK} bytes: {deep[2]} then {deep[3]}")

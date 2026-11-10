@@ -216,7 +216,7 @@ make test-parallels           # scripted real-hardware round trip via prlctl
 make test-early-fault         # the early fault reporter on QEMU
 make run-el2                  # `run` with the firmware handing off at EL2
 make test-el1-drop            # the EL1 drop: test-early-fault's three boots handed off at EL2
-make test-async-rmount        # three driven QEMU boots against host-run 9P peers
+make test-async-rmount        # six driven QEMU boots against host-run 9P peers
 make test-call-interrupt      # an interrupted call's late answer goes nowhere
 make test-held-keys           # six driven QEMU boots of the held user keys
 make test-run-callback        # a `cpu` run's /host callbacks served while the run is in flight, and only then

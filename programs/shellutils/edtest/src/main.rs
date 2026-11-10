@@ -121,8 +121,11 @@ enum Op {
 }
 
 /// The byte a stack probe is painted with, chosen as an unlikely value to write
-/// by accident.
-const PAINT: u8 = 0xA5;
+/// by accident. Not the loader's own paint (`0xA5`, kernel/src/loader.rs's
+/// `STACK_PAINT`): the kernel counts that byte as stack never written, and
+/// this program painted with it would read as having used none
+/// (`/proc/<n>/stackfree`).
+const PAINT: u8 = 0xC3;
 
 /// The loader jumps to the region's base, so `_start` must be the first thing in
 /// `.text` - the invariant `programs/linker.ld` keeps trivially true and which
