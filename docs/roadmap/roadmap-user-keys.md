@@ -1014,7 +1014,19 @@ Before the guard, the no-close control's first run left the two fid checks
 green: `cfidwait` held the fid 60 s, past the far export's 30 s idle reap, so
 the fid died at A whatever B did. The hold is 25 s now.
 
-**Not covered by a control: the uid captured at the park.** The plan's
+**Covered since 2026-11-10, by host tests and not by a boot.** The three
+rules this plan recorded as held by no rig, each turning on a moment inside
+one drain of `netd`'s mailbox, are the `heldkeys` crate's now, with what the
+kernel knows passed in: a dead login's key held and never used; a run whose
+key went between the park and the send not sent, and the note kept off a run
+that finished in the same pass; and the credential signed for the parked
+uid. The last is a shape as much as a test: a park makes a `Standing`, the
+send asks the table with it, and no seed comes from a bare uid. Seventeen
+mutations of the crate are each caught. What no test holds is `netd`'s
+wiring of them, which the rigs cover for the ordinary cases, and a `Standing`
+made outside a park would still compile.
+
+**Not covered by a control (as written 2026-11-08): the uid captured at the park.** The plan's
 mutation, `SENDER_ID` read at sign time, passes every check. The park and the
 sign happen in one drain of `netd`'s mailbox, so a credential is signed for
 another uid only if that uid's message lands between them, and root's flood
