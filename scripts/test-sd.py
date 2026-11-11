@@ -24,15 +24,16 @@ exactly as the host's copy of the staged stamp has it, then write a file
 on the Pi: `mount 0 /mnt/boot` must say the mount is read-only and why,
 `ls` there must still list it, and `write /mnt/boot/sdtest hello` must be
 refused as "read-only filesystem", by fsd's gate before any sector is tried:
-no kernel line about a refused write in that boot. Until 2026-11-11 the
+no kernel line about a refused write in that boot. A second `mount 0`, which
+binds the tree already there, must say the reason again. Until 2026-11-11 the
 mount said nothing and the write said "device I/O error". Then power off.
 
 **The second boot** of the same card must read that file back, written by the
 first (step 2's writes, through `sdhci.rs`'s CMD24, out to the image and back
-in through CMD17), and then try `unmount`, `partition fat32` and `format
-fat32`. `partition` writes sector 0, the table that finds the firmware
-partition: it must be refused, the kernel's line saying so, and must say
-"read-only" and why, the driver's refusal carried up through `BLOCK_WRITE`
+in through CMD17), and then try `unmount`, `erase disk`, `partition fat32`
+and `format fat32`. `erase` and `partition` write sector 0, the table that
+finds the firmware partition: each must be refused, the kernel's line saying
+so at the first, and must say "read-only" and why, the driver's refusal carried up through `BLOCK_WRITE`
 where no mount stands for fsd's gate to refuse at. `format` must not format
 either, but that is no test of the guard: its target is the root (`mount`'s
 rule), 24 MiB and too small for FAT32, refused before any write. Until
@@ -89,10 +90,16 @@ No fault line in QEMU's trace on any boot. What it cannot see, each run as
 a mutation and passing: QEMU models no data lines, so a 4-bit bus the card
 was never told about (no ACMD6) reads the same as one it was; it completes a
 write at once, so a write whose end is not waited for still lands; and it
-models no clock rate. Those are the Pi's to show (step 3). Run it whenever kernel/src/sdhci.rs, pci::discover_sdhci, main.rs's
+models no clock rate. Those are the Pi's to show (step 3). Nor the card's
+write-protect switch, which the driver reads at bring-up, at each write and
+for `BLOCK_PROTECTED`: QEMU reports it for a read-only drive and refuses
+such a drive as a card ("Cannot use read-only drive as SD card", tried
+2026-11-11), so `WriteProtected` and a switched card's mount line are
+graded by nothing here. Run it whenever kernel/src/sdhci.rs, pci::discover_sdhci, main.rs's
 init_sd, install_sd_fallback or the order of the disk paths,
 parttable::firmware_sectors, block.rs, the BLOCK_WRITE or BLOCK_PROTECTED
-arms, fsd's disk.rs or vfs::Mount's reasons changes. About ten minutes.
+arms, fsd's disk.rs or vfs::Mount's reasons, or the shell's erase,
+partition or format lines change. About ten minutes.
 """
 import importlib.util
 import os
@@ -144,8 +151,8 @@ def card_image(path, size, source=DISK):
         fh.truncate(size)
 
 
-# fsd's line at a mount of a partition the card's driver never writes.
-KEPT = "fsd: mounted read-only: the disk's driver never writes this partition (an SD card's firmware partition)"
+# fsd's line at a mount the card's driver would decline a write in.
+KEPT = "fsd: mounted read-only: the disk's driver does not write here (an SD card's firmware partition or write-protect switch)"
 
 
 def firmware_sectors():
@@ -259,10 +266,12 @@ def main() -> int:
                 ("mount 0 /mnt/boot", ""),
                 ("ls /mnt/boot", "EFI"),
                 ("write /mnt/boot/sdtest hello", "write: "),
+                ("mount 0 /mnt/again", ""),
             ])
             ok2, out2, got2, faults2 = boot(name, "reread", path, [
                 ("cat /sdnote", NOTE),
                 ("unmount", "unmounted"),
+                ("erase disk", "erase: "),
                 ("partition fat32", "partition: "),
                 ("format fat32", "format: "),
             ])
@@ -273,8 +282,10 @@ def main() -> int:
         reread = got2[0] if got2 else ""
         mounted = got1[3] if len(got1) > 3 else ""
         written = got1[5] if len(got1) > 5 else ""
-        partitioned = got2[2] if len(got2) > 2 else ""
-        formatted = got2[3] if len(got2) > 3 else ""
+        again = got1[6] if len(got1) > 6 else ""
+        erased = got2[2] if len(got2) > 2 else ""
+        partitioned = got2[3] if len(got2) > 3 else ""
+        formatted = got2[4] if len(got2) > 4 else ""
         checks += [
             (f"{name}: both boots driven to the end and powered off", ok1 and ok2),
             (f"{name}: the kernel names the card ({kind})", "sd: SDHCI version field" in out1 and kind in out1),
@@ -287,8 +298,11 @@ def main() -> int:
             (f"{name}: `mount 0` says the firmware partition is read-only, and why", KEPT in mounted),
             (f"{name}: a write there is refused as read-only, not as an I/O error",
              "write: read-only filesystem" in written and "I/O error" not in written),
+            (f"{name}: a second `mount 0`, of the tree already there, says it again", KEPT in again),
             (f"{name}: refused by fsd's gate, no sector tried: no kernel line about a refused write in that boot",
              "sd: a write to sector" not in out1),
+            (f"{name}: erase's write to sector 0 refused by the kernel, and said as read-only",
+             "sd: a write to sector 0 refused" in erased and "erase: read-only: " in erased and "I/O error" not in erased),
             (f"{name}: partition's write to sector 0 refused by the kernel",
              "sd: a write to sector 0 refused" in out2 and "partitioned" not in partitioned),
             (f"{name}: partition says read-only, not an I/O error",

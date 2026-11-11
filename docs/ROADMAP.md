@@ -798,9 +798,10 @@ not yet checked on this tree are marked (predicted).
             (`BLOCK_ERR_PROTECTED`), which `erase`, `partition` and
             `format` now say as read-only where no mount stands. Graded by
             `make test-sd` on QEMU's card, a tenth boot added; not yet run
-            on the board. The write-protect switch is carried by the
-            second line only: it is read at each write, so no mount is
-            told of it up front. The rig's "format over the firmware
+            on the board. The write-protect switch counts on both lines
+            since the review of #445 (asked at the mount as it reads then,
+            and read again at each write), and is graded by nothing: QEMU
+            refuses a read-only drive as a card. The rig's "format over the firmware
             partition refused" had never reached the guard: its target was
             the root, too small for FAT32. As found (seen 2026-11-08): `write test hello` in `/mnt/boot` on the card, the
             firmware partition `mount 0` gives, is refused by the SD

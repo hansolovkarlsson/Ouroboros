@@ -20,17 +20,22 @@ kernel's log said why. Both lines Hans chose are in. First, `fsd` asks the
 kernel of each partition as it mounts it (`BLOCK_PROTECTED`, syscall 79,
 answered by the rule the driver refuses by) and holds one the device never
 writes read-only: the mount says `fsd: mounted read-only: the disk's driver
-never writes this partition (an SD card's firmware partition)`, and a change
+does not write here (an SD card's firmware partition or write-protect
+switch)`, and a change
 is refused at fsd's gate as "read-only filesystem" before any filesystem
 code begins it. Second, `BLOCK_WRITE` answers a declined write
-`BLOCK_ERR_PROTECTED`, the card's write-protect switch included, and
-`erase`, `partition` and `format`, which write where no mount stands, say
-`read-only:` and why. The error band's floor steps to `MAX-47` for the new
+`BLOCK_ERR_PROTECTED`, and `erase`, `partition` and `format`, which write
+where no mount stands, say `read-only:` and why. The card's write-protect
+switch counts on both lines, in code that no rig reaches: QEMU refuses a
+read-only drive as a card. The error band's floor steps to `MAX-47` for the new
 code, with `sys.h`'s mirror. `make test-sd` grades it on QEMU's card, with a
 tenth boot in which `format` targets the firmware partition; the rig's old
 "format over the firmware partition refused" check had passed on a root too
-small for FAT32, never reaching the guard, and is renamed. Not yet run on
-the board.
+small for FAT32, never reaching the guard, and is renamed. The review of
+#445 added the switch to the mount's question, asked it of the extent the
+volume mounted with and not the table's length, made the question part of
+the one constructor a disk mount has, and had a repeated `mount N` say its
+reasons again. Not yet run on the board.
 
 **`tree` says what it did not descend, and its depth cap is held by the build (2026-11-11, #444).**
 The stack check listed `tree` as recursing by its input, "about forty

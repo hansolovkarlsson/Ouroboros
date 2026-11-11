@@ -75,13 +75,14 @@ impl BlockDevice {
         }
     }
 
-    /// Whether any of the `count` sectors from `first` is one this device
-    /// never writes (`BLOCK_PROTECTED`'s answer): an SD card's firmware
-    /// partition and the tables that find it. No other driver keeps any.
+    /// Whether this device would decline a write to any of the `count`
+    /// sectors from `first` (`BLOCK_PROTECTED`'s answer): an SD card's
+    /// firmware partition and the tables that find it, or a card whose
+    /// write-protect switch is set. No other driver declines any.
     pub fn protects(&self, first: u64, count: u64) -> bool {
         match self {
             BlockDevice::Virtio(_) | BlockDevice::UsbMsd(_) => false,
-            BlockDevice::Sdhci(d) => d.protecting(first, count).is_some(),
+            BlockDevice::Sdhci(d) => d.declines(first, count),
         }
     }
 

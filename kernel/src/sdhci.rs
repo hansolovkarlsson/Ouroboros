@@ -243,6 +243,17 @@ impl Device {
         })
     }
 
+    /// Whether a write to any of the `count` sectors from `first` would be
+    /// declined now: a protected range holds one, or the card's
+    /// write-protect switch is set, read as `write_one` reads it. What
+    /// `BLOCK_PROTECTED` answers, so a switched card's mount is read-only
+    /// from its first line too (the review of #445; the first cut asked the
+    /// ranges alone). The switch is the one answer that can change after it
+    /// is given, and `write_one` still reads it at every write.
+    pub fn declines(&self, first: u64, count: u64) -> bool {
+        self.protecting(first, count).is_some() || self.read(PRESENT_STATE) & WRITE_ENABLED == 0
+    }
+
     /// The command argument for `sector`: bytes on a standard-capacity
     /// card, blocks on a high-capacity one.
     fn address(&self, sector: u64) -> Result<u32, Error> {

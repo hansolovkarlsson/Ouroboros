@@ -436,16 +436,17 @@ pub const BLOCK_READ: u64 = 27;
 pub const BLOCK_WRITE: u64 = 28;
 
 /// `(first lba, sector count)` -> `0` when the device would take a write
-/// to each of those sectors, [`BLOCK_ERR_PROTECTED`] when it never writes
-/// one of them (an SD card's firmware partition and the tables that find
-/// it, the only such sectors today), [`BLOCK_ERR_NO_DEVICE`] with no
+/// to each of those sectors, [`BLOCK_ERR_PROTECTED`] when it would decline
+/// one (an SD card's firmware partition and the tables that find it, or
+/// any sector of a card whose write-protect switch is set, the only such
+/// cases today), [`BLOCK_ERR_NO_DEVICE`] with no
 /// device, [`BLOCK_ERR_DENIED`] for any caller but [`FSD_TASK`]. Answered
 /// by the rule [`BLOCK_WRITE`] refuses by, and nothing is read or written.
 /// For `fsd` to ask of a partition as it mounts it, so the mount is
 /// read-only from its first line and no change is begun there (since
 /// 2026-11-11; until then the first word of it was a program's "device I/O
-/// error"). It does not ask about a card's write-protect switch, which is
-/// read at each write.
+/// error"). The switch is answered as it reads at the call; a switch moved
+/// after a mount is met by [`BLOCK_WRITE`], which reads it at each write.
 pub const BLOCK_PROTECTED: u64 = 79;
 
 /// The fixed sector size the `BLOCK_*` syscalls transfer, in bytes.

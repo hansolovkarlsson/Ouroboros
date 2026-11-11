@@ -4487,9 +4487,18 @@ fn cmd_erase(arg: &str) {
         MOUNT_NO_DEVICE => print_line("erase: no disk device"),
         // The driver declined (`BLOCK_ERR_PROTECTED` through fsd): nothing
         // failed, so it is not called an I/O error (since 2026-11-11).
-        syscall_abi::FS_ERR_READ_ONLY => print_line("erase: read-only: the disk's driver never writes those sectors (an SD card's firmware partition)"),
+        syscall_abi::FS_ERR_READ_ONLY => print_declined("erase"),
         _ => print_line("erase: I/O error"),
     }
+}
+
+/// A disk command's line for a write the disk's driver declined
+/// (`FS_ERR_READ_ONLY` from `erase`, `partition` or `format`): the one
+/// spelling for the three. It names both causes the kernel has, since the
+/// status does not say which; the kernel's own log does.
+fn print_declined(command: &str) {
+    print_str(command);
+    print_line(": read-only: the disk's driver does not write there (an SD card's firmware partition or write-protect switch)");
 }
 
 /// `partition [fat32|exfat|ext2]` - writes a single-partition MBR spanning the
@@ -4513,7 +4522,7 @@ fn cmd_partition(arg: &str) {
         MOUNT_ALREADY => print_line("partition: a filesystem is mounted - run `unmount` first"),
         MOUNT_NO_DEVICE => print_line("partition: no disk device"),
         syscall_abi::FS_ERR_NOT_SUPPORTED => print_line("partition: the disk holds a GPT, which this would not replace - run `erase disk` first"),
-        syscall_abi::FS_ERR_READ_ONLY => print_line("partition: read-only: the disk's driver never writes those sectors (an SD card's firmware partition)"),
+        syscall_abi::FS_ERR_READ_ONLY => print_declined("partition"),
         _ => print_line("partition: disk too small or I/O error"),
     }
 }
@@ -4538,7 +4547,7 @@ fn cmd_format(arg: &str) {
         MOUNT_ALREADY => print_line("format: a filesystem is mounted - run `unmount` first"),
         MOUNT_NO_DEVICE => print_line("format: no disk device"),
         FS_ERR_NOT_FOUND => print_line("format: no MBR partition to format - run `partition` first (a GPT disk is not formatted here)"),
-        syscall_abi::FS_ERR_READ_ONLY => print_line("format: read-only: the disk's driver never writes those sectors (an SD card's firmware partition)"),
+        syscall_abi::FS_ERR_READ_ONLY => print_declined("format"),
         _ => print_line("format: the partition is too small, or an I/O error occurred"),
     }
 }

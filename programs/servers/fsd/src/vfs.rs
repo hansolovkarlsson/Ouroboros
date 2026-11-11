@@ -100,9 +100,11 @@ pub enum Filesystem {
 pub struct Mount {
     fs: Filesystem,
     held: Option<&'static str>,
-    /// fsd's second reason, the device's: the partition lies in sectors the
-    /// disk's driver never writes ([`Device::never_writes`], an SD card's
-    /// firmware partition). Asked as the mount is made, so every change is
+    /// fsd's second reason, the device's: the disk's driver would decline a
+    /// write in the volume's extent ([`Device::never_writes`]: an SD card's
+    /// firmware partition, or a card switched to read-only). Asked as the
+    /// mount is made, by the one constructor a disk mount has
+    /// ([`on_disk`](Self::on_disk)), so every change is
     /// refused at the gate and none is begun for the driver to decline a
     /// sector at a time (since 2026-11-11). Beside `held`, not in it: the
     /// Pi's firmware partition is also the fallback D5 holds, and each
@@ -116,23 +118,25 @@ pub struct Mount {
 }
 
 impl Mount {
-    /// `fs`, read-only only as its arm says.
-    fn new(fs: Filesystem) -> Self {
-        Mount { fs, held: None, kept: None, boot: None }
-    }
-
-    /// The reason a mount of `part` is read-only by its device, `None` when
-    /// the device writes all of it: the one spelling for both mount paths.
-    fn kept_by(device: &Device, part: &partition::Partition) -> Option<&'static str> {
-        device
-            .never_writes(part.start, part.sectors)
-            .then_some("the disk's driver never writes this partition (an SD card's firmware partition)")
+    /// A volume on `device`, at the partition `at`: the one way a disk
+    /// mount is made, so none comes up without the device having been asked
+    /// whether it writes there (the review of #445: asked beside a plain
+    /// constructor, a new mount path could leave it out and compile).
+    /// Asked of the extent the volume was bound to when probed
+    /// (`at.bound`, never 0 for a partition that mounted), not the table's
+    /// length, which can be 0 for one that mounts.
+    fn on_disk(device: &Device, fs: Filesystem, at: &Candidate, held: Option<&'static str>, boot: Option<u64>) -> Self {
+        let kept = device
+            .never_writes(at.part.start, at.bound)
+            .then_some("the disk's driver does not write here (an SD card's firmware partition or write-protect switch)");
+        Mount { fs, held, kept, boot }
     }
 
     /// The synthetic `/proc` filesystem - auto-mounted at the reserved `PROC_TREE`
     /// index at boot (no disk, so no probing).
     pub fn proc() -> Self {
-        Mount::new(Filesystem::Proc(proc::Fs::new()))
+        // No disk under it, so no device to ask.
+        Mount { fs: Filesystem::Proc(proc::Fs::new()), held: None, kept: None, boot: None }
     }
 
     /// The volume.
@@ -220,8 +224,7 @@ impl Filesystem {
             (true, true, false) => Some("the partition typed as the root did not mount, so an untyped partition is `/`"),
             (true, false, _) => Some("no partition beside the boot partition mounted, so the boot partition is `/`"),
         };
-        let kept = Mount::kept_by(device, &roots.order[i].part);
-        Ok((Mount { fs, held, kept, boot }, probed.failed.is_some()))
+        Ok((Mount::on_disk(device, fs, &roots.order[i], held, boot), probed.failed.is_some()))
     }
 
     /// The first of `parts` that [`probe`](Self::probe)
@@ -302,7 +305,7 @@ impl Filesystem {
         };
         let bound = volume_bound(&parts[index], &parts[..count], device.disk().capacity_sectors().ok());
         let fs = Self::probe(device, lba32, bound)?.ok_or(Error::NoFat32Partition)?;
-        Ok(Mount { kept: Mount::kept_by(device, &parts[index]), ..Mount::new(fs) })
+        Ok(Mount::on_disk(device, fs, &Candidate { part: parts[index], bound }, None, None))
     }
 
     /// The mounted format's name, for the startup/mount log line.

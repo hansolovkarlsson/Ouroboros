@@ -723,6 +723,12 @@ fn handle(device: &disk::Device, mounts: &mut [Option<vfs::Mount>; MAX_MOUNTS], 
             Err(_) => return status_reply(reply, syscall_abi::NO_FS),
         };
         if let Some(existing) = tree_of(mounts, mount.fs()) {
+            // Said to this caller too: the tree may be one another shell
+            // mounted, or `/` itself, and its read-only reasons were printed
+            // to whoever was looking then (the review of #445).
+            if let Some(held) = mounts[existing].as_ref() {
+                say_read_only(held);
+            }
             return status_reply(reply, existing as u64);
         }
         let Some(tree) = (1..MAX_MOUNTS).find(|&t| mounts[t].is_none()) else {
@@ -734,8 +740,7 @@ fn handle(device: &disk::Device, mounts: &mut [Option<vfs::Mount>; MAX_MOUNTS], 
         // may hold the device's (an SD card's firmware partition, `mount 0`
         // on the Pi); every reason is printed, so this line cannot drop one.
         // A writable one writes nothing: every piece is empty.
-        let [held, kept, volume] = read_only_lines(&mount);
-        con_write_parts(&[held[0], held[1], held[2], kept[0], kept[1], kept[2], volume[0], volume[1], volume[2]]);
+        say_read_only(&mount);
         mounts[tree] = Some(mount);
         status_reply(reply, tree as u64)
     } else if op == syscall_abi::FSOP_MOUNT_INFO {
@@ -2042,7 +2047,6 @@ fn error_name(e: &fat32::Error) -> &'static str {
         fat32::Error::ReadOnly => "read-only filesystem",
         fat32::Error::Unsupported => "operation not supported by this filesystem",
         fat32::Error::UnsupportedSectorSize(_) => "unsupported sector size",
-        fat32::Error::Io(disk::DiskError::Protected) => "the disk does not write there",
         fat32::Error::Io(_) => "disk I/O error",
         fat32::Error::NotFound => "not found",
         fat32::Error::NotAFile => "not a file",
@@ -2087,6 +2091,13 @@ fn read_only_lines(mount: &vfs::Mount) -> [[&'static str; 3]; 3] {
     })
 }
 
+/// Every read-only reason of `mount`, in one write; nothing when it is
+/// writable. What `mount N` prints, for a new tree and for one already there.
+fn say_read_only(mount: &vfs::Mount) {
+    let [held, kept, volume] = read_only_lines(mount);
+    con_write_parts(&[held[0], held[1], held[2], kept[0], kept[1], kept[2], volume[0], volume[1], volume[2]]);
+}
+
 /// `parts` joined and written in one write, so no other task's line lands
 /// inside them: three pieces let accountd's ready line split "fsd: FAT32
 /// mounted" on a boot `make test-boot-partition` read (the review of #288).
@@ -2101,9 +2112,22 @@ fn con_write_parts(parts: &[&str]) {
     let mut line = [0u8; syscall_abi::FS_DATA_MAX as usize];
     let mut len = 0;
     for part in parts {
-        let take = part.len().min(line.len() - len);
-        line[len..len + take].copy_from_slice(&part.as_bytes()[..take]);
-        len += take;
+        let mut rest = part.as_bytes();
+        while !rest.is_empty() {
+            // Full: written and begun again, so text past one message is
+            // said in a second write and not dropped. The boot mount's
+            // lines reach about 470 of 512 bytes since the device's reason
+            // joined them (2026-11-11), and what a cut would drop is the
+            // boot partition's line, which a rig grades (the review of #445).
+            if len == line.len() {
+                con_write(&line[..len]);
+                len = 0;
+            }
+            let take = rest.len().min(line.len() - len);
+            line[len..len + take].copy_from_slice(&rest[..take]);
+            len += take;
+            rest = &rest[take..];
+        }
     }
     con_write(&line[..len]);
 }
