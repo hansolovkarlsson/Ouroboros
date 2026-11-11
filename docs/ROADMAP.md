@@ -788,8 +788,21 @@ not yet checked on this tree are marked (predicted).
       and new values as `bootstick.py` does (`make test-sdcard`, #417),
       and seen on the board the same day: a re-stage from `56946121`
       took boot 1 to boot 2.
-      - [ ] **A refused write says why** (seen 2026-11-08, not asked for
-            yet): `write test hello` in `/mnt/boot` on the card, the
+      - [x] **A refused write says why. DONE 2026-11-11** (Hans's choice
+            of both lines): `fsd` asks the kernel of a partition as it
+            mounts it (`BLOCK_PROTECTED`, 79) and holds one the driver
+            never writes read-only, with a line saying why, so `mount 0`
+            says it up front and a write is refused at the gate as
+            "read-only filesystem", no sector tried; and `BLOCK_WRITE`
+            answers a declined write apart from a failed one
+            (`BLOCK_ERR_PROTECTED`), which `erase`, `partition` and
+            `format` now say as read-only where no mount stands. Graded by
+            `make test-sd` on QEMU's card, a tenth boot added; not yet run
+            on the board. The write-protect switch is carried by the
+            second line only: it is read at each write, so no mount is
+            told of it up front. The rig's "format over the firmware
+            partition refused" had never reached the guard: its target was
+            the root, too small for FAT32. As found (seen 2026-11-08): `write test hello` in `/mnt/boot` on the card, the
             firmware partition `mount 0` gives, is refused by the SD
             driver as designed, but the program prints `write: device I/O
             error`; only the kernel's log line (`sd: a write to sector 2080

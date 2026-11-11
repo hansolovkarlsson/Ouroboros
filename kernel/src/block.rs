@@ -25,6 +25,15 @@ pub enum Error {
     Sdhci(sdhci::Error),
 }
 
+impl Error {
+    /// Whether the driver declined the write (a sector it never writes, a
+    /// card switched to read-only) where the others mean a write that was
+    /// tried and failed. Only the SD driver declines one today.
+    pub fn is_refusal(&self) -> bool {
+        matches!(self, Error::Sdhci(e) if e.is_refusal())
+    }
+}
+
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -63,6 +72,16 @@ impl BlockDevice {
             BlockDevice::Virtio(d) => unsafe { d.write_sector(sector, buf) }.map_err(Error::Virtio),
             BlockDevice::UsbMsd(d) => unsafe { d.write_sector(sector, buf) }.map_err(Error::UsbMsd),
             BlockDevice::Sdhci(d) => unsafe { d.write_sector(sector, buf) }.map_err(Error::Sdhci),
+        }
+    }
+
+    /// Whether any of the `count` sectors from `first` is one this device
+    /// never writes (`BLOCK_PROTECTED`'s answer): an SD card's firmware
+    /// partition and the tables that find it. No other driver keeps any.
+    pub fn protects(&self, first: u64, count: u64) -> bool {
+        match self {
+            BlockDevice::Virtio(_) | BlockDevice::UsbMsd(_) => false,
+            BlockDevice::Sdhci(d) => d.protecting(first, count).is_some(),
         }
     }
 

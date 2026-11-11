@@ -100,6 +100,14 @@ pub enum Filesystem {
 pub struct Mount {
     fs: Filesystem,
     held: Option<&'static str>,
+    /// fsd's second reason, the device's: the partition lies in sectors the
+    /// disk's driver never writes ([`Device::never_writes`], an SD card's
+    /// firmware partition). Asked as the mount is made, so every change is
+    /// refused at the gate and none is begun for the driver to decline a
+    /// sector at a time (since 2026-11-11). Beside `held`, not in it: the
+    /// Pi's firmware partition is also the fallback D5 holds, and each
+    /// reason is said.
+    kept: Option<&'static str>,
     /// The boot partition's start the root was chosen by
     /// ([`Device::boot_partition_start`]), for the mount line, which so says
     /// the answer the choice was made on rather than asking again (the
@@ -110,7 +118,15 @@ pub struct Mount {
 impl Mount {
     /// `fs`, read-only only as its arm says.
     fn new(fs: Filesystem) -> Self {
-        Mount { fs, held: None, boot: None }
+        Mount { fs, held: None, kept: None, boot: None }
+    }
+
+    /// The reason a mount of `part` is read-only by its device, `None` when
+    /// the device writes all of it: the one spelling for both mount paths.
+    fn kept_by(device: &Device, part: &partition::Partition) -> Option<&'static str> {
+        device
+            .never_writes(part.start, part.sectors)
+            .then_some("the disk's driver never writes this partition (an SD card's firmware partition)")
     }
 
     /// The synthetic `/proc` filesystem - auto-mounted at the reserved `PROC_TREE`
@@ -136,21 +152,20 @@ impl Mount {
     }
 
     /// Why this mount is read-only, for the mount lines alone: fsd's own
-    /// reason (D5), then the arm's ([`Filesystem::read_only`]), each `None`
-    /// when it does not hold. Both, since a fallback can be a volume read-only
+    /// reasons (D5, then the device's), then the arm's
+    /// ([`Filesystem::read_only`]), each `None` when it does not hold. Both, since a fallback can be a volume read-only
     /// for its own reason too, which the reader would otherwise not learn
     /// until the root is repaired (the high review of #373). The gate asks
     /// [`refuses_changes`](Self::refuses_changes), never these.
-    pub fn reasons(&self) -> (Option<&'static str>, Option<&'static str>) {
-        (self.held, self.fs.read_only())
+    pub fn reasons(&self) -> [Option<&'static str>; 3] {
+        [self.held, self.kept, self.fs.read_only()]
     }
 
-    /// Why this mount is read-only, `None` while it is writable: either of
+    /// Why this mount is read-only, `None` while it is writable: any of
     /// [`reasons`](Self::reasons), read from it so a reason added there is
     /// refused too (the medium review of #373).
     fn read_only(&self) -> Option<&'static str> {
-        let (held, volume) = self.reasons();
-        held.or(volume)
+        self.reasons().into_iter().flatten().next()
     }
 
     /// Whether fsd's read-only gate (`refused_read_only` in `main.rs`) refuses
@@ -160,7 +175,7 @@ impl Mount {
     /// out, so the arm's own refusal is the one a read-only exFAT volume gets
     /// (`make test-disk-gate`); D5 it keeps, since no arm refuses for it.
     pub fn refuses_changes(&self) -> bool {
-        if cfg!(feature = "disk-gate-rig") { self.held.is_some() } else { self.read_only().is_some() }
+        if cfg!(feature = "disk-gate-rig") { self.held.or(self.kept).is_some() } else { self.read_only().is_some() }
     }
 }
 
@@ -205,7 +220,8 @@ impl Filesystem {
             (true, true, false) => Some("the partition typed as the root did not mount, so an untyped partition is `/`"),
             (true, false, _) => Some("no partition beside the boot partition mounted, so the boot partition is `/`"),
         };
-        Ok((Mount { fs, held, boot }, probed.failed.is_some()))
+        let kept = Mount::kept_by(device, &roots.order[i].part);
+        Ok((Mount { fs, held, kept, boot }, probed.failed.is_some()))
     }
 
     /// The first of `parts` that [`probe`](Self::probe)
@@ -285,7 +301,8 @@ impl Filesystem {
             return Err(Error::NoFat32Partition);
         };
         let bound = volume_bound(&parts[index], &parts[..count], device.disk().capacity_sectors().ok());
-        Self::probe(device, lba32, bound)?.map(Mount::new).ok_or(Error::NoFat32Partition)
+        let fs = Self::probe(device, lba32, bound)?.ok_or(Error::NoFat32Partition)?;
+        Ok(Mount { kept: Mount::kept_by(device, &parts[index]), ..Mount::new(fs) })
     }
 
     /// The mounted format's name, for the startup/mount log line.

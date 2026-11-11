@@ -630,7 +630,8 @@ statuses). `NO_FS` (`MAX-1`) means no filesystem is mounted this boot.
 | 25 | `msg_try_recv` | buf ptr/len | Non-blocking receive; `NO_MSG` when empty |
 | 26 | `block_info` | none | Block-device capacity in sectors, **task 2 (the fsd server) only**, like all three `block_*` syscalls |
 | 27 | `block_read` | LBA, buf ptr | Read one 512-byte sector (fsd only) |
-| 28 | `block_write` | LBA, buf ptr | Write one 512-byte sector (fsd only) |
+| 28 | `block_write` | LBA, buf ptr | Write one 512-byte sector (fsd only); `BLOCK_ERR_PROTECTED` for a sector the device never writes |
+| 79 | `block_protected` | first LBA, sector count | Whether the device never writes one of those sectors (an SD card's firmware partition), **task 2 (the fsd server) only**: so `fsd` mounts such a partition read-only and says why |
 | 77 | `block_boot_start` | none | The start LBA of the partition the system booted from, when the installed disk is that disk (else 0), **task 2 (the fsd server) only**: so `fsd` mounts the root beside the ESP rather than the ESP |
 | 29 | `msg_call` | dest, req ptr/len, reply ptr | Synchronous request/response: send + block for a reply *from `dest` specifically*; sub-tick round trips via direct delivery. Reply buffer is a fixed `MSG_MAX_LEN` (768) bytes. The server answers with `msg_reply` (73) to the call `sender_call` (74) names, so a late answer to a call cut short by Ctrl+C goes nowhere |
 | 30 | `spawn_stage` | offset, chunk ptr/len | Feed one chunk of a program image into the kernel's staging buffer (`SPAWN_STAGING_SIZE`) for `spawn`. The first staging call claims the staging for the caller; another task's staging call answers `SPAWN_ERR_STAGING_BUSY` until the owner spawns or ends (since 2026-10-11). Chunks go in order: one that starts neither at 0 nor where the caller's last ended is `SPAWN_ERROR` and claims nothing, and one at 0 starts the spawn over, dropping any argv, cwd or env staged before it (since 2026-10-16) |
@@ -649,7 +650,7 @@ Filesystem failures return a specific `FS_ERR_*` code (`NOT_FOUND`,
 `SPAWN_ERR_BAD_ELF`/`SPAWN_ERR_TOO_LARGE`/`SPAWN_ERR_IMAGE_TOO_LARGE`/
 `SPAWN_ERR_NO_FREE_SLOT`; the task syscalls add `TASK_ERR_NO_SUCH_TASK`/`TASK_ERR_PROTECTED`/`TASK_ERR_SELF`;
 the block syscalls add `BLOCK_ERR_NO_DEVICE`/`BLOCK_ERR_IO`/
-`BLOCK_ERR_DENIED`.
+`BLOCK_ERR_DENIED`/`BLOCK_ERR_PROTECTED`.
 
 ## Writing your own program
 

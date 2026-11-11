@@ -8,7 +8,7 @@ the kernel cannot (it drives virtio-mmio only), and puts a copy of
 `build/disk.img` (the ESP and the ext2 root) on an SD card behind QEMU's
 `sdhci-pci`, the only disk the kernel can drive, as the Pi's card and stick
 are today. QEMU's firmware does not boot from an SD card itself. Two cards,
-two boots each, then five more, nine boots in all:
+two boots each, then six more, ten boots in all:
 
 - **A standard-capacity card**, the image padded to the smallest power of two
   of at least 128 MiB that holds it (QEMU wants a power of two, and makes a
@@ -20,15 +20,24 @@ two boots each, then five more, nine boots in all:
 install the card as the block device with its firmware partition named as
 never written, mount the ext2 root from it, log in, read back `/etc/srcid`
 exactly as the host's copy of the staged stamp has it, then write a file
-(`echo ... > /sdnote`) and power off.
+(`echo ... > /sdnote`). Then the firmware partition, as `mount 0` gives it
+on the Pi: `mount 0 /mnt/boot` must say the mount is read-only and why,
+`ls` there must still list it, and `write /mnt/boot/sdtest hello` must be
+refused as "read-only filesystem", by fsd's gate before any sector is tried:
+no kernel line about a refused write in that boot. Until 2026-11-11 the
+mount said nothing and the write said "device I/O error". Then power off.
 
 **The second boot** of the same card must read that file back, written by the
 first (step 2's writes, through `sdhci.rs`'s CMD24, out to the image and back
 in through CMD17), and then try `unmount`, `partition fat32` and `format
 fat32`. `partition` writes sector 0, the table that finds the firmware
-partition, and `format` lays a filesystem over the card's first partition,
-the firmware's (the card is not the boot disk here): both must be refused,
-the kernel's line saying so at the first. After it the host compares the card
+partition: it must be refused, the kernel's line saying so, and must say
+"read-only" and why, the driver's refusal carried up through `BLOCK_WRITE`
+where no mount stands for fsd's gate to refuse at. `format` must not format
+either, but that is no test of the guard: its target is the root (`mount`'s
+rule), 24 MiB and too small for FAT32, refused before any write. Until
+2026-11-11 this text and the check's name said the firmware partition; a
+format that does reach it is the tenth boot's. After it the host compares the card
 image's sectors from 0 to the firmware partition's end with disk.img's: byte
 for byte the same, so the refusal is graded by the bytes, not by a line.
 
@@ -67,13 +76,23 @@ ext2 superblock zeroed, build/esp.img on the stick: the card is the boot
 disk and its partition 2 is typed a root, but holds no filesystem fsd
 mounts, so the stick must go in and the card be left out.
 
+**A tenth boot**, the firmware partition as the card's only one and the
+card the only disk: build/esp.img's copy on the card, not booted from. fsd
+mounts it as `/` and must say read-only and why before its mount line; a
+write must be refused as "read-only filesystem" with no kernel line; then,
+unmounted, `format fat32` targets that partition, the only one, and must
+say "read-only" and why, the kernel's line naming the partition's first
+sector as the first write it refused that boot; and the image must come
+out whole.
+
 No fault line in QEMU's trace on any boot. What it cannot see, each run as
 a mutation and passing: QEMU models no data lines, so a 4-bit bus the card
 was never told about (no ACMD6) reads the same as one it was; it completes a
 write at once, so a write whose end is not waited for still lands; and it
 models no clock rate. Those are the Pi's to show (step 3). Run it whenever kernel/src/sdhci.rs, pci::discover_sdhci, main.rs's
 init_sd, install_sd_fallback or the order of the disk paths,
-parttable::firmware_sectors or block.rs changes. About nine minutes.
+parttable::firmware_sectors, block.rs, the BLOCK_WRITE or BLOCK_PROTECTED
+arms, fsd's disk.rs or vfs::Mount's reasons changes. About ten minutes.
 """
 import importlib.util
 import os
@@ -123,6 +142,10 @@ def card_image(path, size, source=DISK):
     assert os.path.getsize(path) <= size
     with open(path, "r+b") as fh:
         fh.truncate(size)
+
+
+# fsd's line at a mount of a partition the card's driver never writes.
+KEPT = "fsd: mounted read-only: the disk's driver never writes this partition (an SD card's firmware partition)"
 
 
 def firmware_sectors():
@@ -233,6 +256,9 @@ def main() -> int:
                 ("cat /etc/srcid", r"\nend\r?\n"),
                 (f"echo {NOTE} > /sdnote", ""),
                 ("cat /sdnote", NOTE),
+                ("mount 0 /mnt/boot", ""),
+                ("ls /mnt/boot", "EFI"),
+                ("write /mnt/boot/sdtest hello", "write: "),
             ])
             ok2, out2, got2, faults2 = boot(name, "reread", path, [
                 ("cat /sdnote", NOTE),
@@ -245,6 +271,8 @@ def main() -> int:
             # The SDHC card is 4 GiB to the filesystem, sparse or not.
             os.remove(path)
         reread = got2[0] if got2 else ""
+        mounted = got1[3] if len(got1) > 3 else ""
+        written = got1[5] if len(got1) > 5 else ""
         partitioned = got2[2] if len(got2) > 2 else ""
         formatted = got2[3] if len(got2) > 3 else ""
         checks += [
@@ -256,9 +284,17 @@ def main() -> int:
             (f"{name}: the ext2 root mounted from it", "fsd: ext2 mounted" in out1),
             (f"{name}: /etc/srcid read back as the host has it", stamp.strip() != "" and bool(got1) and stamp in got1[0]),
             (f"{name}: a file written in the first boot reads back in the second", f"\n{NOTE}\n" in reread),
+            (f"{name}: `mount 0` says the firmware partition is read-only, and why", KEPT in mounted),
+            (f"{name}: a write there is refused as read-only, not as an I/O error",
+             "write: read-only filesystem" in written and "I/O error" not in written),
+            (f"{name}: refused by fsd's gate, no sector tried: no kernel line about a refused write in that boot",
+             "sd: a write to sector" not in out1),
             (f"{name}: partition's write to sector 0 refused by the kernel",
              "sd: a write to sector 0 refused" in out2 and "partitioned" not in partitioned),
-            (f"{name}: format over the firmware partition refused", bool(formatted) and "formatted" not in formatted),
+            (f"{name}: partition says read-only, not an I/O error",
+             "partition: read-only: " in partitioned and "I/O error" not in partitioned),
+            (f"{name}: format does not format (its target the root, too small for FAT32)",
+             bool(formatted) and "formatted" not in formatted),
             (f"{name}: sectors {first} to {first + count - 1} unchanged on the card", untouched),
             (f"{name}: no fault lines", faults1 == 0 and faults2 == 0),
         ]
@@ -284,6 +320,8 @@ def main() -> int:
          f"sd: sectors 0 to {last} hold the card's firmware partition or the table that finds it, never written" in out),
         ("notable: partition's write to sector 0 refused by the kernel",
          "sd: a write to sector 0 refused" in out and bool(got) and "partitioned" not in got[0]),
+        ("notable: partition says read-only, not an I/O error",
+         bool(got) and "partition: read-only: " in got[0] and "I/O error" not in got[0]),
         ("notable: the card image unchanged", whole),
         ("notable: no fault lines", faults == 0),
     ]
@@ -385,11 +423,44 @@ def main() -> int:
         (f"nofs: the root mounted from the stick ({esp_sectors} sectors)", bool(got) and f"(disk {esp_sectors} sectors" in got[0]),
         ("nofs: no fault lines", faults == 0),
     ]
+    # The tenth boot: the firmware partition alone on the only disk, so `/`
+    # is the partition no write reaches and `format` targets it.
+    path = os.path.join(ROOT, "build", "test-sd-fwalone.img")
+    card_image(path, cards()[0][2], source=esp_img)
+    with open(path, "rb") as fh:
+        before = fh.read()
+    try:
+        ok, out, got, faults = boot("fwalone", "format", path, [
+            ("write /sdtest hello", "write: "),
+            ("unmount", "unmounted"),
+            ("format fat32", "format: "),
+        ])
+        with open(path, "rb") as fh:
+            whole = fh.read() == before
+    finally:
+        os.remove(path)
+    written = got[0] if got else ""
+    formatted = got[2] if len(got) > 2 else ""
+    refusals = [line for line in out.replace("\r\n", "\n").split("\n") if "sd: a write to sector" in line]
+    checks += [
+        ("fwalone: driven to the end and powered off", ok),
+        ("fwalone: the card is the block device", "sd: block device installed for the filesystem server" in out),
+        ("fwalone: `/` said to be read-only, and why, before its mount line",
+         KEPT in out and "fsd: FAT32 mounted" in out and out.index(KEPT) < out.index("fsd: FAT32 mounted")),
+        ("fwalone: a write to `/` refused as read-only, not as an I/O error",
+         "write: read-only filesystem" in written and "I/O error" not in written),
+        ("fwalone: format over the firmware partition says read-only, not an I/O error",
+         "format: read-only: " in formatted and "I/O error" not in formatted),
+        (f"fwalone: the kernel's first refused write is format's, at the partition's first sector ({esp_start})",
+         bool(refusals) and f"sd: a write to sector {esp_start} refused" in refusals[0]),
+        ("fwalone: the card image unchanged", whole),
+        ("fwalone: no fault lines", faults == 0),
+    ]
     failed = 0
     for check, good in checks:
         print(f"{'ok  ' if good else 'FAIL'} {check}")
         failed += 0 if good else 1
-    print("transcripts: build/test-sd-{sdsc,sdhc}-{write,reread}.txt, build/test-sd-notable-partition.txt, build/test-sd-beside-virtio.txt, build/test-sd-ranked-stick.txt, build/test-sd-fwonly-stick.txt, build/test-sd-nofs-stick.txt")
+    print("transcripts: build/test-sd-{sdsc,sdhc}-{write,reread}.txt, build/test-sd-notable-partition.txt, build/test-sd-beside-virtio.txt, build/test-sd-ranked-stick.txt, build/test-sd-fwonly-stick.txt, build/test-sd-nofs-stick.txt, build/test-sd-fwalone-format.txt")
     return 1 if failed else 0
 
 

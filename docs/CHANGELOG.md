@@ -11,7 +11,28 @@ here actually works today, see [`architecture.md`](architecture.md) and
 
 **Not yet released.** Changes since v0.25.0, drafted as they land.
 
-**`tree` says what it did not descend, and its depth cap is held by the build (2026-11-11).**
+**A write the SD driver refuses is "read-only", said at the mount (2026-11-11).**
+On the Pi, `mount 0 /mnt/boot` gives the card's firmware partition, which
+the SD driver never writes, and `write test hello` there said `device I/O
+error`: the driver's refusal became `BLOCK_ERR_IO` in the kernel's
+`BLOCK_WRITE`, an I/O error again in `fsd`'s disk shim, and only the
+kernel's log said why. Both lines Hans chose are in. First, `fsd` asks the
+kernel of each partition as it mounts it (`BLOCK_PROTECTED`, syscall 79,
+answered by the rule the driver refuses by) and holds one the device never
+writes read-only: the mount says `fsd: mounted read-only: the disk's driver
+never writes this partition (an SD card's firmware partition)`, and a change
+is refused at fsd's gate as "read-only filesystem" before any filesystem
+code begins it. Second, `BLOCK_WRITE` answers a declined write
+`BLOCK_ERR_PROTECTED`, the card's write-protect switch included, and
+`erase`, `partition` and `format`, which write where no mount stands, say
+`read-only:` and why. The error band's floor steps to `MAX-47` for the new
+code, with `sys.h`'s mirror. `make test-sd` grades it on QEMU's card, with a
+tenth boot in which `format` targets the firmware partition; the rig's old
+"format over the firmware partition refused" check had passed on a root too
+small for FAT32, never reaching the guard, and is renamed. Not yet run on
+the board.
+
+**`tree` says what it did not descend, and its depth cap is held by the build (2026-11-11, #444).**
 The stack check listed `tree` as recursing by its input, "about forty
 levels deep is the guard page", and the roadmap carried that as a defect to
 repair with an explicit stack. It was not one: `tree` has capped its walk
