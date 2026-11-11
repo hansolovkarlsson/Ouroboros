@@ -989,10 +989,17 @@ The small open tails those arcs deliberately left:
     through `user_sign` and its scrub leave 5,312 and 6,032, `admit` 9,264,
     all shallower than `handle_client`'s chains. By frame only: not measured
     on a boot.
-  - the disassembly reading is a scratch script, not a tool in the tree. As
-    a `make` check it would fail a build whose deepest chain leaves under a
-    floor, before any boot; it follows direct calls only (`netd` has two
-    functions with indirect calls, both `core::fmt`'s).
+  - the disassembly reading is `make check-stack-chains` since the same
+    day, over all 103 userland binaries: a program fails when its deepest
+    chain leaves under 4,096 bytes. `netd` is let stand at 1,024 by name
+    until `serve`'s frame is cut down, and the entry fails once it is.
+    After `netd` the shallowest are `fsd` (14,064 left) and the shell
+    (34,752). It follows direct calls only, and ten programs recurse by
+    their input, which it prints and cannot bound: `tree` is one, 1,312
+    bytes a directory level, so a tree about forty levels deep is its guard
+    page. Not fixed; `tree` with an explicit stack is the repair.
+  - **next: `serve`'s frame out of the stack** (Hans's choice, 2026-11-11),
+    its connection table and buffers in statics, measured by the check.
   - the count sees writes, not the stack pointer: a buffer reserved and
     never written at its low end is counted only as deep as it was written,
     so the true room is the reading or less.
