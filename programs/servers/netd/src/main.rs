@@ -10,8 +10,10 @@
 //! target IPv4; `netd` ARP-resolves it, sends an ICMP echo request, waits
 //! for the reply, and answers with a `NET_PING_*` status. Everything is
 //! hand-rolled fixed-buffer (the ACPI/FAT32/virtio precedent) - no crates,
-//! no allocator. Its heap region holds one buffer, `cpu`'s program read
-//! (`cpu_spawn`), since 2026-10-17.
+//! no allocator. Its heap region holds two things at fixed places: `cpu`'s
+//! program read buffer (`cpu_spawn`, since 2026-10-17) and, past it, the
+//! tables the event loop keeps for the whole boot (`Tables`, since
+//! 2026-11-11, off `serve`'s frame).
 //!
 //! Scope, deliberate: **guest-initiated ping only**. Replying to a host's
 //! ping needs an asynchronous receive loop (the poll/select gap), out of
@@ -597,52 +599,26 @@ fn serve(packed_mac: u64) -> ! {
     } else {
         unpack_mac(packed_mac)
     };
-    let mut buf = [0u8; syscall_abi::MSG_MAX_LEN as usize];
-    let mut frame = [0u8; 1600];
-    // The cluster auth config, read once from disk (retries past the fsd
-    // boot-order race). Rides this frame like `conns`, threaded through the
-    // event loop to the inbound gate and outbound signer.
-    let auth = load_auth();
-    // Up to MAX_CONNS concurrent server connections, kept on this frame
-    // because userland has no static mutable state (`.bss` asserted empty).
-    // `serve` never returns, so the frame persists for the whole boot.
-    let mut conns: [Option<TcpConn>; MAX_CONNS] = core::array::from_fn(|_| None);
-    // Dial-out (/net/tcp) client connections - persist across the separate NP
-    // round trips of a clone/connect/data/close sequence, driven by pump_dials.
-    let mut dials: [Option<DialConn>; MAX_DIAL] = core::array::from_fn(|_| None);
-    // The most recent cpu run's collected output, delivered to the shell in
-    // chunks via NETOP_RUN_MORE (one pending run at a time). On this frame - no
-    // mutable statics.
-    // Held client sessions (Decision 4): one open TCP connection per (endpoint,
-    // uid) whose remote fids are live, so the far export's per-connection fid
-    // survives from a C program's open() to its close(). The same parked engine
-    // as `remotes` below since step 2 of the async plan, kept Established
-    // between verbs; on this frame like `conns`/`dials` - no mutable statics.
-    let mut sessions: [Option<SessionConn>; MAX_CLIENT_SESSIONS] = core::array::from_fn(|_| None);
-    // Parked remote mounts (docs/roadmap/roadmap-async-rmount.md): a path
-    // verb's `NETOP_RMOUNT` rides one of these while the event loop drives its
-    // connection, and its caller stays blocked in the `MSG_CALL` until
-    // `service_remotes` answers it. On this frame like the tables above.
-    let mut remotes: [Option<RemoteConn>; MAX_REMOTE] = core::array::from_fn(|_| None);
-    let mut pending = PendingRun::new();
-    // Held user keys (step 4 of docs/roadmap/roadmap-user-keys.md): the seeds
-    // `login` hands over, on this frame like the tables above. See the `heldkeys` crate.
-    let mut held = held::new();
+    // Everything this loop keeps for the whole boot lives in the heap region
+    // (`Tables`), and this frame holds the one reference to it. Until
+    // 2026-11-11 it all rode this frame, 43,360 bytes of the stack's 57,344
+    // under every call chain, and the deepest chain left 1,168.
+    let t = tables();
     loop {
         // Block until a client message or an incoming frame is pending (or
         // return immediately if either already is). While *any* connection has
         // data unacked (server or dial), use a timeout so we still wake to
         // service the retransmit timer even if a peer has gone silent (no
         // frames); otherwise block indefinitely (the health-ping still wakes us).
-        let unacked = conns
+        let unacked = t.conns
             .iter()
             .any(|c| matches!(c, Some(c) if c.snd_nxt != c.snd_una))
-            || dials.iter().any(|c| matches!(c, Some(d) if d.state == DialState::Connecting || d.inflight > 0 || (d.state == DialState::Closing && !d.fin_sent)))
+            || t.dials.iter().any(|c| matches!(c, Some(d) if d.state == DialState::Connecting || d.inflight > 0 || (d.state == DialState::Closing && !d.fin_sent)))
             // A remote slot with a request parked needs the timer whatever its
             // state: its SYN and data retransmits, and its deadline, all fire
             // from the pump, and a silent peer sends no frame to wake us.
-            || remotes.iter().any(|c| matches!(c, Some(r) if r.parked.is_some() || r.state == DialState::Closing || r.state == DialState::Closed))
-            || sessions.iter().any(|c| matches!(c, Some(r) if r.parked.is_some() || r.state == DialState::Closing || r.state == DialState::Closed));
+            || t.remotes.iter().any(|c| matches!(c, Some(r) if r.parked.is_some() || r.state == DialState::Closing || r.state == DialState::Closed))
+            || t.sessions.iter().any(|c| matches!(c, Some(r) if r.parked.is_some() || r.state == DialState::Closing || r.state == DialState::Closed));
         let timeout = if unacked { RTO_POLL_MS } else { 0 };
         syscall(syscall_abi::NET_WAIT, timeout);
 
@@ -650,21 +626,21 @@ fn serve(packed_mac: u64) -> ! {
         // handled synchronously; the supervisor health-ping is acked here too
         // (any reply acks it). Also where a cpu child's output is captured
         // (cluster Phase 4a) - routed to its connection by drain_client_messages.
-        drain_client_messages(packed_mac, &mut buf, &mut conns, &mut dials, &mut remotes, &mut sessions, &auth, &mut pending, &mut held);
+        drain_client_messages(packed_mac, &mut t.buf, &mut t.conns, &mut t.dials, &mut t.remotes, &mut t.sessions, &t.auth, &mut t.pending, &mut t.held);
 
         // A held key whose login is gone goes now: a killed nested shell loses
         // its key within one wake of this loop, the health ping bounding how
         // long that can be. Outside the NIC block below, since a node with no
         // NIC still has logins.
-        held.reap_dead();
+        t.held.reap_dead();
         // And the sessions that spoke for a user whose last key just went.
-        close_unheld(&mut sessions, &held);
+        close_unheld(&mut t.sessions, &t.held);
 
         // 2. Incoming frames: ARP replies, parked remote mounts, dial-out
         // connections, and the TCP server.
         if packed_mac != syscall_abi::NET_ERROR {
-            while let Some(n) = recv(&mut frame) {
-                on_frame(&mac, &frame[..n], &mut conns, &mut dials, &mut remotes, &mut sessions, &auth, &held);
+            while let Some(n) = recv(&mut t.frame) {
+                on_frame(&mac, &t.frame[..n], &mut t.conns, &mut t.dials, &mut t.remotes, &mut t.sessions, &t.auth, &t.held);
             }
             // Answer every parked remote mount and session verb whose reply is
             // complete (or whose peer is gone), then drive the client
@@ -674,50 +650,139 @@ fn serve(packed_mac: u64) -> ! {
             // that dies unanswered says NO_FS (an unreachable peer); a session
             // that dies under its fids says FS_ERROR (fail-dead, the word
             // `client_exchange` used for the same event before step 2).
-            service_remotes(&mut remotes, &auth, &held, syscall_abi::NO_FS, Some(&mut pending));
-            service_remotes(&mut sessions, &auth, &held, syscall_abi::FS_ERROR, None);
-            pump_dials(&mac, &mut remotes, DIAL_IDLE_TICKS);
+            service_remotes(&mut t.remotes, &t.auth, &t.held, syscall_abi::NO_FS, Some(&mut t.pending));
+            service_remotes(&mut t.sessions, &t.auth, &t.held, syscall_abi::FS_ERROR, None);
+            pump_dials(&mac, &mut t.remotes, DIAL_IDLE_TICKS);
             // A held session idles for the far side's reap plus a margin (the
             // backstop for a client that crashed without clunking, Decision 4)
             // where a parked path verb or a dial idles for seconds.
-            pump_dials(&mac, &mut sessions, CLIENT_SESSION_IDLE_TICKS);
-            pump_dials(&mac, &mut dials, DIAL_IDLE_TICKS);
+            pump_dials(&mac, &mut t.sessions, CLIENT_SESSION_IDLE_TICKS);
+            pump_dials(&mac, &mut t.dials, DIAL_IDLE_TICKS);
             // 3. Per connection (by index, so the mailbox drain below can take
             // `&mut conns` without a borrow clash): service the retransmit timer,
             // then stream its response up to the window in bounded bursts,
             // draining the mailbox between them (acking the health-ping, and
             // capturing any cpu-child output) so no single stretch looks wedged.
-            for i in 0..conns.len() {
-                if conns[i].is_none() {
+            for i in 0..t.conns.len() {
+                if t.conns[i].is_none() {
                     continue;
                 }
-                if service_rto(&mac, conns[i].as_mut().unwrap(), now()) {
-                    conns[i] = None;
+                if service_rto(&mac, t.conns[i].as_mut().unwrap(), now()) {
+                    t.conns[i] = None;
                     continue;
                 }
-                if reap_idle(&mac, conns[i].as_ref().unwrap(), now()) {
-                    conns[i] = None;
+                if reap_idle(&mac, t.conns[i].as_ref().unwrap(), now()) {
+                    t.conns[i] = None;
                     continue;
                 }
-                if run_ended(&mac, conns[i].as_ref().unwrap(), &remotes, &held) {
-                    conns[i] = None;
+                if run_ended(&mac, t.conns[i].as_ref().unwrap(), &t.remotes, &t.held) {
+                    t.conns[i] = None;
                     continue;
                 }
                 loop {
-                    let c = conns[i].as_mut().unwrap();
+                    let c = t.conns[i].as_mut().unwrap();
                     if !c.responded {
                         break;
                     }
                     let before = c.snd_nxt;
                     pump_send(&mac, c); // `c` borrow ends here
-                    drain_client_messages(packed_mac, &mut buf, &mut conns, &mut dials, &mut remotes, &mut sessions, &auth, &mut pending, &mut held);
-                    match conns[i].as_ref() {
+                    drain_client_messages(packed_mac, &mut t.buf, &mut t.conns, &mut t.dials, &mut t.remotes, &mut t.sessions, &t.auth, &mut t.pending, &mut t.held);
+                    match t.conns[i].as_ref() {
                         Some(c) if c.snd_nxt != before => {} // progress - continue
                         _ => break,
                     }
                 }
             }
         }
+    }
+}
+
+/// Everything `serve` keeps for the whole boot, in the heap region and not on
+/// its frame. Userland has no mutable statics (`.data` and `.bss` are asserted
+/// empty by the linker script), so until 2026-11-11 these were `serve`'s
+/// locals: 43,360 bytes of a 57,344-byte stack, under every call chain, whose
+/// deepest (`handle_client` > `resolve_ip` > `arp_resolve`) left 1,168 bytes
+/// before the guard page. `make check-stack-chains` holds the figure now.
+struct Tables {
+    /// The mailbox buffer every client message is received into.
+    buf: [u8; syscall_abi::MSG_MAX_LEN as usize],
+    /// The buffer every incoming frame is received into.
+    frame: [u8; 1600],
+    /// The cluster auth config, read once from disk (retries past the fsd
+    /// boot-order race), threaded through the event loop to the inbound gate
+    /// and the outbound signer.
+    auth: Auth,
+    /// Up to MAX_CONNS concurrent server connections.
+    conns: [Option<TcpConn>; MAX_CONNS],
+    /// Dial-out (/net/tcp) client connections: they persist across the
+    /// separate NP round trips of a clone/connect/data/close sequence, driven
+    /// by pump_dials.
+    dials: [Option<DialConn>; MAX_DIAL],
+    /// Held client sessions (Decision 4): one open TCP connection per
+    /// (endpoint, uid) whose remote fids are live, so the far export's
+    /// per-connection fid survives from a C program's open() to its close().
+    /// The same parked engine as `remotes` since step 2 of the async plan,
+    /// kept Established between verbs.
+    sessions: [Option<SessionConn>; MAX_CLIENT_SESSIONS],
+    /// Parked remote mounts (docs/roadmap/roadmap-async-rmount.md): a path
+    /// verb's `NETOP_RMOUNT` rides one of these while the event loop drives
+    /// its connection, and its caller stays blocked in the `MSG_CALL` until
+    /// `service_remotes` answers it.
+    remotes: [Option<RemoteConn>; MAX_REMOTE],
+    /// The most recent cpu run's collected output, delivered to the shell in
+    /// chunks via NETOP_RUN_MORE (one pending run at a time).
+    pending: PendingRun,
+    /// Held user keys (step 4 of docs/roadmap/roadmap-user-keys.md): the
+    /// seeds `login` hands over. See the `heldkeys` crate.
+    held: held::Held,
+}
+
+/// The bytes a `cpu` spawn reads a request, and the size of its read buffer:
+/// the first `CPU_READ` bytes of the heap region (`cpu_read_buffer`).
+/// [`Tables`] starts where it ends, so the two never overlap.
+const CPU_READ: usize = 8 * 1024;
+
+/// Build [`Tables`] in the heap region, past `cpu`'s read buffer, and give
+/// the one reference to it there will ever be. Called once, by `serve`,
+/// which never returns. With no heap region that large `netd` ends with a
+/// line: it has nowhere to keep a connection.
+///
+/// Never inlined: the value is made in this frame before it is moved to the
+/// heap, and inlined into `serve` that frame would be `serve`'s, the 43 KB
+/// this exists to remove. Here it is given back before the loop starts.
+#[inline(never)]
+fn tables() -> &'static mut Tables {
+    let base = syscall(syscall_abi::HEAP_INFO, syscall_abi::HEAP_INFO_BASE) as usize;
+    let size = syscall(syscall_abi::HEAP_INFO, syscall_abi::HEAP_INFO_SIZE) as usize;
+    let align = core::mem::align_of::<Tables>();
+    let at = (base + CPU_READ + align - 1) & !(align - 1);
+    if base == 0 || at + core::mem::size_of::<Tables>() > base + size {
+        log(b"netd: no heap region for its tables - ending\r\n");
+        loop {
+            // EXIT, and should a server be refused it, wait without spinning.
+            syscall(syscall_abi::EXIT, 1);
+            syscall(syscall_abi::NET_WAIT, 0);
+        }
+    }
+    let p = at as *mut Tables;
+    // SAFETY: HEAP_INFO reports this task's own heap region, EL0-writable and
+    // mapped for the task's life; `at` is aligned for `Tables` and the whole
+    // of it lies inside the region, checked above. The one other use of the
+    // region is `cpu_read_buffer`'s first `CPU_READ` bytes, which end at or
+    // before `at`. This is called once, so no second reference exists.
+    unsafe {
+        p.write(Tables {
+            buf: [0u8; syscall_abi::MSG_MAX_LEN as usize],
+            frame: [0u8; 1600],
+            auth: load_auth(),
+            conns: core::array::from_fn(|_| None),
+            dials: core::array::from_fn(|_| None),
+            sessions: core::array::from_fn(|_| None),
+            remotes: core::array::from_fn(|_| None),
+            pending: PendingRun::new(),
+            held: held::new(),
+        });
+        &mut *p
     }
 }
 
@@ -5553,16 +5618,15 @@ fn cpu_spawn(cmdline: &[u8]) -> Result<u8, CpuSpawnError> {
     // per-syscall pointer cap (`MAX_USER_LEN`) - as the shell's spawn_path
     // does. Until 2026-10-17 each 512 bytes was its own read, resolving the
     // path from the root again. A read of 0 is the end.
-    /// The bytes a `cpu` spawn reads a request.
-    const CPU_READ: usize = 8 * 1024;
     /// The read buffer: the first `CPU_READ` bytes of netd's heap region
     /// (`HEAP_INFO`), or `None` with no heap that large. Not the stack:
     /// netd's is 14 pages, most of it resident tables under every chain, and
     /// an 8 KiB buffer there faulted netd into its guard page at boot
     /// (2026-10-17), the frame being the caller's once inlined. Declared in
-    /// here so nothing else in netd can name it: this is the heap's only use,
-    /// and `cpu_spawn` is synchronous and never re-entered (it never returns
-    /// to the event loop), so the slice it makes is the only one alive.
+    /// here so nothing else in netd can name it: the heap's one other use is
+    /// `Tables`, which starts past these bytes, and `cpu_spawn` is synchronous
+    /// and never re-entered (it never returns to the event loop), so the slice
+    /// it makes is the only one alive.
     fn cpu_read_buffer() -> Option<&'static mut [u8]> {
         let base = syscall(syscall_abi::HEAP_INFO, syscall_abi::HEAP_INFO_BASE);
         let size = syscall(syscall_abi::HEAP_INFO, syscall_abi::HEAP_INFO_SIZE) as usize;
