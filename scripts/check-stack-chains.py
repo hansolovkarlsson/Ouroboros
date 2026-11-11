@@ -23,7 +23,10 @@ What it cannot see, and says so in its output:
   `core::fmt`'s padding and the C library's `printf`;
 - a recursive program has no deepest chain. Its chain is taken with each
   cycle walked once, and the program must be named in RECURSIVE below, so a
-  program that becomes recursive fails until someone has looked;
+  program that becomes recursive fails until someone has looked. A bound the
+  program holds in a variable is not seen either: `tree` was listed as
+  bounded only by its input while its source capped the walk at sixteen
+  levels, so its bound is read from that source now (SOURCE_BOUND);
 - a frame sized at run time (`sub sp, sp, x1`) fails outright: none exists
   today, and one would make every figure here a guess.
 
@@ -67,12 +70,37 @@ BELOW = {
 # #441). None is a recursion bounded only by the program's input, which
 # this check cannot hold to anything: it is printed on every run, so the
 # list of them stays in view, and the floor is not asked of it.
+def source_const(path, name):
+    """A `const NAME: usize = <integers multiplied>;` read from a Rust file."""
+    src = open(os.path.join(ROOT, path)).read()
+    m = re.search(rf"^const {name}: usize = ([0-9_ *]+);", src, re.M)
+    if not m:
+        sys.exit(f"check-stack-chains: const {name} not found in {path}")
+    value = 1
+    for factor in m.group(1).split("*"):
+        value *= int(factor.strip().replace("_", ""))
+    return value
+
+
+# A program whose recursion its own source bounds from the stack it is given:
+# the file, the constant that is the most levels, the one it takes a level to
+# cost, and the one it keeps back for the rest of the chain. The first is the
+# count in RECURSIVE; the other two are held against the binary, since the
+# program's arithmetic is only as good as they are (tree's were 1,024 and
+# 8,192 against a frame of 1,312 and a rest of 8,240 on 2026-11-11).
+SOURCE_BOUND = {
+    "tree": ("programs/fileutils/tree/src/main.rs", "MAX_DEPTH", "FRAME_BYTES", "STACK_RESERVE"),
+}
+
 RECURSIVE = {
     # ext2's free_pointed: one call a level of pointer block, and its two
     # callers start it at depth 0 (single indirect) and 1 (double): this
     # ext2 has no triple-indirect files.
     "fsd": (2, "ext2::free_pointed, one call a level of indirect block, two at most", [["free_pointed"]]),
-    "tree": (None, "walk, one call (1,312 bytes) a directory level: about forty levels deep is the guard page"),
+    # walk recurses only under its depth cap, which is never over MAX_DEPTH:
+    # the root's walk and one for each level below it.
+    "tree": (source_const(*SOURCE_BOUND["tree"][:2]),
+             "walk, one call a directory level, capped by its MAX_DEPTH", [["walk"]]),
     "grep": (None, "the regex compiler (parse_alt, parse_repeat, nullable, Emitter::gen), one round a nesting of the pattern"),
     "stackprobe": (None, "dig, as deep as its argument says: it is the stack rig's probe"),
     "cpico": (None, "picolibc's qsort"),
@@ -411,8 +439,10 @@ def main():
         total, chain, cycles = deepest(funcs)
         times, why, *named = RECURSIVE.get(name, (1, ""))
         bounded = not cycles or (name in RECURSIVE and times is not None)
+        level = sum(funcs[m]["frame"] for cy in cycles for m in cy)
+        rest = total - level
         if cycles and bounded:
-            total += (times - 1) * sum(funcs[m]["frame"] for cy in cycles for m in cy)
+            total += (times - 1) * level
         left = stack - total
         indirect = sum(1 for f in funcs.values() if f["blr"])
         dyn = [(n, f["dyn"]) for n, f in funcs.items() if f["dyn"]]
@@ -431,6 +461,15 @@ def main():
             if got != sorted(sorted(cy) for cy in named[0]):
                 failed += 1
                 notes.append(f"FAIL its cycles are {got}, and its bound was written for {named[0]}: look again")
+        if cycles and name in SOURCE_BOUND:
+            path, _, frame_const, reserve_const = SOURCE_BOUND[name]
+            for const, got, what in ((frame_const, level, "a level of its recursion"),
+                                     (reserve_const, rest, "the rest of its deepest chain")):
+                said = source_const(path, const)
+                if got > said:
+                    failed += 1
+                    notes.append(f"FAIL {what} is {got} bytes and its source's {const} says {said}: "
+                                 "the depth it allows itself is computed from that")
         if not cycles and name in RECURSIVE:
             failed += 1
             notes.append("FAIL named in RECURSIVE and has no call cycle: remove the entry")

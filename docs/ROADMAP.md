@@ -994,10 +994,19 @@ The small open tails those arcs deliberately left:
     chain leaves under 4,096 bytes. `netd` is let stand at 1,024 by name
     until `serve`'s frame is cut down, and the entry fails once it is.
     After `netd` the shallowest are `fsd` (13,904 left) and the shell
-    (34,752). It follows direct calls only, and twelve programs recurse by
-    their input, which it prints and cannot bound: `tree` is one, 1,312
-    bytes a directory level, so a tree about forty levels deep is its guard
-    page. Not fixed; `tree` with an explicit stack is the repair.
+    (34,752). It follows direct calls only, and eleven programs recurse by
+    their input, which it prints and cannot bound. `tree` was listed as a
+    twelfth, "about forty levels deep is its guard page", and that was
+    wrong: its source has capped the walk at 16 levels since the day it was
+    written (2026-08-27), a bound
+    held in a variable, which the check does not see. **Corrected
+    2026-11-11:** the check reads `tree`'s `MAX_DEPTH` from its source and
+    counts `walk`'s frame that many times (28,112 left), and holds the two
+    figures `tree` computes its cap from against the binary. Both were
+    short, `FRAME_BYTES` 1,024 against a frame of 1,312 and `STACK_RESERVE`
+    8,192 against 8,240, harmless on 14 stack pages and wrong on about
+    seven, which bears on whether `STACK_PAGES` comes down. Both are raised.
+    A directory `tree` does not descend now says so.
   - **`serve`'s tables out of its frame. DONE 2026-11-11** (Hans's
     choice over a larger `STACK_PAGES`): one `Tables` in `netd`'s heap
     region, past `cpu`'s read buffer, since userland has no mutable statics.
