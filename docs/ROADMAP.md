@@ -956,8 +956,8 @@ record is in [`CHANGELOG.md`](CHANGELOG.md):
 
 The small open tails those arcs deliberately left:
 
-- **`netd` has at most 2,528 bytes of its stack left, and now it can be
-  read (2026-11-10).** The kernel counts every task's never-written stack
+- **`netd` has 1,168 bytes of its stack left after one `resolve <name>`
+  (2026-11-11), not the 2,528 the rigs read (2026-11-10).** The kernel counts every task's never-written stack
   (`TASK_STACK_FREE`, `/proc/<n>/stackfree`, `make test-stack-free`), which
   replaced the probe patched into `netd` on a branch (`8429d38f`). `make
   test-async-rmount` reads `netd`'s mark at the end of each of its six
@@ -967,16 +967,32 @@ The small open tails those arcs deliberately left:
   before it the mark was read first), so the deepest moment is one every
   boot shares and not the park path the older tables named. An upper bound
   on the room left, by the last point below. Open:
-  - which chain that is. The mark says how deep, not where; a frame-size
-    diff of the build (as step 8 of `roadmap-user-keys.md` did) would name it.
-  - whether a floor should be graded. The rigs report the mark and fail
-    only when it cannot be read; a floor (fail under some number of bytes)
-    would turn the next growth into a failed rig and not a guard-page
-    fault. The number is Hans's to set.
+  - which chain that is. **FOUND 2026-11-11**, and it is not the deepest.
+    Read off the built `netd`'s disassembly (each function's frame, the
+    probed ones included, summed down every direct call chain from
+    `_start`): `main` 1,360, **`serve` 43,360**, `drain_client_messages`
+    128, `handle_client` 7,200, which is 52,064 and exactly the 5,280 left
+    that `/proc/4/stackfree` reads at the prompt after boot. Below it:
+    - `handle_rmount` > `caller_name` > `for_each_line` > `accounts`'
+      parsing, 54,720 to 55,184 by frame: the 2,528 the async rig reads
+      (a `mount -r` names its caller from `/etc/passwd`).
+    - **`resolve_ip` > `arp_resolve`, 56,176 by frame, 1,168 left**, the
+      deepest chain in the program. Measured the same to the byte: one
+      `resolve example.com` on `make run-image-net`'s layout takes the mark
+      from 5,280 to 1,168. No rig resolved a name, so no rig saw it.
+    So three quarters of the stack is one frame, `serve`'s, and the fix is
+    there (its connection table and buffers out of the frame), or in
+    `STACK_PAGES`; Hans's to choose. Nothing was changed.
   - the other `netd` rigs do not read it yet: `test-run-callback`,
-    `test-cred-client`, `test-held-keys`, `test-run-orphan`. The signing
-    paths #438 rewired (`sign_parked`, `service_remotes`) are reached by
-    those, so their depth is still unmeasured.
+    `test-cred-client`, `test-held-keys`, `test-run-orphan`. Answered by
+    frame for the signing paths #438 rewired: `phase_two` and `sign_parked`
+    through `user_sign` and its scrub leave 5,312 and 6,032, `admit` 9,264,
+    all shallower than `handle_client`'s chains. By frame only: not measured
+    on a boot.
+  - the disassembly reading is a scratch script, not a tool in the tree. As
+    a `make` check it would fail a build whose deepest chain leaves under a
+    floor, before any boot; it follows direct calls only (`netd` has two
+    functions with indirect calls, both `core::fmt`'s).
   - the count sees writes, not the stack pointer: a buffer reserved and
     never written at its low end is counted only as deep as it was written,
     so the true room is the reading or less.
