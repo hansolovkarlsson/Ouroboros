@@ -3,8 +3,8 @@
 //! **symbolic** (`u+x`, `go-w`, `a=rx`, `u+rw,go+r`, `g=u`); only the low 12
 //! bits are used and only the permission bits change - `fsd` preserves the
 //! file's type, so `chmod` can't turn a directory into a file. **ext2 only**:
-//! FAT32/exFAT/`/proc` can't model a mode and return "not supported by this
-//! filesystem" rather than pretending to succeed.
+//! FAT32/exFAT can't model a mode and `/proc`'s are fixed: each returns "not
+//! supported by this filesystem" rather than pretending to succeed.
 //!
 //! A symbolic mode is *relative*, so it needs the file's current bits: `chmod`
 //! stats the target first and applies the expression to what it finds (which is

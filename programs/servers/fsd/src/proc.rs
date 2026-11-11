@@ -20,10 +20,19 @@
 //!   /<n>/stackfree ->  "2496\n" | "none\n"  the bytes of its stack the task has never written (TASK_STACK_FREE; since 2026-11-10)
 //! ```
 //!
+//! Every node is root's: a directory `r-xr-xr-x`, a file `r--r--r--`, and
+//! `stackfree` alone `r--------`, which `fsd`'s permission checks enforce
+//! for a local user and a cluster peer alike (`stat`, below).
+//!
 //! Every file here is generated at the instant it is read, and its size in a
-//! listing or a `stat` is that instant's too: `state` is 8 or 9 bytes,
-//! `core` 2 to 5 as the task moves and `stackfree` shorter as the mark falls, so a reader that sizes first and then
-//! reads a moment later can read short. Read to the short read, as `cat` does.
+//! listing or a `stat` is that instant's too: `state` is 8 or 9 bytes and
+//! `core` 2 to 5 as the task moves, so a reader that sizes first and then
+//! reads a moment later can read short. `stackfree` is the exception: its
+//! size is always the longest line it could hold (21), since a stat is
+//! answered to callers who may not read it and the true length would give
+//! the count's digits away, so every read of it is short (and a C program's
+//! `lseek` to its end lands past its last byte). Read to the short read, as
+//! `cat` does.
 //!
 //! Read-only: every write/mutate method returns [`Error::ReadOnly`]. A slot
 //! exposes its scheduler state, the core executing it and its stack's
@@ -46,6 +55,18 @@
 use core::ops::ControlFlow;
 
 use crate::fat32::Error;
+
+/// The type bits of a mode (`S_IFMT`'s directory and regular file), as ext2
+/// stores them and `ls -l` reads them.
+const S_IFDIR: u16 = 0x4000;
+const S_IFREG: u16 = 0x8000;
+
+/// `/<n>/stackfree`'s permission bits: root's to read and nobody else's.
+/// How deep a server's stack has gone, and whether a request just took it
+/// deeper, says which of its code ran. The kernel refuses the same question
+/// asked of it directly (`TASK_STACK_DENIED`), so this is the file's half of
+/// one rule, not the rule.
+const STACKFREE_MODE: u16 = 0o400;
 
 /// The synthetic process filesystem. Zero-sized - all state lives in the kernel.
 pub struct Fs;
@@ -159,23 +180,35 @@ impl Fs {
         }
     }
 
-    /// Metadata for one path: type and size. Synthetic, so there's no
-    /// timestamp (`time: None`). Backs `ls -l`.
+    /// Metadata for one path: type, size, owner and mode. Synthetic, so
+    /// there's no timestamp (`time: None`). Backs `ls -l`, and since
+    /// 2026-11-10 `fsd`'s permission checks: every node is root's, a
+    /// directory `r-xr-xr-x`, a file `r--r--r--`, and `stackfree` alone
+    /// `r--------` ([`STACKFREE_MODE`]), its size a constant. Having a mode at all is what makes
+    /// `check_access` ask (`models_modes`); until then `/proc` had none and
+    /// every caller read every file.
     pub fn stat(&mut self, path: &str) -> Result<crate::vfs::Stat, Error> {
-        let (size, is_dir) = match parse(path) {
-            Node::Root | Node::Task => (0u64, true),
+        let (size, mode) = match parse(path) {
+            Node::Root | Node::Task => (0u64, S_IFDIR | 0o555),
             Node::UnderFile => return Err(Error::NotADirectory),
             Node::NotFound => return Err(Error::NotFound),
+            // A stat is answered to callers the mode refuses a read (it is
+            // what `ls -l` prints), and a size that was the line's length
+            // said how many digits the count has: the moment a server's
+            // mark fell under 10,000 bytes, to anyone. So this file's size
+            // is the longest line it could hold, whatever it holds; a
+            // reader reads to the short read, as for every file here.
+            Node::StackFree(_) => (LINE_MAX as u64, S_IFREG | STACKFREE_MODE),
             file => {
                 let mut line = [0u8; LINE_MAX];
-                (file_bytes(&file, &mut line) as u64, false)
+                (file_bytes(&file, &mut line) as u64, S_IFREG | 0o444)
             }
         };
         Ok(crate::vfs::Stat {
             size,
-            is_dir,
+            is_dir: mode & S_IFDIR != 0,
             time: None,
-            mode: None, // synthetic: no owner/permission model
+            mode: Some(crate::vfs::FileMode { mode, uid: 0, gid: 0 }),
         })
     }
 
@@ -204,8 +237,9 @@ impl Fs {
 }
 
 /// The bytes of one of the files, formatted into `buf` at the instant of
-/// the read: the one place a file's content is made, so a listing's size,
-/// a `stat` and a read cannot disagree on how it is spelled, and the next
+/// the read: the one place a file's content is made, so a `stat`'s size
+/// and a read cannot disagree on how it is spelled (but for `stackfree`,
+/// whose size `stat` states and does not measure), and the next
 /// file (`name` is a candidate) is one arm here and nowhere else.
 fn file_bytes(node: &Node, buf: &mut [u8; LINE_MAX]) -> usize {
     match node {
@@ -279,6 +313,13 @@ fn stackfree_bytes(n: u64, buf: &mut [u8; LINE_MAX]) -> usize {
         syscall_abi::TASK_STACK_NONE => {
             buf[..5].copy_from_slice(b"none\n");
             5
+        }
+        // The kernel answers root for every slot and `fsd` runs as root, so
+        // this is an `fsd` that no longer does: say it, and never print the
+        // sentinel as a count.
+        syscall_abi::TASK_STACK_DENIED => {
+            buf[..7].copy_from_slice(b"denied\n");
+            7
         }
         free => decimal_line(free, buf),
     }

@@ -48,6 +48,27 @@ parked request's uid, its anchor and its attested flag became one
 `Standing`, made at the park, and every way to a seed takes one; that a
 `Standing` is made nowhere else is review's to hold. No behaviour changed.
 
+**The stack mark is root's to read (2026-11-10).** As merged in #439 any
+task could ask `TASK_STACK_FREE` about any slot, and `/proc` is exported, so
+a cluster peer could read how deep `netd` or `accountd` had gone and see a
+login take one deeper (the medium review of #439). Two halves of one rule.
+`/proc` now has owners and modes, where it had none and every caller read
+every file: every node is root's, a directory `r-xr-xr-x`, a file
+`r--r--r--`, and `stackfree` alone `r--------`, so `fsd`'s ordinary
+permission checks refuse a local user and a peer alike. And the syscall
+answers only root and the slot's own task; anyone else gets
+`TASK_STACK_DENIED`, a sentinel of its own so a refusal is never read as "no
+stack". The file alone would not have done: a user's own program can make
+the call. The file's size in a `stat` is a constant, since a stat is
+answered to callers a read is refused and the line's length gave the
+count's digits away (the review of the gate). One change beside it: an
+ordinary user's write under `/proc` is now refused as "permission denied"
+where it was "read-only", the permission check coming first; root still
+hears "read-only". `make test-stack-free` grew to 32 checks: it asks as a
+peer acting as `guest`, then logs in as `user` and asks by `cat` and by
+`stackprobe of <slot>`. A clause naming `fsd`'s slot in the kernel's rule was removed when
+its control changed no check: `fsd` runs as root.
+
 **Every task's stack low-water mark, counted by the kernel (2026-11-10).**
 The one measurement of `netd`'s stack was a probe patched into `netd` on a
 branch (`8429d38f`), cherry-picked for each use, whose own log lines landed

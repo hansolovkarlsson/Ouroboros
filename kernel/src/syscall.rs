@@ -1622,8 +1622,17 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
             // arg0 = task index. The bytes of that task's stack it has never
             // written since it was loaded, or TASK_STACK_NONE for a slot
             // with no stack: out of range, unused, a zombie (its region is
-            // already given back) or the idle task. Read-only and open to
-            // every task, as TASK_STATE is.
+            // already given back) or the idle task. Read-only. Answered to
+            // the slot's own task and to root; TASK_STACK_DENIED to anyone
+            // else, decided on the number asked for, before the slot is
+            // looked at. fsd, which serves it as a file only root may read,
+            // is answered as root: a clause naming its slot changed nothing
+            // any check could see, so there is none.
+            let cur = tasks::current_task();
+            let allowed = arg0 == cur as u64 || tasks::uid_of(cur) == 0;
+            if !allowed {
+                return syscall_abi::TASK_STACK_DENIED;
+            }
             let Some(t) = tasks::TaskIndex::new(arg0 as usize) else {
                 return syscall_abi::TASK_STACK_NONE;
             };

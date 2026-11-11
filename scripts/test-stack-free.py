@@ -23,7 +23,15 @@ both:
 - a probe held at its depth reads the same from outside, by
   `cat /proc/<slot>/stackfree`, and a killed probe's slot reads `none`;
 - `/proc/<n>` lists the file, the idle task's reads `none`, `netd`'s a count
-  below the stack's size, and nothing lives under it.
+  below the stack's size, and nothing lives under it;
+- the mark is root's to read. A cluster peer trusted as root reads it over
+  the export and one acting as `guest` is refused, with a permission error.
+  Then the ordinary `user` logs in: `cat` of the file is refused, a program
+  asking the kernel directly (`stackprobe of <slot>`) is answered `denied`
+  for `netd` and for a probe the same user holds, and is still answered
+  about its own stack. `state`, beside it, stays everyone's to read, and
+  `ls -l` gives the file one size whatever its count, so a stat says nothing
+  of it.
 
 Usage:  python3 scripts/test-stack-free.py      (make test-stack-free builds the image)
 Exit status: the number of failed checks.
@@ -31,6 +39,7 @@ Exit status: the number of failed checks.
 import importlib.util
 import os
 import re
+import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -46,6 +55,8 @@ CHUNK = 1024  # stackprobe's bytes a level (its CHUNK; a copy, and the frame che
 FRAME_EXTRA = 128  # the most bytes a level's frame may add to its chunk
 FRESH = 1024  # the most a program may have written before its first act
 NETD = 4  # netd's slot (syscall-abi's NET_TASK)
+PORT = 5653  # the export's forward, its own so the other rigs' boots can coexist
+FS_ERR_PERM = "0xffffffffffffffdf"  # syscall-abi's, as np9p_client.py prints a refusal
 IDLE = 1  # the idle task's (kernel/src/tasks.rs)
 LINE = r"stackprobe: slot (\d+) size (\d+) free (\d+) then (\d+)"
 
@@ -61,17 +72,17 @@ def check(ok, what):
     return ok
 
 
-def sh(g, line, wait=PROMPT):
+def sh(g, line, wait=None):
     """Type `line` at a prompt and return what the guest printed up to the
     next prompt (or up to `wait`), or "" when that never came."""
     mark = len(g.transcript())
     g.type_line(line)
-    if not g.wait_for(wait, timeout=30):
+    if not g.wait_for(wait or PROMPT, timeout=30):
         return ""
     return g.transcript()[mark:]
 
 
-def probe(g, command, wait=PROMPT):
+def probe(g, command, wait=None):
     """One run of stackprobe: (slot, size, free before, free after), or None."""
     m = re.search(LINE, sh(g, command, wait))
     return tuple(int(x) for x in m.groups()) if m else None
@@ -82,7 +93,7 @@ def hold(g, levels):
     back at once: the probe's line and the prompt race, so wait for the
     line, then for a prompt of our own."""
     held = probe(g, f"exec /bin/stackprobe {levels} hold", wait=LINE)
-    sh(g, "echo settled", wait=r"\nsettled\r?\n[\s\S]*?# ")
+    sh(g, "echo settled", wait=r"\nsettled\r?\n[\s\S]*?" + PROMPT)
     return held
 
 
@@ -94,8 +105,80 @@ def proc(g, path):
     return m.group(1) if m else None
 
 
+def asked(g, slot):
+    """The kernel's own answer about `slot`, asked by a program the shell
+    runs as whoever is logged in: a count, `none` or `denied`."""
+    m = re.search(rf"stackprobe: slot {slot} says (\w+)", sh(g, f"stackprobe of {slot}"))
+    return m.group(1) if m else None
+
+
+def peer(*args):
+    """One request to the guest's export from the host's 9P client, a
+    cluster peer the image authorizes and trusts as root: what it printed."""
+    return subprocess.run(
+        [sys.executable, os.path.join(HERE, "np9p_client.py"), "localhost", str(PORT), *args],
+        capture_output=True, timeout=60).stdout.decode("latin-1")
+
+
+def cluster_peer(size):
+    """The same rule over the export, where `/proc` is served to other
+    machines: the mark to a peer acting as root, and to no other user."""
+    as_root = peer("read", f"/proc/{NETD}/stackfree").split("\n")[0]
+    check(as_root.isdigit() and 0 < int(as_root) < size,
+          f"a peer trusted as root reads netd's count over the export: {as_root!r}")
+    state = peer("read", f"/proc/{NETD}/state", "--user", "guest").split("\n")[0]
+    check(state in ("runnable", "blocked"), f"a peer acting as `guest` reads netd's state: {state!r}")
+    refused = peer("read", f"/proc/{NETD}/stackfree", "--user", "guest").strip()
+    check(refused == f"status: ERROR {FS_ERR_PERM}",
+          f"a peer acting as `guest` is refused netd's count, a permission error: {refused!r}")
+
+
+def ordinary_user(g, size):
+    """Who may read the mark: root, the task itself, and nobody else, by the
+    file and by the syscall both."""
+    global PROMPT
+    root = asked(g, NETD)
+    check(root is not None and root.isdigit() and 0 < int(root) < size,
+          f"root's program asks the kernel about netd and is answered: {root!r}")
+    g.type_line("logout")
+    PROMPT = r"\$ "
+    if not check(g.run([("login:", "user"), ("assword", "user"), (PROMPT, "")]), "the ordinary `user` logs in"):
+        return
+    sh(g, "mount -p /proc")
+    state = proc(g, f"{NETD}/state")
+    check(state in ("runnable", "blocked"), f"user reads netd's state, a file for everyone: {state!r}")
+    listing = sh(g, f"ls /proc/{NETD}")
+    check(re.search(r"\bstackfree\b", listing) is not None, f"user's `ls /proc/{NETD}` lists stackfree")
+    refused = proc(g, f"{NETD}/stackfree")
+    check(refused is not None and "permission denied" in refused,
+          f"user's read of /proc/{NETD}/stackfree is refused: {refused!r}")
+    denied = asked(g, NETD)
+    check(denied == "denied", f"user's program asks the kernel about netd and is refused: {denied!r}")
+    # Another task of the SAME user: a probe this user's shell started and
+    # holds. Same uid, different slot, so "the same user may ask" fails here.
+    mine = hold(g, 8)
+    if check(mine is not None, f"user holds a probe of their own: {mine}"):
+        sibling = asked(g, mine[0])
+        check(sibling == "denied", f"user's program asks about that probe, another task of the same user, and is refused: {sibling!r}")
+        size_line = sh(g, f"ls -l /proc/{mine[0]}/stackfree")
+        other = sh(g, f"ls -l /proc/{NETD}/stackfree")
+        size_of = r"-r--------\s+\d+\s+\d+\s+(\d+)\s"  # mode, uid, gid, size
+        a, b = re.search(size_of, size_line), re.search(size_of, other)
+        # The check can fail only while the two counts differ in length:
+        # root's reading of netd, taken above, against this probe's.
+        check(root is not None and len(root) != len(str(mine[3])) and a is not None and b is not None and a.group(1) == b.group(1),
+              f"`ls -l` gives the file one size whatever it holds (a count of {len(str(mine[3]))} digits here, of {root and len(root)} for netd): {a and a.group(1)!r} and {b and b.group(1)!r}")
+        sh(g, f"kill {mine[0]}")
+    own = probe(g, "stackprobe 8")
+    check(own is not None and 0 < own[3] < own[2] <= size,
+          f"user's program is still answered about its own stack: {own}")
+
+
 def main():
-    g = drive_qemu.Guest(IMAGE, label="[stack-free] ")
+    g = drive_qemu.Guest(IMAGE, extra_args=(
+        "-netdev", f"user,id=net0,hostfwd=tcp::{PORT}-:564",
+        "-device", "virtio-net-device,netdev=net0",
+    ), label="[stack-free] ")
     try:
         if not check(g.run([("login:", "root"), ("assword", "root"), (PROMPT, "")]), "the guest boots to root's shell"):
             return failed
@@ -150,6 +233,8 @@ def main():
         under = proc(g, f"{NETD}/stackfree/x")
         check(under is not None and "not a directory" in under, f"nothing lives under the file: {under!r}")
         check("after-stack" in sh(g, "echo after-stack"), "the shell answers after")
+        cluster_peer(size)
+        ordinary_user(g, size)
         faults = g.aborts()
         check(faults == 0, f"no fault lines in QEMU's trace: {faults}")
     finally:
@@ -157,7 +242,7 @@ def main():
         g.stop()
         with open(TRANSCRIPT, "w") as f:
             f.write(transcript)
-    want = 19
+    want = 32
     if checks != want and not failed:
         print(f"[FAIL] {checks} checks ran, want {want}", flush=True)
         return 1

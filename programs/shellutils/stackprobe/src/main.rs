@@ -15,6 +15,16 @@
 //! rig can read the same mark from outside, as `/proc/<slot>/stackfree`, and
 //! end it with `kill`.
 //!
+//! `stackprobe of <slot>` asks about another task's stack and prints the
+//! kernel's answer, a count, `none` or `denied`:
+//!
+//! ```text
+//! stackprobe: slot 4 says denied
+//! ```
+//!
+//! which is how the rig asks the kernel directly as an ordinary user, past
+//! the file's own mode.
+//!
 //! Every level's frame is the same size, so two runs differ by a whole number
 //! of frames: the rig grades the difference of two depths, where the
 //! program's own start-up cost cancels.
@@ -49,9 +59,23 @@ fn free() -> u64 {
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
     ulib::usage_if_requested(
-        b"usage: stackprobe <levels> [zero] [hold]  (its stack's never-written bytes, before and after <levels> calls of 1 KiB each)\r\n",
+        b"usage: stackprobe <levels> [zero] [hold]  (its stack's never-written bytes, before and after <levels> calls of 1 KiB each)\r\n       stackprobe of <slot>  (the kernel's answer about another task's stack)\r\n",
     );
     let mut a = [0u8; 8];
+    if ulib::arg(1, &mut a).map(|n| &a[..n]) == Some(b"of") {
+        let slot = ulib::arg(2, &mut a)
+            .and_then(|n| core::str::from_utf8(&a[..n]).ok().and_then(ulib::parse_u64))
+            .unwrap_or(u64::MAX);
+        let mut line = [0u8; 64];
+        let mut n = 0;
+        ulib::emit(&mut line, &mut n, b"stackprobe: slot ");
+        ulib::emit_dec(&mut line, &mut n, slot);
+        ulib::emit(&mut line, &mut n, b" says ");
+        emit_free(&mut line, &mut n, ulib::syscall(syscall_abi::TASK_STACK_FREE, slot));
+        ulib::emit(&mut line, &mut n, b"\r\n");
+        ulib::con_write(&line[..n]);
+        ulib::exit(0);
+    }
     let levels = ulib::arg(1, &mut a)
         .and_then(|n| core::str::from_utf8(&a[..n]).ok().and_then(ulib::parse_u64))
         .unwrap_or(0);
@@ -93,6 +117,8 @@ pub extern "C" fn _start() -> ! {
 fn emit_free(line: &mut [u8], n: &mut usize, free: u64) {
     if free == syscall_abi::TASK_STACK_NONE {
         ulib::emit(line, n, b"none");
+    } else if free == syscall_abi::TASK_STACK_DENIED {
+        ulib::emit(line, n, b"denied");
     } else {
         ulib::emit_dec(line, n, free);
     }

@@ -112,7 +112,7 @@ pub enum Error {
     /// filesystem arm (see `vfs.rs`), so it lives here with the rest.
     ReadOnly,
     /// A metadata write (`chmod`/`chown`) was attempted on a filesystem that
-    /// can't model mode/ownership (FAT32/exFAT/`/proc`). ext2 is the only arm
+    /// can't change mode/ownership (FAT32/exFAT have none, `/proc`'s are fixed). ext2 is the only arm
     /// that supports it; the others return this so the client degrades honestly
     /// rather than silently no-op'ing. Maps to `FS_ERR_NOT_SUPPORTED`.
     Unsupported,

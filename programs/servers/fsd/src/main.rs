@@ -906,8 +906,8 @@ fn handle_ninep(mounts: &mut [Option<vfs::Mount>; MAX_MOUNTS], fids: &mut [Fid; 
         }
     }
     // Permission enforcement (users/permissions arc, step 3): check the caller's
-    // uid/gid against the target's owner+mode before running the op. ext2-only
-    // (others return mode:None, which `check_access` treats as unrestricted);
+    // uid/gid against the target's owner+mode before running the op. ext2 and
+    // `/proc` (FAT32 and exFAT return mode:None, which `check_access` treats as unrestricted);
     // root bypasses. See `check_access`.
     if !check_access(mount.fs_mut(), who, verb, &p, payload, open) {
         return status_reply(reply, syscall_abi::FS_ERR_PERM);
@@ -1789,7 +1789,8 @@ fn models_modes_or_unknown(fs: &mut vfs::Filesystem) -> Option<bool> {
 }
 
 /// Whether to apply the per-verb permission checks. ext2 models owner/mode;
-/// FAT32, exFAT and the synthetic `/proc` do not, and on those every permission
+/// and so does the synthetic `/proc` (since 2026-11-10, every node root's);
+/// FAT32 and exFAT do not, and on those every permission
 /// question has the same answer, so asking once is both the correct answer and
 /// the cheap one.
 ///

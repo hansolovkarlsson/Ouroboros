@@ -418,8 +418,8 @@ pub const NP_LIMIT: u64 = NP_CLUNK + 1;
 // leaks into the ABI and the client formats it without date math; `time_valid`
 // says whether the time fields are meaningful (a filesystem that doesn't yet
 // surface a timestamp sets it 0). The trailing mode/uid/gid triple carries POSIX
-// ownership+permission metadata, guarded by its own `mode_valid` byte: only ext2
-// stores it, so FAT32/exFAT/`/proc` set the byte 0 and leave the triple zero
+// ownership+permission metadata, guarded by its own `mode_valid` byte: ext2
+// stores it and `/proc` states its own, so FAT32/exFAT set the byte 0 and leave the triple zero
 // (they can't model an owner or mode). The record grew from 20 to 27 bytes when
 // the mode/owner surface landed; the mode fields sit *after* the original 20 so
 // an old-length reader still decodes size/flags/time unchanged.
@@ -451,8 +451,9 @@ pub const STAT_MODE_OFF: usize = 20;
 pub const STAT_UID_OFF: usize = 22;
 /// `u16` owning group id (`i_gid`). Meaningful only when [`STAT_MODEVALID_OFF`].
 pub const STAT_GID_OFF: usize = 24;
-/// `u8` non-zero if the mode/uid/gid fields are real on-disk metadata (ext2);
-/// zero when the filesystem can't model an owner or mode (FAT32/exFAT/`/proc`).
+/// `u8` non-zero if the mode/uid/gid fields are real: on-disk metadata
+/// (ext2) or the fixed ones `/proc` states for its nodes; zero when the
+/// filesystem can't model an owner or mode (FAT32/exFAT).
 pub const STAT_MODEVALID_OFF: usize = 26;
 /// [`STAT_FLAGS_OFF`] bit: the entry is a directory.
 pub const STAT_FLAG_DIR: u32 = 1 << 0;
