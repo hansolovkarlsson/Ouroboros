@@ -7,7 +7,9 @@
 //! loader's `STACK_PAGES`, reported by `heap_info`), so
 //! recursion is depth-capped ([`depth_cap`], from the stack the loader
 //! reports, under a compile-time ceiling [`MAX_DEPTH`]) and each frame's buffers are
-//! kept small; there's no heap; and the framebuffer console renders ASCII
+//! kept small; a directory at the cap, or one whose path is too long to
+//! build, is listed and marked as not descended;
+//! there's no heap; and the framebuffer console renders ASCII
 //! 0x20-0x7E only, so the branches are the ASCII forms (`|-- `/`` `-- ``),
 //! not the Unicode box-drawing glyphs. Talks to the filesystem server via
 //! `ulib`'s `fs_list_dir`, resolving paths against the shell-delivered cwd -
@@ -20,17 +22,38 @@
 /// ([`PREFIX_MAX`]), so a compile-time constant. The level it DOES descend
 /// to is [`depth_cap`], computed at start from the stack the loader gave
 /// this program, so a smaller stack shortens the walk instead of faulting
-/// on the guard page. A deeper tree is simply not descended.
+/// on the guard page. A deeper tree is not descended, and the directory
+/// the walk stops at says so ([`NOT_DESCENDED`]). From `/` it is reached
+/// with `ulib::MAX_COMPONENTS`, the most names a path holds; from any
+/// other root that limit comes first ([`PATH_TOO_LONG`]).
+///
+/// `scripts/check-stack-chains.py` reads this constant and the two below
+/// from this file: it counts `walk`'s frame this many times against the
+/// stack, and fails when `walk`'s frame is over [`FRAME_BYTES`] or the rest
+/// of the deepest chain is over [`STACK_RESERVE`]. The two figures were
+/// 1,024 and 8 KiB by a comment's measurement while the binary's were 1,312
+/// and 8,240 (found 2026-11-11), so the binary is asked now.
 const MAX_DEPTH: usize = 16;
 
-/// What one level of recursion costs: `walk`'s frame holds a listing
-/// buffer plus the child's path and prefix (which the recursion borrows, so
-/// they stay live), ~900 bytes measured, rounded up.
-const FRAME_BYTES: usize = 1024;
+/// What one level of recursion costs, at most: `walk`'s frame holds a
+/// listing buffer, the sort records, and the child's path and prefix (which
+/// the recursion borrows, so they stay live).
+const FRAME_BYTES: usize = 1536;
 
 /// Stack kept back for everything that is not the recursion: `_start`'s
-/// own buffers, `ulib`'s request frames, the syscall path.
-const STACK_RESERVE: usize = 8 * 1024;
+/// own buffers, and below the deepest `walk` the listing call's `ulib`
+/// request frames.
+const STACK_RESERVE: usize = 12 * 1024;
+
+/// The line under a directory the depth cap kept `walk` out of.
+const NOT_DESCENDED: &[u8] = b"(not descended: deeper than tree goes)";
+
+/// The line under a directory whose path `ulib::resolve` will not build:
+/// more than `ulib::MAX_COMPONENTS` names or `ulib::PATH_MAX` bytes. No
+/// program here can name such a directory, but a disk written elsewhere
+/// can hold one, and from any root but `/` this limit comes before the
+/// depth cap.
+const PATH_TOO_LONG: &[u8] = b"(not descended: path too long)";
 
 /// The depth `walk` may reach on a stack of `stack_size` bytes: the levels
 /// that fit after the reserve, and never more than [`MAX_DEPTH`]. Asked of
@@ -195,18 +218,21 @@ fn walk(path: &str, prefix: &str, target: u64, depth: usize, cap: usize, counts:
 
         if e.is_dir {
             counts.dirs += 1;
-            if depth + 1 < cap {
-                // Child prefix = this prefix + (a pipe if more siblings
-                // follow, else blank), and child path = path/name. Both live
-                // on this frame while the recursion borrows them.
-                let mut cpb = [0u8; PREFIX_MAX];
-                let child_prefix = build_child_prefix(prefix, is_last, &mut cpb);
-
-                let mut childbuf = [0u8; ulib::PATH_MAX];
-                if let Some(clen) = resolve_child(path, name, &mut childbuf) {
-                    let child = core::str::from_utf8(&childbuf[..clen]).unwrap_or("");
-                    walk(child, child_prefix, target, depth + 1, cap, counts);
-                }
+            // Child prefix = this prefix + (a pipe if more siblings
+            // follow, else blank), and child path = path/name. Both live
+            // on this frame while the recursion borrows them.
+            let mut cpb = [0u8; PREFIX_MAX];
+            let child_prefix = build_child_prefix(prefix, is_last, &mut cpb);
+            let mut childbuf = [0u8; ulib::PATH_MAX];
+            // A directory not looked into is said, either way, so that it
+            // does not read as an empty one.
+            if depth + 1 >= cap {
+                emit_entry(target, child_prefix, true, NOT_DESCENDED);
+            } else if let Some(clen) = resolve_child(path, name, &mut childbuf) {
+                let child = core::str::from_utf8(&childbuf[..clen]).unwrap_or("");
+                walk(child, child_prefix, target, depth + 1, cap, counts);
+            } else {
+                emit_entry(target, child_prefix, true, PATH_TOO_LONG);
             }
         } else {
             counts.files += 1;

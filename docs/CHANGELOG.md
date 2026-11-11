@@ -11,6 +11,25 @@ here actually works today, see [`architecture.md`](architecture.md) and
 
 **Not yet released.** Changes since v0.25.0, drafted as they land.
 
+**`tree` says what it did not descend, and its depth cap is held by the build (2026-11-11).**
+The stack check listed `tree` as recursing by its input, "about forty
+levels deep is the guard page", and the roadmap carried that as a defect to
+repair with an explicit stack. It was not one: `tree` has capped its walk
+at 16 levels since the day it was written, in a variable the check cannot
+see. What was wrong
+was smaller. The two figures the cap is computed from were a comment's
+measurements, 1,024 bytes a level and 8 KiB for the rest, and the binary's
+are 1,312 and 8,240: enough on today's 14 stack pages, not on about seven.
+Both are raised, and `make check-stack-chains` now reads all three
+constants from `tree`'s source, counts `walk` 16 times against the stack
+(28,112 bytes left) and fails when either figure falls under the binary's.
+And the cut was silent. A path holds at most 16 names, which from any root
+but `/` stops the walk before the depth cap does, and a directory past
+either limit was listed and read as empty. Each now gets a line: `(not
+descended: path too long)` or `(not descended: deeper than tree goes)`.
+Shown on an ext2 image with a chain of twenty directories made on the host,
+since no command here can name one that deep.
+
 **A `cpu` run ends with its user (2026-11-09, #433).** A run sent with the user's
 credential counted as in flight until it finished, so if the user's login
 was killed while it ran, the dispatching node went on serving the
