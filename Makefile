@@ -464,7 +464,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: all build check-site srcid-begin shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin syscost-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin fpprobe-bin coreprobe-bin stageprobe-bin cursorprobe-bin dirprobe-bin mountprobe-bin stackprobe-bin openprobe-bin vtprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cfidwait-bin cbig-bin cwrite-bin cpico-bin cmem-bin cmalloc-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin ccreat-bin cenv-bin cenvh-bin cclock-bin cwinsz-bin ctermios-bin cpoll-bin cpp-bin edit-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 disk run-disk run-sd images-2vm images-2vm-ext2 parallels-hdd sdcard stick bootstick run-bootstick release test check-relocs check-xhci-barriers check-statics check-disk-handle check-doc-pointers check-link-layout check-picolibc test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-call-interrupt test-held-keys test-run-callback test-run-orphan test-cred-client test-no-identity test-heap test-malloc test-fpsimd test-spawn-owner test-spawn-size test-proc-cpus test-stack-free test-sd test-boot-partition test-bootstick test-sdcard test-cond-vt test-nav-keys test-cwinsz test-kbd-queue test-kbd-mode test-kbd-cut test-ctermios test-cpoll test-smp measure-syscost test-listing-walk test-spawn-reads test-write-walk test-stale-cursor test-grow-dir test-edit test-cargs test-cerrno test-cenv test-cclock test-cfenv test-include test-cpp test-unmount test-mount-points test-crename test-mv-into test-fat-link test-mount-gate test-probe-ioerr test-blank-disk test-volume-bound test-ext2-blocks test-long-set test-disk-gate fsd-disk-gate-bin test-valid-length test-exfat-names test-fat32-names test-fat-extflags test-mv-undo test-dir-scan test-free-chain test-alloc-batch test-batch-refused clean
+.PHONY: all build check-site srcid-begin shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin syscost-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin fpprobe-bin coreprobe-bin stageprobe-bin cursorprobe-bin dirprobe-bin mountprobe-bin stackprobe-bin openprobe-bin vtprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cfidwait-bin cbig-bin cwrite-bin cpico-bin cmem-bin cmalloc-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin ccreat-bin cenv-bin cenvh-bin cclock-bin cwinsz-bin ctermios-bin cpoll-bin cpp-bin edit-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 disk run-disk run-sd images-2vm images-2vm-ext2 parallels-hdd sdcard stick bootstick run-bootstick release test check-relocs check-stack-chains check-xhci-barriers check-statics check-disk-handle check-doc-pointers check-link-layout check-picolibc test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-call-interrupt test-held-keys test-run-callback test-run-orphan test-cred-client test-no-identity test-heap test-malloc test-fpsimd test-spawn-owner test-spawn-size test-proc-cpus test-stack-free test-sd test-boot-partition test-bootstick test-sdcard test-cond-vt test-nav-keys test-cwinsz test-kbd-queue test-kbd-mode test-kbd-cut test-ctermios test-cpoll test-smp measure-syscost test-listing-walk test-spawn-reads test-write-walk test-stale-cursor test-grow-dir test-edit test-cargs test-cerrno test-cenv test-cclock test-cfenv test-include test-cpp test-unmount test-mount-points test-crename test-mv-into test-fat-link test-mount-gate test-probe-ioerr test-blank-disk test-volume-bound test-ext2-blocks test-long-set test-disk-gate fsd-disk-gate-bin test-valid-length test-exfat-names test-fat32-names test-fat-extflags test-mv-undo test-dir-scan test-free-chain test-alloc-batch test-batch-refused clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -2991,6 +2991,19 @@ PURE_CRATES := accounts regex ed25519 clusterkeys heldkeys ninep-abi keyseq part
 check-relocs:
 	@./scripts/check-relocs.sh
 
+# Every userland program's deepest call chain against the stack the loader
+# gives it (scripts/check-stack-chains.py, 2026-11-11): each function's frame
+# read off the built binaries' disassembly and summed down every direct call
+# chain from _start, a program failing when its deepest leaves under the
+# script's floor. Written when netd was found 1,168 bytes from its guard page
+# by a path no rig drove. Builds the userland first (`esp`), since a figure
+# read off stale binaries is a figure about another tree. Run it whenever a
+# userland program, ulib, a pure crate one links, or the loader's STACK_PAGES
+# changes. Its self-test (the reading against a disassembly worked by hand)
+# is part of `make test`.
+check-stack-chains: esp
+	@python3 scripts/check-stack-chains.py
+
 # The xHCI driver's two DMA barriers in the built kernel (2026-10-03). No QEMU
 # rig can fail for a missing one: QEMU's controller sees guest memory as the
 # CPU last wrote it, and only the Pi's non-coherent PCIe controller needs
@@ -3077,6 +3090,11 @@ test:
 	@# as a key problem rather than a constant problem.
 	@echo "== cross-language wire constants"
 	@python3 scripts/check-wire-constants.py || exit 1
+	@# check-stack-chains reads frames out of a disassembly, and a reading
+	@# that stopped seeing them would call every program shallow. The check
+	@# itself needs the built userland, which this target does not make; its
+	@# self-test needs nothing, so it runs here.
+	@python3 scripts/check-stack-chains.py --self-test || exit 1
 	@# fsd's disk-gate-rig feature (test-disk-gate's build) is built by
 	@# nothing else in this target. fsd reads it through cfg!(), so the
 	@# default build compiles both branches; what only this sees is the

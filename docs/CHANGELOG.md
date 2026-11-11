@@ -48,6 +48,21 @@ parked request's uid, its anchor and its attested flag became one
 `Standing`, made at the park, and every way to a seed takes one; that a
 `Standing` is made nowhere else is review's to hold. No behaviour changed.
 
+**`netd` is 1,168 bytes from its guard page, and a build check that says so (2026-11-11).**
+The rigs read 2,528 bytes of `netd`'s stack never written, and the question
+left open was which call chain that was. Read off the built binary (each
+function's frame summed down every direct call chain from `_start`), it is
+`serve` > `handle_client` > `handle_rmount` naming its caller from
+`/etc/passwd`, and it is not the deepest: `handle_client` > `resolve_ip` >
+`arp_resolve` leaves 1,168, which one `resolve example.com` then measured to
+the byte. No rig resolved a name. `serve`'s own frame is 43,360 of the
+stack's 57,344 bytes. Nothing in `netd` is changed yet. The reading is now
+`make check-stack-chains`, over all 103 userland binaries: a program whose
+deepest chain leaves under 4,096 bytes fails the check, `netd` let stand by
+name until its frame is cut down. A recursive program has no deepest chain
+and must be named with its bound; twelve are bounded only by their input,
+`tree` among them at 1,312 bytes a directory level.
+
 **The stack mark is root's to read (2026-11-10).** As merged in #439 any
 task could ask `TASK_STACK_FREE` about any slot, and `/proc` is exported, so
 a cluster peer could read how deep `netd` or `accountd` had gone and see a
