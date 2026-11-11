@@ -906,8 +906,8 @@ fn handle_ninep(mounts: &mut [Option<vfs::Mount>; MAX_MOUNTS], fids: &mut [Fid; 
         }
     }
     // Permission enforcement (users/permissions arc, step 3): check the caller's
-    // uid/gid against the target's owner+mode before running the op. ext2-only
-    // (others return mode:None, which `check_access` treats as unrestricted);
+    // uid/gid against the target's owner+mode before running the op. ext2 and
+    // `/proc` (FAT32 and exFAT return mode:None, which `check_access` treats as unrestricted);
     // root bypasses. See `check_access`.
     if !check_access(mount.fs_mut(), who, verb, &p, payload, open) {
         return status_reply(reply, syscall_abi::FS_ERR_PERM);

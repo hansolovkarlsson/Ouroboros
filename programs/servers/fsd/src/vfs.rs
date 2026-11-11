@@ -45,10 +45,11 @@ pub struct CalTime {
 }
 
 /// POSIX ownership + permission bits for a path (ext2's `i_mode`/`i_uid`/
-/// `i_gid`). Only a filesystem that stores them surfaces this; FAT32/exFAT/
-/// `/proc` return `None` from [`Filesystem::stat`] since they can't model an
-/// owner or mode. Read-only for now - stored, not enforced, and no `chmod`
-/// write path yet (see `docs/gap-analysis.md`).
+/// `i_gid`). ext2 stores them and `/proc` states its own (every node
+/// root's, since 2026-11-10); FAT32 and exFAT return `None` from
+/// [`Filesystem::stat`] since they can't model an owner or mode. Where
+/// there is one `fsd` enforces it (`check_access`), and ext2 alone can
+/// change it ([`Filesystem::chmod`]).
 #[derive(Clone, Copy)]
 pub struct FileMode {
     /// The `S_IFMT` type nibble plus the 12 permission bits, verbatim.
@@ -488,8 +489,9 @@ impl Filesystem {
 
     /// Set a path's permission bits (the low 12 of the mode; the type nibble is
     /// preserved). The write twin of [`stat`](Self::stat)'s mode field, ext2
-    /// only, since it's the one arm that stores a mode. FAT32/exFAT/`/proc`
-    /// return [`Error::Unsupported`] rather than pretend to succeed.
+    /// only, since it's the one arm that stores a mode. FAT32 and exFAT have
+    /// none and `/proc`'s is fixed: each returns [`Error::Unsupported`]
+    /// rather than pretend to succeed.
     pub fn chmod(&mut self, path: &str, mode: u16) -> Result<(), Error> {
         match self {
             Filesystem::Ext2(fs) => fs.chmod(path, mode),

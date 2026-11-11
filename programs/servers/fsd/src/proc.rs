@@ -179,7 +179,7 @@ impl Fs {
     /// there's no timestamp (`time: None`). Backs `ls -l`, and since
     /// 2026-11-10 `fsd`'s permission checks: every node is root's, a
     /// directory `r-xr-xr-x`, a file `r--r--r--`, and `stackfree` alone
-    /// `r--------` ([`STACKFREE_MODE`]). Having a mode at all is what makes
+    /// `r--------` ([`STACKFREE_MODE`]), its size a constant. Having a mode at all is what makes
     /// `check_access` ask (`models_modes`); until then `/proc` had none and
     /// every caller read every file.
     pub fn stat(&mut self, path: &str) -> Result<crate::vfs::Stat, Error> {
@@ -187,10 +187,16 @@ impl Fs {
             Node::Root | Node::Task => (0u64, S_IFDIR | 0o555),
             Node::UnderFile => return Err(Error::NotADirectory),
             Node::NotFound => return Err(Error::NotFound),
+            // A stat is answered to callers the mode refuses a read (it is
+            // what `ls -l` prints), and a size that was the line's length
+            // said how many digits the count has: the moment a server's
+            // mark fell under 10,000 bytes, to anyone. So this file's size
+            // is the longest line it could hold, whatever it holds; a
+            // reader reads to the short read, as for every file here.
+            Node::StackFree(_) => (LINE_MAX as u64, S_IFREG | STACKFREE_MODE),
             file => {
                 let mut line = [0u8; LINE_MAX];
-                let perm = if matches!(file, Node::StackFree(_)) { STACKFREE_MODE } else { 0o444 };
-                (file_bytes(&file, &mut line) as u64, S_IFREG | perm)
+                (file_bytes(&file, &mut line) as u64, S_IFREG | 0o444)
             }
         };
         Ok(crate::vfs::Stat {

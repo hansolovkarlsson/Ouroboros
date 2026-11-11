@@ -59,9 +59,14 @@ permission checks refuse a local user and a peer alike. And the syscall
 answers only root and the slot's own task; anyone else gets
 `TASK_STACK_DENIED`, a sentinel of its own so a refusal is never read as "no
 stack". The file alone would not have done: a user's own program can make
-the call. `make test-stack-free` grew to 30 checks: it asks as a peer acting
-as `guest`, then logs in as `user` and asks by `cat` and by `stackprobe of
-<slot>`. A clause naming `fsd`'s slot in the kernel's rule was removed when
+the call. The file's size in a `stat` is a constant, since a stat is
+answered to callers a read is refused and the line's length gave the
+count's digits away (the review of the gate). One change beside it: an
+ordinary user's write under `/proc` is now refused as "permission denied"
+where it was "read-only", the permission check coming first; root still
+hears "read-only". `make test-stack-free` grew to 32 checks: it asks as a
+peer acting as `guest`, then logs in as `user` and asks by `cat` and by
+`stackprobe of <slot>`. A clause naming `fsd`'s slot in the kernel's rule was removed when
 its control changed no check: `fsd` runs as root.
 
 **Every task's stack low-water mark, counted by the kernel (2026-11-10).**

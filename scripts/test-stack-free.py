@@ -28,8 +28,10 @@ both:
   the export and one acting as `guest` is refused, with a permission error.
   Then the ordinary `user` logs in: `cat` of the file is refused, a program
   asking the kernel directly (`stackprobe of <slot>`) is answered `denied`
-  for `netd` and for the user's own shell, and is still answered about its
-  own stack. `state`, beside it, stays everyone's to read.
+  for `netd` and for a probe the same user holds, and is still answered
+  about its own stack. `state`, beside it, stays everyone's to read, and
+  `ls -l` gives the file one size whatever its count, so a stat says nothing
+  of it.
 
 Usage:  python3 scripts/test-stack-free.py      (make test-stack-free builds the image)
 Exit status: the number of failed checks.
@@ -152,8 +154,19 @@ def ordinary_user(g, size):
           f"user's read of /proc/{NETD}/stackfree is refused: {refused!r}")
     denied = asked(g, NETD)
     check(denied == "denied", f"user's program asks the kernel about netd and is refused: {denied!r}")
-    shell = asked(g, 0)
-    check(shell == "denied", f"and about the shell that ran it, another task of the same user: {shell!r}")
+    # Another task of the SAME user: a probe this user's shell started and
+    # holds. Same uid, different slot, so "the same user may ask" fails here.
+    mine = hold(g, 8)
+    if check(mine is not None, f"user holds a probe of their own: {mine}"):
+        sibling = asked(g, mine[0])
+        check(sibling == "denied", f"user's program asks about that probe, another task of the same user, and is refused: {sibling!r}")
+        size_line = sh(g, f"ls -l /proc/{mine[0]}/stackfree")
+        other = sh(g, f"ls -l /proc/{NETD}/stackfree")
+        size_of = r"-r--------\s+\d+\s+\d+\s+(\d+)\s"  # mode, uid, gid, size
+        a, b = re.search(size_of, size_line), re.search(size_of, other)
+        check(a is not None and b is not None and a.group(1) == b.group(1),
+              f"`ls -l` gives the file one size whatever it holds ({mine[3]} here, netd's 4 digits): {a and a.group(1)!r} and {b and b.group(1)!r}")
+        sh(g, f"kill {mine[0]}")
     own = probe(g, "stackprobe 8")
     check(own is not None and 0 < own[3] < own[2] <= size,
           f"user's program is still answered about its own stack: {own}")
@@ -227,7 +240,7 @@ def main():
         g.stop()
         with open(TRANSCRIPT, "w") as f:
             f.write(transcript)
-    want = 30
+    want = 32
     if checks != want and not failed:
         print(f"[FAIL] {checks} checks ran, want {want}", flush=True)
         return 1

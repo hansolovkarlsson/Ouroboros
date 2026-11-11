@@ -1988,8 +1988,9 @@ pub const FS_ERR_NOT_SUPPORTED: u64 = u64::MAX - 31;
 
 /// **Permission denied**: the caller's uid/gid isn't allowed the requested
 /// access to a file by its owner + mode bits. Returned by `fsd`'s permission
-/// enforcement (the users/permissions arc, step 3) - ext2 only (the one arm
-/// that models an owner/mode; FAT32/exFAT/`/proc` stay unrestricted). Root
+/// enforcement (the users/permissions arc, step 3) - on ext2 and, since
+/// 2026-11-10, the synthetic `/proc`, the arms that give an owner and mode
+/// (FAT32 and exFAT stay unrestricted). Root
 /// (uid 0) bypasses the check, so this is only ever a *non-root* refusal.
 pub const FS_ERR_PERM: u64 = u64::MAX - 32;
 
