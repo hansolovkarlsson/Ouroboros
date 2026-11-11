@@ -17,8 +17,8 @@
 //! leaves the group alone, matching the numeric form's long-standing behaviour;
 //! write `chown alice:alice` (or `alice:1000`) to set both.
 //!
-//! **ext2 only**: FAT32/exFAT/`/proc` can't model an owner and return "not
-//! supported by this filesystem". Parsing works in bytes, never slicing a
+//! **ext2 only**: FAT32/exFAT can't model an owner and `/proc`'s is fixed
+//! (root): each returns "not supported by this filesystem". Parsing works in bytes, never slicing a
 //! `&str` by a runtime index (the PIE relocation trap - see `docs/processes.md`).
 
 #![no_std]

@@ -164,8 +164,10 @@ def ordinary_user(g, size):
         other = sh(g, f"ls -l /proc/{NETD}/stackfree")
         size_of = r"-r--------\s+\d+\s+\d+\s+(\d+)\s"  # mode, uid, gid, size
         a, b = re.search(size_of, size_line), re.search(size_of, other)
-        check(a is not None and b is not None and a.group(1) == b.group(1),
-              f"`ls -l` gives the file one size whatever it holds ({mine[3]} here, netd's 4 digits): {a and a.group(1)!r} and {b and b.group(1)!r}")
+        # The check can fail only while the two counts differ in length:
+        # root's reading of netd, taken above, against this probe's.
+        check(root is not None and len(root) != len(str(mine[3])) and a is not None and b is not None and a.group(1) == b.group(1),
+              f"`ls -l` gives the file one size whatever it holds (a count of {len(str(mine[3]))} digits here, of {root and len(root)} for netd): {a and a.group(1)!r} and {b and b.group(1)!r}")
         sh(g, f"kill {mine[0]}")
     own = probe(g, "stackprobe 8")
     check(own is not None and 0 < own[3] < own[2] <= size,

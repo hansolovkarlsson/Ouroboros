@@ -1327,7 +1327,9 @@ fn mounts_only(path: &str, code: u64) -> u64 {
 
 /// Set `path`'s permission bits (the low 12 of the POSIX mode). Returns `0`,
 /// [`NO_FS`], or an `FS_ERR_*` code - notably [`FS_ERR_NOT_SUPPORTED`] on a
-/// filesystem that can't model a mode (FAT32/exFAT/`/proc`). Backs `chmod`.
+/// filesystem whose modes can't be set (FAT32/exFAT have none, `/proc`'s are
+/// fixed, and there a caller who is not root hears the permission error
+/// first). Backs `chmod`.
 ///
 /// [`NO_FS`]: syscall_abi::NO_FS
 /// [`FS_ERR_NOT_SUPPORTED`]: syscall_abi::FS_ERR_NOT_SUPPORTED

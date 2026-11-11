@@ -25,9 +25,14 @@
 //! for a local user and a cluster peer alike (`stat`, below).
 //!
 //! Every file here is generated at the instant it is read, and its size in a
-//! listing or a `stat` is that instant's too: `state` is 8 or 9 bytes,
-//! `core` 2 to 5 as the task moves and `stackfree` shorter as the mark falls, so a reader that sizes first and then
-//! reads a moment later can read short. Read to the short read, as `cat` does.
+//! listing or a `stat` is that instant's too: `state` is 8 or 9 bytes and
+//! `core` 2 to 5 as the task moves, so a reader that sizes first and then
+//! reads a moment later can read short. `stackfree` is the exception: its
+//! size is always the longest line it could hold (21), since a stat is
+//! answered to callers who may not read it and the true length would give
+//! the count's digits away, so every read of it is short (and a C program's
+//! `lseek` to its end lands past its last byte). Read to the short read, as
+//! `cat` does.
 //!
 //! Read-only: every write/mutate method returns [`Error::ReadOnly`]. A slot
 //! exposes its scheduler state, the core executing it and its stack's
@@ -232,8 +237,9 @@ impl Fs {
 }
 
 /// The bytes of one of the files, formatted into `buf` at the instant of
-/// the read: the one place a file's content is made, so a listing's size,
-/// a `stat` and a read cannot disagree on how it is spelled, and the next
+/// the read: the one place a file's content is made, so a `stat`'s size
+/// and a read cannot disagree on how it is spelled (but for `stackfree`,
+/// whose size `stat` states and does not measure), and the next
 /// file (`name` is a candidate) is one arm here and nowhere else.
 fn file_bytes(node: &Node, buf: &mut [u8; LINE_MAX]) -> usize {
     match node {
