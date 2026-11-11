@@ -26,7 +26,7 @@ ends, as before. `make test-run-callback` gains the killed login. The other open
 credentialed fid verb, was answered too: it stands, since `fsd` refuses
 any fid path over 96 bytes, so no request it refuses would be served.
 
-**A `cpu` run's command dies with the run's connection (2026-11-10).** On
+**A `cpu` run's command dies with the run's connection (2026-11-10, #437).** On
 the executing machine, a peer that closed mid-run left the command running
 with nothing to reap it, holding a task slot until someone typed `wait N`;
 known since 2026-09-12, and reached by every logout since the entry above.
@@ -37,7 +37,7 @@ ordinary way is reaped by its `WAIT`, as before. `make test-run-orphan`
 (new) has the host dispatch `cpu recv` and close by a FIN and by a RST; it
 fails with the kill left out.
 
-**`netd`'s held-key rules run on the host (2026-11-10).** Three rules of the
+**`netd`'s held-key rules run on the host (2026-11-10, #438).** Three rules of the
 per-user keys arc had no check that could fail, because each turns on a
 moment inside one pass of `netd`'s event loop that no driven boot can reach:
 a dead login's key signing before the idle pass reaps it, a run whose key
@@ -48,7 +48,7 @@ parked request's uid, its anchor and its attested flag became one
 `Standing`, made at the park, and every way to a seed takes one; that a
 `Standing` is made nowhere else is review's to hold. No behaviour changed.
 
-**`netd`'s tables leave its stack: 37,296 bytes left where there were 1,168 (2026-11-11).**
+**`netd`'s tables leave its stack: 37,296 bytes left where there were 1,168 (2026-11-11, #442).**
 Everything `serve` keeps for the whole boot (the two receive buffers, the
 auth config, the connection, dial, session and remote tables, the pending
 run, the held keys) was `serve`'s locals, 43,360 bytes under every call
@@ -62,7 +62,7 @@ floor failed the first run that kept it, as built, and is gone. The comments
 that sized each table against the stack now say the tables are heap; the
 sizes themselves were left as they were.
 
-**`netd` is 1,168 bytes from its guard page, and a build check that says so (2026-11-11).**
+**`netd` is 1,168 bytes from its guard page, and a build check that says so (2026-11-11, #441).**
 The rigs read 2,528 bytes of `netd`'s stack never written, and the question
 left open was which call chain that was. Read off the built binary (each
 function's frame summed down every direct call chain from `_start`), it is
@@ -77,7 +77,7 @@ name until its frame is cut down. A recursive program has no deepest chain
 and must be named with its bound; twelve are bounded only by their input,
 `tree` among them at 1,312 bytes a directory level.
 
-**The stack mark is root's to read (2026-11-10).** As merged in #439 any
+**The stack mark is root's to read (2026-11-10, #440).** As merged in #439 any
 task could ask `TASK_STACK_FREE` about any slot, and `/proc` is exported, so
 a cluster peer could read how deep `netd` or `accountd` had gone and see a
 login take one deeper (the medium review of #439). Two halves of one rule.
@@ -98,7 +98,7 @@ peer acting as `guest`, then logs in as `user` and asks by `cat` and by
 `stackprobe of <slot>`. A clause naming `fsd`'s slot in the kernel's rule was removed when
 its control changed no check: `fsd` runs as root.
 
-**Every task's stack low-water mark, counted by the kernel (2026-11-10).**
+**Every task's stack low-water mark, counted by the kernel (2026-11-10, #439).**
 The one measurement of `netd`'s stack was a probe patched into `netd` on a
 branch (`8429d38f`), cherry-picked for each use, whose own log lines landed
 on the shell's prompt and failed two checks of the rig it was read from.

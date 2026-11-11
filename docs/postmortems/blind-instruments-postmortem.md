@@ -1,6 +1,6 @@
 # Blind instruments
 
-*A process retrospective, 2026-09-02, extended through 2026-11-09. It began
+*A process retrospective, 2026-09-02, extended through 2026-11-11. It began
 with a day of small roadmap items (five PRs, one release, no arc) during which
 five separate tools reported success while proving nothing. Every later day
 that found another instrument of the same kind added a dated section after
@@ -8,7 +8,7 @@ that found another instrument of the same kind added a dated section after
 off a phone photo, the Raspberry Pi's bench tools, and on 2026-10-09 the
 stale-image guard and the four blind spots in the guard that replaced it, and
 on 2026-10-10 the controls a keyboard change blinded and then the multi-core
-rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's, and on 2026-10-20 the volume bounds', and on 2026-10-21 the exFAT sets' and names', and on 2026-10-22 the stall classifier's and sector 0's, and on 2026-10-23 the blank disk's, and on 2026-10-24 the exFAT frees' mutants and plants, and on 2026-10-25 the disk-trace stalls' classifier, fake, arithmetic and a host sleep, and on 2026-10-28 the read-only gate's control, review, run script and wait, and on 2026-10-29 the open probes' and the disk gate rig's silence, sites, truncate check and unspellable control, and on 2026-10-30 the read-only mount's shared tail, unheld order, overwritten transcript and unread pass, and the disk-gate staging's check run once, and that evening the boot start's bug no mount showed, its rig's absent step read as empty and its recomputed signature, and on 2026-10-31 the exFAT free's counts blind to order, the batch model's assertion that skipped the head, a fix no boot could grade, and a count I predicted for an order, and on 2026-11-01 an exit code that flattened two verdicts, a hint a byte wide read a cluster at a time, a model that started where it assumed and two citations that pointed at nothing, and on 2026-11-04 a rig that attached its disks so macOS could not mount them, a test helper whose encoding broke a deep nest before the walk reached it, and a grep that hid where a fault happened, and on 2026-11-05 a probe whose two writes libc joined into one, a control run without its boot flag, and a diagnostic whose only first run was on the Pi, and on 2026-11-07 a self-test case refused by the wrong rule, a rig that graded only runs that succeed, and a mutation caught as a crash, and on 2026-11-08 a filter that read a refused boot as silence, a control placed where the two answers agree, and a glob that read yesterday's logs, and on 2026-11-09 a control the far side's reap graded, a control a new guard answered for, and a review that read a mutant as the code. The spine below has held for all of them.*
+rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's, and on 2026-10-20 the volume bounds', and on 2026-10-21 the exFAT sets' and names', and on 2026-10-22 the stall classifier's and sector 0's, and on 2026-10-23 the blank disk's, and on 2026-10-24 the exFAT frees' mutants and plants, and on 2026-10-25 the disk-trace stalls' classifier, fake, arithmetic and a host sleep, and on 2026-10-28 the read-only gate's control, review, run script and wait, and on 2026-10-29 the open probes' and the disk gate rig's silence, sites, truncate check and unspellable control, and on 2026-10-30 the read-only mount's shared tail, unheld order, overwritten transcript and unread pass, and the disk-gate staging's check run once, and that evening the boot start's bug no mount showed, its rig's absent step read as empty and its recomputed signature, and on 2026-10-31 the exFAT free's counts blind to order, the batch model's assertion that skipped the head, a fix no boot could grade, and a count I predicted for an order, and on 2026-11-01 an exit code that flattened two verdicts, a hint a byte wide read a cluster at a time, a model that started where it assumed and two citations that pointed at nothing, and on 2026-11-04 a rig that attached its disks so macOS could not mount them, a test helper whose encoding broke a deep nest before the walk reached it, and a grep that hid where a fault happened, and on 2026-11-05 a probe whose two writes libc joined into one, a control run without its boot flag, and a diagnostic whose only first run was on the Pi, and on 2026-11-07 a self-test case refused by the wrong rule, a rig that graded only runs that succeed, and a mutation caught as a crash, and on 2026-11-08 a filter that read a refused boot as silence, a control placed where the two answers agree, and a glob that read yesterday's logs, and on 2026-11-09 a control the far side's reap graded, a control a new guard answered for, and a review that read a mutant as the code, and on 2026-11-10 to 2026-11-11 a rig whose two rounds could have been one, a mark that covered only the paths driven, a reading that dropped the calls it could not name, a self-test that passed on text its author wrote, and a clause and a premise nothing observed. The spine below has held for all of them.*
 
 The previous day's retrospective
 ([`repairing-the-repairs-postmortem.md`](repairing-the-repairs-postmortem.md))
@@ -2779,4 +2779,67 @@ have reported a defect that does not exist, or, worse, passed a file whose
 mutant it took for the code. **A review reads the working tree, so it is an
 observer of whatever state the tree is in; run it on a quiet tree, or run
 the controls where it cannot see them.**
+
+## Five more, from the stack's mark and its chains (2026-11-10 to 2026-11-11)
+
+**A rig whose two rounds could have been one.** `make test-run-orphan`
+closes a run's connection once by a FIN and once by a RST, to show the
+command dies either way. The host's socket and the guest are joined by
+SLIRP, and nothing says SLIRP relays a reset as a reset: the RST round
+could have reached the guest as a second FIN and every check would have
+passed (the high review of #437). The rig now reads QEMU's capture of the
+guest's NIC and counts which close arrived. **When a rig varies an input
+through an intermediary, the rig has to observe the input where it lands,
+not where it was sent.**
+
+**A mark that covered only the paths something drove.** The kernel's stack
+mark replaced a probe in `netd`, and `make test-async-rmount` read it each
+boot: 2,528 bytes never written, the same in six boots. The records said
+"at most 2,528" and were careful about one limit, that the mark counts
+writes and not the stack pointer. They did not say the other: the mark is
+the deepest moment of what the rigs ran. Read off the binary, the deepest
+chain was `resolve_ip` into `arp_resolve`, which leaves 1,168, and one
+`resolve example.com` measured exactly that. No rig resolved a name. **A
+high-water mark is a fact about the workload. Six boots that agree are six
+samples of one path, and the figure for the program has to be computed, not
+observed.** It is now `make check-stack-chains`.
+
+**A reading that dropped what it could not name.** That check follows every
+direct call from `_start`, and kept a call only when its target was a
+symbol. The binaries DevTools's linker makes keep no symbols for static
+functions, so in them half the calls were dropped in silence: one build of
+the editor read as 3,360 bytes deep with no recursion, beside a build of the
+same source that read 15,744 and recursive (the review of #441). Any
+address a `bl` names is now a function. The first version of the script had
+the same shape of fault one level down: it did not read a probed frame's
+page loop and reported the deepest chain as 19 KB, and only the kernel's
+mark, reading 52 KB at the prompt, said the instrument was wrong. **An
+analysis that skips what it cannot resolve reports the remainder as the
+whole. Count what was skipped and fail on it, and keep one independent
+measurement the analysis has to agree with.**
+
+**A self-test that passed on text its author wrote.** The check has a
+self-test, a small disassembly whose answer is known by hand, and a canary:
+`stackprobe`'s `dig` frame must read as the 1,072 bytes the stack rig
+measures. Rewriting the parser broke the pattern for an instruction line,
+because the real disassembler pads with spaces before the tab and the
+hand-written sample did not. The self-test passed. Every real binary read
+as empty, zero bytes deep, comfortably above the floor, and the check would
+have reported 103 programs sound. The canary failed the run. **A fixture
+written by the author of the parser shares the author's idea of the format.
+The check that matters is one made from the real tool's output and tied to
+a number measured some other way.**
+
+**A clause and a premise nothing observed.** Two smaller ones of one kind.
+The kernel's rule for who may read the mark first named `fsd`'s slot beside
+root and the task itself; the control that removed the clause changed no
+check, since `fsd` runs as root, and the clause was removed and not left as
+a line nobody could test. And a check that `ls -l` gives two `stackfree`
+files the same size could only fail while their counts differed in digits,
+which it did not assert; made to assert it, it failed the next day when
+`netd`'s count grew a digit, on the premise and with the reason printed,
+where the unasserted version would have gone on passing and proving
+nothing. **A control that changes no check has found dead text or a blind
+rig, and either is worth the minute it takes to learn which. A check's
+precondition belongs in the check.**
 
