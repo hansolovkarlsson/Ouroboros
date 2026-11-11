@@ -48,6 +48,18 @@ parked request's uid, its anchor and its attested flag became one
 `Standing`, made at the park, and every way to a seed takes one; that a
 `Standing` is made nowhere else is review's to hold. No behaviour changed.
 
+**`netd`'s tables leave its stack: 37,296 bytes left where there were 1,168 (2026-11-11).**
+Everything `serve` keeps for the whole boot (the two receive buffers, the
+auth config, the connection, dial, session and remote tables, the pending
+run, the held keys) was `serve`'s locals, 43,360 bytes under every call
+chain, because userland has no mutable statics. They are now one `Tables` in
+`netd`'s heap region, past `cpu`'s read buffer, built once before the loop;
+`serve` holds the reference and its frame is 7,232 bytes. Hans chose this
+over a larger `STACK_PAGES`. The deepest chain leaves 37,296 bytes by `make
+check-stack-chains`, and `/proc/4/stackfree` reads 37,296 after `resolve
+example.com` on a boot. The check's entry letting `netd` stand below the
+floor failed the first run that kept it, as built, and is gone.
+
 **`netd` is 1,168 bytes from its guard page, and a build check that says so (2026-11-11).**
 The rigs read 2,528 bytes of `netd`'s stack never written, and the question
 left open was which call chain that was. Read off the built binary (each

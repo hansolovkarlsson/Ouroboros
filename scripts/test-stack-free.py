@@ -160,14 +160,19 @@ def ordinary_user(g, size):
     if check(mine is not None, f"user holds a probe of their own: {mine}"):
         sibling = asked(g, mine[0])
         check(sibling == "denied", f"user's program asks about that probe, another task of the same user, and is refused: {sibling!r}")
-        size_line = sh(g, f"ls -l /proc/{mine[0]}/stackfree")
-        other = sh(g, f"ls -l /proc/{NETD}/stackfree")
-        size_of = r"-r--------\s+\d+\s+\d+\s+(\d+)\s"  # mode, uid, gid, size
-        a, b = re.search(size_of, size_line), re.search(size_of, other)
-        # The check can fail only while the two counts differ in length:
-        # root's reading of netd, taken above, against this probe's.
-        check(root is not None and len(root) != len(str(mine[3])) and a is not None and b is not None and a.group(1) == b.group(1),
-              f"`ls -l` gives the file one size whatever it holds (a count of {len(str(mine[3]))} digits here, of {root and len(root)} for netd): {a and a.group(1)!r} and {b and b.group(1)!r}")
+        # The file's size, for two counts of different lengths: this probe's
+        # (8 levels, five digits) and a second held 48 levels deep (four).
+        # netd's was the second until 2026-11-11, when its tables left its
+        # stack and its count grew a digit; the check said so by failing.
+        deep = hold(g, 48)
+        sizes = []
+        for held in (mine, deep):
+            m = held and re.search(r"-r--------\s+\d+\s+\d+\s+(\d+)\s", sh(g, f"ls -l /proc/{held[0]}/stackfree"))
+            sizes.append(m.group(1) if m else None)
+        check(deep is not None and len(str(deep[3])) != len(str(mine[3])) and None not in sizes and sizes[0] == sizes[1],
+              f"`ls -l` gives the file one size whatever it holds (counts of {mine[3]} and {deep and deep[3]}): {sizes[0]!r} and {sizes[1]!r}")
+        if deep is not None:
+            sh(g, f"kill {deep[0]}")
         sh(g, f"kill {mine[0]}")
     own = probe(g, "stackprobe 8")
     check(own is not None and 0 < own[3] < own[2] <= size,

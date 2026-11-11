@@ -104,7 +104,7 @@ const SERVER_PORT: u16 = 80;
 const SERVER_ISN: u32 = 0x0002_0000;
 /// How many concurrent server connections `netd` can hold at once (a browser
 /// opens several for one page). Bounded because each `TcpConn` carries a
-/// ~2KB response-prefix buffer and they all live on `serve()`'s stack; a SYN
+/// ~2KB response-prefix buffer and they all live in `Tables`; a SYN
 /// arriving with no free slot is REFUSED with a RST (since sessions, 2026-09-07:
 /// a drop meant a hang for as long as a session held the table).
 const MAX_CONNS: usize = 4;
@@ -231,7 +231,7 @@ const USERS_MAX: usize = clusterkeys::USERS_MAX;
 /// its own private key and a list of the peer PUBLIC keys it accepts, so a
 /// member is revoked by deleting a line rather than by re-keying everyone. A
 /// machine with neither can neither serve nor dial. Read-only after startup; no mutable statics exist in
-/// userland (`.bss` asserted empty), so this rides `serve`'s stack frame and is
+/// userland (`.bss` asserted empty), so this lives in `Tables` (the heap region) and is
 /// threaded (`&Auth`) through the event loop to the two leaves that need it -
 /// the inbound gate (`handle_9p`) and the outbound signer (`handle_rmount`/
 /// `handle_run`).
@@ -1588,8 +1588,8 @@ fn tcp_get(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], dst_port: u16, re
 
 /// The collected output of the most recent `cpu` run, delivered to the shell one
 /// `MSG_MAX_LEN` chunk at a time (the shell pulls with `NETOP_RUN_MORE`). netd
-/// holds it here between pull calls - a single pending run at a time, on `serve`'s
-/// frame (no mutable statics). Bounded by `RUN_OUT_MAX` (the remote's own send
+/// holds it here between pull calls - a single pending run at a time, in
+/// `Tables` (no mutable statics). Bounded by `RUN_OUT_MAX` (the remote's own send
 /// buffer caps it too); truly unbounded streaming as the child produces is a
 /// later refinement (see `docs/roadmap/roadmap-cluster.md`). The `owner` check means only
 /// the task that issued the run may pull its output - by packed task identity
@@ -2822,12 +2822,14 @@ fn wipe(b: &mut [u8]) {
 
 /// Concurrent dial-out connections. Bounded (no heap), like `MAX_CONNS`. Kept
 /// small because each `DialConn` carries its own send+recv buffers and the whole
-/// `[Option<DialConn>; MAX_DIAL]` array lives on `serve`'s (guard-paged) stack -
-/// so these three sizes trade directly against netd's stack headroom.
+/// `[Option<DialConn>; MAX_DIAL]` array lives in `Tables`, in the heap region
+/// since 2026-11-11. Until then it rode `serve`'s stack and these three sizes
+/// traded directly against netd's stack headroom; they now cost heap, of
+/// which there is far more, and were not raised when that changed.
 // A listener + a couple of concurrent accepted connections ("small fan-out").
-// Each DialConn carries its send+recv buffers and the whole array lives on
-// serve()'s guard-paged stack (the loader's `STACK_PAGES`), so this is capped
-// tight - 4 overflowed.
+// Each DialConn carries its send+recv buffers. Capped tight when the whole
+// array lived on serve()'s guard-paged stack, where 4 overflowed; it is in
+// the heap region now (`Tables`) and the cap is as it was.
 const MAX_DIAL: usize = 3;
 /// Per-connection send buffer: bytes the client has queued (via a /data write)
 /// that are not yet sent-and-acked. One small request's worth (stop-and-wait).
@@ -5620,9 +5622,10 @@ fn cpu_spawn(cmdline: &[u8]) -> Result<u8, CpuSpawnError> {
     // path from the root again. A read of 0 is the end.
     /// The read buffer: the first `CPU_READ` bytes of netd's heap region
     /// (`HEAP_INFO`), or `None` with no heap that large. Not the stack:
-    /// netd's is 14 pages, most of it resident tables under every chain, and
-    /// an 8 KiB buffer there faulted netd into its guard page at boot
-    /// (2026-10-17), the frame being the caller's once inlined. Declared in
+    /// netd's was 14 pages with most of it resident tables under every chain
+    /// (they are in the heap too since 2026-11-11), and an 8 KiB buffer there
+    /// faulted netd into its guard page at boot (2026-10-17), the frame being
+    /// the caller's once inlined. Declared in
     /// here so nothing else in netd can name it: the heap's one other use is
     /// `Tables`, which starts past these bytes, and `cpu_spawn` is synchronous
     /// and never re-entered (it never returns to the event loop), so the slice
