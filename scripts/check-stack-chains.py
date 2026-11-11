@@ -55,9 +55,8 @@ FLOOR = 4096
 # let stand. A program here that comes to keep FLOOR fails too, so the entry
 # is removed and cannot rot.
 BELOW = {
-    # serve's frame is 43,360 bytes, three quarters of the stack; moving its
-    # tables out of the frame is the fix (docs/ROADMAP.md, 2026-11-11).
-    "netd": 1024,
+    # None today. netd stood here at 1,024 until its tables left serve's
+    # frame for the heap (2026-11-11): 1,168 left before, 37,296 after.
 }
 # Programs with a call cycle. Each was looked at: the number is the most
 # times its cycles can be walked, read from the source, and the chain is

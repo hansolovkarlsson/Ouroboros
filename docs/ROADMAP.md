@@ -956,8 +956,8 @@ record is in [`CHANGELOG.md`](CHANGELOG.md):
 
 The small open tails those arcs deliberately left:
 
-- **`netd` has 1,168 bytes of its stack left after one `resolve <name>`
-  (2026-11-11), not the 2,528 the rigs read (2026-11-10).** The kernel counts every task's never-written stack
+- **`netd` had 1,168 bytes of its stack left after one `resolve <name>`,
+  not the 2,528 the rigs read; found and fixed 2026-11-11 (37,296 now).** The kernel counts every task's never-written stack
   (`TASK_STACK_FREE`, `/proc/<n>/stackfree`, `make test-stack-free`), which
   replaced the probe patched into `netd` on a branch (`8429d38f`). `make
   test-async-rmount` reads `netd`'s mark at the end of each of its six
@@ -998,8 +998,15 @@ The small open tails those arcs deliberately left:
     their input, which it prints and cannot bound: `tree` is one, 1,312
     bytes a directory level, so a tree about forty levels deep is its guard
     page. Not fixed; `tree` with an explicit stack is the repair.
-  - **next: `serve`'s frame out of the stack** (Hans's choice, 2026-11-11),
-    its connection table and buffers in statics, measured by the check.
+  - **`serve`'s tables out of its frame. DONE 2026-11-11** (Hans's
+    choice over a larger `STACK_PAGES`): one `Tables` in `netd`'s heap
+    region, past `cpu`'s read buffer, since userland has no mutable statics.
+    `serve`'s frame is 7,232 bytes where it was 43,360, and the deepest
+    chain leaves **37,296** where it left 1,168: by the check, and by
+    `/proc/4/stackfree` after `resolve example.com` on a boot. `netd`'s
+    entry in the check's below-the-floor table is gone, and the shallowest
+    program is now `fsd` (13,904 left). `STACK_PAGES` is unchanged at 14;
+    whether to give pages back is open, with `fsd` the one to measure.
   - the count sees writes, not the stack pointer: a buffer reserved and
     never written at its low end is counted only as deep as it was written,
     so the true room is the reading or less.
