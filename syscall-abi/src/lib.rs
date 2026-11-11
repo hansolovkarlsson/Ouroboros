@@ -916,9 +916,10 @@ pub const TASK_NO_EXIT_CODE: u64 = u64::MAX;
 /// point is not seen. The mark only falls; nothing resets it but a new load.
 /// [`TASK_STACK_NONE`] for a slot with no stack to measure.
 ///
-/// Read-only, and answered to three callers: a task asking about itself, a
-/// task running as root, and `fsd`, which serves it as `/proc/<n>/stackfree`,
-/// a file only root may read. Any other caller gets [`TASK_STACK_DENIED`],
+/// Read-only, and answered to two callers: a task asking about itself, and
+/// a task running as root, which `fsd` is; it serves the count as
+/// `/proc/<n>/stackfree`, a file only root may read. Any other caller gets
+/// [`TASK_STACK_DENIED`],
 /// whatever the slot holds. How deep `netd` or `accountd` has gone, and
 /// whether a request just took it deeper, says which of their code ran, so
 /// it is not every task's to read (the medium review of #439; open to all,
@@ -931,7 +932,7 @@ pub const TASK_STACK_FREE: u64 = 78;
 pub const TASK_STACK_NONE: u64 = u64::MAX;
 
 /// [`TASK_STACK_FREE`]'s answer to a caller that may not ask about that
-/// slot: neither the slot's own task, nor root, nor `fsd`. Given before the
+/// slot: neither the slot's own task nor root. Given before the
 /// slot is looked at, so it says nothing of what the slot holds. Distinct
 /// from [`TASK_STACK_NONE`], so a refusal is never read as "no stack".
 pub const TASK_STACK_DENIED: u64 = u64::MAX - 1;

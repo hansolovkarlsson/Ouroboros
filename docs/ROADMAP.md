@@ -980,12 +980,15 @@ The small open tails those arcs deliberately left:
   - the count sees writes, not the stack pointer: a buffer reserved and
     never written at its low end is counted only as deep as it was written,
     so the true room is the reading or less.
-  - who may read it. `TASK_STACK_FREE` is open to every task and `/proc` is
-    exported, so a peer can read `accountd`'s or `netd`'s mark, and a fall
-    across a login says a deeper path ran for the first time (the medium
-    review of #439). Narrow, since the mark only falls. Left open as
-    `TASK_STATE` is; gating the syscall to `fsd` and the task itself, or the
-    file to root, is Hans's to decide.
+  - who may read it. **DONE 2026-11-10**, the PR after #439: root and the
+    task itself. As merged, `TASK_STACK_FREE` was open to every task and
+    `/proc` is exported, so a peer could read `accountd`'s or `netd`'s
+    mark, and a fall across a login says a deeper path ran for the first
+    time (the medium review of #439). Now `/proc` has owners and modes,
+    `stackfree` is `r--------`, and the syscall answers `TASK_STACK_DENIED`
+    to any task that is neither root nor the slot's own. `make
+    test-stack-free` asks as the ordinary `user` and as a peer acting as
+    `guest`. `TASK_STATE`, `/proc/<n>/state` and `core` stay open.
 - **The boot-disk matcher in a pure crate, with host tests. DONE
   2026-10-14:** `parttable`, which the kernel's `bootdisk.rs` and `fsd`'s
   partition.rs both call, its host tests in `make test`. As planned

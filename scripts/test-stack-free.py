@@ -23,7 +23,13 @@ both:
 - a probe held at its depth reads the same from outside, by
   `cat /proc/<slot>/stackfree`, and a killed probe's slot reads `none`;
 - `/proc/<n>` lists the file, the idle task's reads `none`, `netd`'s a count
-  below the stack's size, and nothing lives under it.
+  below the stack's size, and nothing lives under it;
+- the mark is root's to read. A cluster peer trusted as root reads it over
+  the export and one acting as `guest` is refused, with a permission error.
+  Then the ordinary `user` logs in: `cat` of the file is refused, a program
+  asking the kernel directly (`stackprobe of <slot>`) is answered `denied`
+  for `netd` and for the user's own shell, and is still answered about its
+  own stack. `state`, beside it, stays everyone's to read.
 
 Usage:  python3 scripts/test-stack-free.py      (make test-stack-free builds the image)
 Exit status: the number of failed checks.
@@ -31,6 +37,7 @@ Exit status: the number of failed checks.
 import importlib.util
 import os
 import re
+import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -46,6 +53,8 @@ CHUNK = 1024  # stackprobe's bytes a level (its CHUNK; a copy, and the frame che
 FRAME_EXTRA = 128  # the most bytes a level's frame may add to its chunk
 FRESH = 1024  # the most a program may have written before its first act
 NETD = 4  # netd's slot (syscall-abi's NET_TASK)
+PORT = 5653  # the export's forward, its own so the other rigs' boots can coexist
+FS_ERR_PERM = "0xffffffffffffffdf"  # syscall-abi's, as np9p_client.py prints a refusal
 IDLE = 1  # the idle task's (kernel/src/tasks.rs)
 LINE = r"stackprobe: slot (\d+) size (\d+) free (\d+) then (\d+)"
 
@@ -101,6 +110,27 @@ def asked(g, slot):
     return m.group(1) if m else None
 
 
+def peer(*args):
+    """One request to the guest's export from the host's 9P client, a
+    cluster peer the image authorizes and trusts as root: what it printed."""
+    return subprocess.run(
+        [sys.executable, os.path.join(HERE, "np9p_client.py"), "localhost", str(PORT), *args],
+        capture_output=True, timeout=60).stdout.decode("latin-1")
+
+
+def cluster_peer(size):
+    """The same rule over the export, where `/proc` is served to other
+    machines: the mark to a peer acting as root, and to no other user."""
+    as_root = peer("read", f"/proc/{NETD}/stackfree").split("\n")[0]
+    check(as_root.isdigit() and 0 < int(as_root) < size,
+          f"a peer trusted as root reads netd's count over the export: {as_root!r}")
+    state = peer("read", f"/proc/{NETD}/state", "--user", "guest").split("\n")[0]
+    check(state in ("runnable", "blocked"), f"a peer acting as `guest` reads netd's state: {state!r}")
+    refused = peer("read", f"/proc/{NETD}/stackfree", "--user", "guest").strip()
+    check(refused == f"status: ERROR {FS_ERR_PERM}",
+          f"a peer acting as `guest` is refused netd's count, a permission error: {refused!r}")
+
+
 def ordinary_user(g, size):
     """Who may read the mark: root, the task itself, and nobody else, by the
     file and by the syscall both."""
@@ -130,7 +160,10 @@ def ordinary_user(g, size):
 
 
 def main():
-    g = drive_qemu.Guest(IMAGE, label="[stack-free] ")
+    g = drive_qemu.Guest(IMAGE, extra_args=(
+        "-netdev", f"user,id=net0,hostfwd=tcp::{PORT}-:564",
+        "-device", "virtio-net-device,netdev=net0",
+    ), label="[stack-free] ")
     try:
         if not check(g.run([("login:", "root"), ("assword", "root"), (PROMPT, "")]), "the guest boots to root's shell"):
             return failed
@@ -185,6 +218,7 @@ def main():
         under = proc(g, f"{NETD}/stackfree/x")
         check(under is not None and "not a directory" in under, f"nothing lives under the file: {under!r}")
         check("after-stack" in sh(g, "echo after-stack"), "the shell answers after")
+        cluster_peer(size)
         ordinary_user(g, size)
         faults = g.aborts()
         check(faults == 0, f"no fault lines in QEMU's trace: {faults}")
@@ -193,7 +227,7 @@ def main():
         g.stop()
         with open(TRANSCRIPT, "w") as f:
             f.write(transcript)
-    want = 27
+    want = 30
     if checks != want and not failed:
         print(f"[FAIL] {checks} checks ran, want {want}", flush=True)
         return 1

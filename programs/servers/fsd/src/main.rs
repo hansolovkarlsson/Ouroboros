@@ -1789,7 +1789,8 @@ fn models_modes_or_unknown(fs: &mut vfs::Filesystem) -> Option<bool> {
 }
 
 /// Whether to apply the per-verb permission checks. ext2 models owner/mode;
-/// FAT32, exFAT and the synthetic `/proc` do not, and on those every permission
+/// and so does the synthetic `/proc` (since 2026-11-10, every node root's);
+/// FAT32 and exFAT do not, and on those every permission
 /// question has the same answer, so asking once is both the correct answer and
 /// the cheap one.
 ///

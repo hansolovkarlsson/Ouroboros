@@ -20,6 +20,10 @@
 //!   /<n>/stackfree ->  "2496\n" | "none\n"  the bytes of its stack the task has never written (TASK_STACK_FREE; since 2026-11-10)
 //! ```
 //!
+//! Every node is root's: a directory `r-xr-xr-x`, a file `r--r--r--`, and
+//! `stackfree` alone `r--------`, which `fsd`'s permission checks enforce
+//! for a local user and a cluster peer alike (`stat`, below).
+//!
 //! Every file here is generated at the instant it is read, and its size in a
 //! listing or a `stat` is that instant's too: `state` is 8 or 9 bytes,
 //! `core` 2 to 5 as the task moves and `stackfree` shorter as the mark falls, so a reader that sizes first and then
@@ -298,8 +302,9 @@ fn stackfree_bytes(n: u64, buf: &mut [u8; LINE_MAX]) -> usize {
             buf[..5].copy_from_slice(b"none\n");
             5
         }
-        // The kernel answers `fsd` for every slot, so this is a kernel that
-        // stopped doing so: say it, and never print the sentinel as a count.
+        // The kernel answers root for every slot and `fsd` runs as root, so
+        // this is an `fsd` that no longer does: say it, and never print the
+        // sentinel as a count.
         syscall_abi::TASK_STACK_DENIED => {
             buf[..7].copy_from_slice(b"denied\n");
             7

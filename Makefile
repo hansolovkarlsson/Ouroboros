@@ -2382,9 +2382,10 @@ test-proc-cpus: image
 # A stack's never-written bytes, counted by the kernel
 # (scripts/test-stack-free.py, /bin/STACKPROBE): the loader's paint,
 # TASK_STACK_FREE and /proc/<n>/stackfree against a program that writes a
-# known depth. One boot, about a minute. Run it whenever the loader's stack
-# paint or tail layout, TASK_STACK_FREE, end_task's region record or fsd's
-# proc.rs changes.
+# known depth, and who may read the mark (root and the task itself, asked
+# as an ordinary user and as a cluster peer). One boot, about a minute. Run
+# it whenever the loader's stack paint or tail layout, TASK_STACK_FREE,
+# end_task's region record, fsd's proc.rs or fsd's permission checks change.
 test-stack-free: image
 	python3 scripts/test-stack-free.py
 
