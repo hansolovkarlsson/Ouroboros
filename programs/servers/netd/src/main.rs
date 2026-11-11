@@ -747,9 +747,12 @@ const CPU_READ: usize = 8 * 1024;
 /// which never returns. With no heap region that large `netd` ends with a
 /// line: it has nowhere to keep a connection.
 ///
-/// Never inlined: the value is made in this frame before it is moved to the
-/// heap, and inlined into `serve` that frame would be `serve`'s, the 43 KB
-/// this exists to remove. Here it is given back before the loop starts.
+/// Never inlined: whatever of the value is made in this frame before it
+/// reaches the heap would, inlined into `serve`, sit under every call chain
+/// for the whole boot. On this build that is 1,632 bytes (the compiler
+/// builds most of it in place), measured by forcing the inline and reading
+/// `make check-stack-chains`; nothing promises it stays that small. Here the
+/// frame is given back before the loop starts.
 #[inline(never)]
 fn tables() -> &'static mut Tables {
     let base = syscall(syscall_abi::HEAP_INFO, syscall_abi::HEAP_INFO_BASE) as usize;
