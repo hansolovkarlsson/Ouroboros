@@ -914,15 +914,27 @@ pub const TASK_NO_EXIT_CODE: u64 = u64::MAX;
 /// reserved a buffer and wrote none of its low end is counted as deep as it
 /// wrote, and a byte of the paint's own value (`0xA5`) written at the deepest
 /// point is not seen. The mark only falls; nothing resets it but a new load.
-/// [`TASK_STACK_NONE`] for a slot with no stack to measure. Read-only and
-/// open to every task, as [`TASK_STATE`] is; `fsd` serves it as
-/// `/proc/<n>/stackfree`.
+/// [`TASK_STACK_NONE`] for a slot with no stack to measure.
+///
+/// Read-only, and answered to three callers: a task asking about itself, a
+/// task running as root, and `fsd`, which serves it as `/proc/<n>/stackfree`,
+/// a file only root may read. Any other caller gets [`TASK_STACK_DENIED`],
+/// whatever the slot holds. How deep `netd` or `accountd` has gone, and
+/// whether a request just took it deeper, says which of their code ran, so
+/// it is not every task's to read (the medium review of #439; open to all,
+/// as [`TASK_STATE`] is, for the one day before).
 pub const TASK_STACK_FREE: u64 = 78;
 
 /// [`TASK_STACK_FREE`]'s answer for a slot with no stack: out of range,
 /// unused, a zombie (its memory is already given back) or the idle task.
 /// Safely distinct from any count, which is at most the stack's size.
 pub const TASK_STACK_NONE: u64 = u64::MAX;
+
+/// [`TASK_STACK_FREE`]'s answer to a caller that may not ask about that
+/// slot: neither the slot's own task, nor root, nor `fsd`. Given before the
+/// slot is looked at, so it says nothing of what the slot holds. Distinct
+/// from [`TASK_STACK_NONE`], so a refusal is never read as "no stack".
+pub const TASK_STACK_DENIED: u64 = u64::MAX - 1;
 
 /// `(mode)` -> does not return on success. Machine power control: `mode`
 /// [`POWER_OFF`] powers the machine off (via PSCI `SYSTEM_OFF`, falling back to

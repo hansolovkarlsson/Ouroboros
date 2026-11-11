@@ -47,6 +47,18 @@ use core::ops::ControlFlow;
 
 use crate::fat32::Error;
 
+/// The type bits of a mode (`S_IFMT`'s directory and regular file), as ext2
+/// stores them and `ls -l` reads them.
+const S_IFDIR: u16 = 0x4000;
+const S_IFREG: u16 = 0x8000;
+
+/// `/<n>/stackfree`'s permission bits: root's to read and nobody else's.
+/// How deep a server's stack has gone, and whether a request just took it
+/// deeper, says which of its code ran. The kernel refuses the same question
+/// asked of it directly (`TASK_STACK_DENIED`), so this is the file's half of
+/// one rule, not the rule.
+const STACKFREE_MODE: u16 = 0o400;
+
 /// The synthetic process filesystem. Zero-sized - all state lives in the kernel.
 pub struct Fs;
 
@@ -159,23 +171,29 @@ impl Fs {
         }
     }
 
-    /// Metadata for one path: type and size. Synthetic, so there's no
-    /// timestamp (`time: None`). Backs `ls -l`.
+    /// Metadata for one path: type, size, owner and mode. Synthetic, so
+    /// there's no timestamp (`time: None`). Backs `ls -l`, and since
+    /// 2026-11-10 `fsd`'s permission checks: every node is root's, a
+    /// directory `r-xr-xr-x`, a file `r--r--r--`, and `stackfree` alone
+    /// `r--------` ([`STACKFREE_MODE`]). Having a mode at all is what makes
+    /// `check_access` ask (`models_modes`); until then `/proc` had none and
+    /// every caller read every file.
     pub fn stat(&mut self, path: &str) -> Result<crate::vfs::Stat, Error> {
-        let (size, is_dir) = match parse(path) {
-            Node::Root | Node::Task => (0u64, true),
+        let (size, mode) = match parse(path) {
+            Node::Root | Node::Task => (0u64, S_IFDIR | 0o555),
             Node::UnderFile => return Err(Error::NotADirectory),
             Node::NotFound => return Err(Error::NotFound),
             file => {
                 let mut line = [0u8; LINE_MAX];
-                (file_bytes(&file, &mut line) as u64, false)
+                let perm = if matches!(file, Node::StackFree(_)) { STACKFREE_MODE } else { 0o444 };
+                (file_bytes(&file, &mut line) as u64, S_IFREG | perm)
             }
         };
         Ok(crate::vfs::Stat {
             size,
-            is_dir,
+            is_dir: mode & S_IFDIR != 0,
             time: None,
-            mode: None, // synthetic: no owner/permission model
+            mode: Some(crate::vfs::FileMode { mode, uid: 0, gid: 0 }),
         })
     }
 
@@ -279,6 +297,12 @@ fn stackfree_bytes(n: u64, buf: &mut [u8; LINE_MAX]) -> usize {
         syscall_abi::TASK_STACK_NONE => {
             buf[..5].copy_from_slice(b"none\n");
             5
+        }
+        // The kernel answers `fsd` for every slot, so this is a kernel that
+        // stopped doing so: say it, and never print the sentinel as a count.
+        syscall_abi::TASK_STACK_DENIED => {
+            buf[..7].copy_from_slice(b"denied\n");
+            7
         }
         free => decimal_line(free, buf),
     }

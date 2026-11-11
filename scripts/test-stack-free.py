@@ -61,17 +61,17 @@ def check(ok, what):
     return ok
 
 
-def sh(g, line, wait=PROMPT):
+def sh(g, line, wait=None):
     """Type `line` at a prompt and return what the guest printed up to the
     next prompt (or up to `wait`), or "" when that never came."""
     mark = len(g.transcript())
     g.type_line(line)
-    if not g.wait_for(wait, timeout=30):
+    if not g.wait_for(wait or PROMPT, timeout=30):
         return ""
     return g.transcript()[mark:]
 
 
-def probe(g, command, wait=PROMPT):
+def probe(g, command, wait=None):
     """One run of stackprobe: (slot, size, free before, free after), or None."""
     m = re.search(LINE, sh(g, command, wait))
     return tuple(int(x) for x in m.groups()) if m else None
@@ -82,7 +82,7 @@ def hold(g, levels):
     back at once: the probe's line and the prompt race, so wait for the
     line, then for a prompt of our own."""
     held = probe(g, f"exec /bin/stackprobe {levels} hold", wait=LINE)
-    sh(g, "echo settled", wait=r"\nsettled\r?\n[\s\S]*?# ")
+    sh(g, "echo settled", wait=r"\nsettled\r?\n[\s\S]*?" + PROMPT)
     return held
 
 
@@ -92,6 +92,41 @@ def proc(g, path):
     out = sh(g, f"cat /proc/{path}")
     m = re.search(rf"cat /proc/{re.escape(path)}\r?\n([^\r\n]*)", out)
     return m.group(1) if m else None
+
+
+def asked(g, slot):
+    """The kernel's own answer about `slot`, asked by a program the shell
+    runs as whoever is logged in: a count, `none` or `denied`."""
+    m = re.search(rf"stackprobe: slot {slot} says (\w+)", sh(g, f"stackprobe of {slot}"))
+    return m.group(1) if m else None
+
+
+def ordinary_user(g, size):
+    """Who may read the mark: root, the task itself, and nobody else, by the
+    file and by the syscall both."""
+    global PROMPT
+    root = asked(g, NETD)
+    check(root is not None and root.isdigit() and 0 < int(root) < size,
+          f"root's program asks the kernel about netd and is answered: {root!r}")
+    g.type_line("logout")
+    PROMPT = r"\$ "
+    if not check(g.run([("login:", "user"), ("assword", "user"), (PROMPT, "")]), "the ordinary `user` logs in"):
+        return
+    sh(g, "mount -p /proc")
+    state = proc(g, f"{NETD}/state")
+    check(state in ("runnable", "blocked"), f"user reads netd's state, a file for everyone: {state!r}")
+    listing = sh(g, f"ls /proc/{NETD}")
+    check(re.search(r"\bstackfree\b", listing) is not None, f"user's `ls /proc/{NETD}` lists stackfree")
+    refused = proc(g, f"{NETD}/stackfree")
+    check(refused is not None and "permission denied" in refused,
+          f"user's read of /proc/{NETD}/stackfree is refused: {refused!r}")
+    denied = asked(g, NETD)
+    check(denied == "denied", f"user's program asks the kernel about netd and is refused: {denied!r}")
+    shell = asked(g, 0)
+    check(shell == "denied", f"and about the shell that ran it, another task of the same user: {shell!r}")
+    own = probe(g, "stackprobe 8")
+    check(own is not None and 0 < own[3] < own[2] <= size,
+          f"user's program is still answered about its own stack: {own}")
 
 
 def main():
@@ -150,6 +185,7 @@ def main():
         under = proc(g, f"{NETD}/stackfree/x")
         check(under is not None and "not a directory" in under, f"nothing lives under the file: {under!r}")
         check("after-stack" in sh(g, "echo after-stack"), "the shell answers after")
+        ordinary_user(g, size)
         faults = g.aborts()
         check(faults == 0, f"no fault lines in QEMU's trace: {faults}")
     finally:
@@ -157,7 +193,7 @@ def main():
         g.stop()
         with open(TRANSCRIPT, "w") as f:
             f.write(transcript)
-    want = 19
+    want = 27
     if checks != want and not failed:
         print(f"[FAIL] {checks} checks ran, want {want}", flush=True)
         return 1
