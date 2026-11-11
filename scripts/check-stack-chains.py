@@ -16,6 +16,9 @@ whose deepest chain leaves less than its floor fails.
 
 What it cannot see, and says so in its output:
 
+- a function no symbol names is found only where a `bl` names its address;
+  one reached by nothing but a branch or a pointer is read as part of the
+  function before it, its frame added there;
 - an indirect call (`blr`) is counted, not followed. Today those are
   `core::fmt`'s padding and the C library's `printf`;
 - a recursive program has no deepest chain. Its chain is taken with each
@@ -24,10 +27,11 @@ What it cannot see, and says so in its output:
 - a frame sized at run time (`sub sp, sp, x1`) fails outright: none exists
   today, and one would make every figure here a guess.
 
-The figure is exact where it can be checked: `netd`'s chain through
-`handle_client` is 52,064 bytes by this reading and `/proc/4/stackfree` reads
-5,280 of 57,344 left at the prompt, and `stackprobe`'s `dig` frame is the
-1,072 bytes `make test-stack-free` measures a level. The second is asserted
+The figure has been exact where it was checked. On 2026-11-11 `netd`'s chain
+through `handle_client` was 52,064 bytes by this reading and
+`/proc/4/stackfree` read 5,280 of 57,344 left at the prompt; its deepest was
+56,176 and the mark read 1,168 after `resolve <name>`. And `stackprobe`'s
+`dig` frame is the 1,072 bytes `make test-stack-free` measures a level. The second is asserted
 here on every run (the canary): a reading that stopped seeing frames would
 otherwise report every program shallow.
 
@@ -58,14 +62,17 @@ BELOW = {
 # Programs with a call cycle. Each was looked at: the number is the most
 # times its cycles can be walked, read from the source, and the chain is
 # then taken with every cycle's frames counted that many times and held to
-# the floor. None is a recursion bounded only by the program's input, which
+# the floor. Such an entry names its cycles, each as the functions in it,
+# and the program fails when its cycles are any others: a second recursion
+# in fsd is not covered by the bound written for the first (the review of
+# #441). None is a recursion bounded only by the program's input, which
 # this check cannot hold to anything: it is printed on every run, so the
 # list of them stays in view, and the floor is not asked of it.
 RECURSIVE = {
     # ext2's free_pointed: one call a level of pointer block, and its two
     # callers start it at depth 0 (single indirect) and 1 (double): this
     # ext2 has no triple-indirect files.
-    "fsd": (2, "ext2::free_pointed, one call a level of indirect block, two at most"),
+    "fsd": (2, "ext2::free_pointed, one call a level of indirect block, two at most", [["free_pointed"]]),
     "tree": (None, "walk, one call (1,312 bytes) a directory level: about forty levels deep is the guard page"),
     "grep": (None, "the regex compiler (parse_alt, parse_repeat, nullable, Emitter::gen), one round a nesting of the pattern"),
     "stackprobe": (None, "dig, as deep as its argument says: it is the stack rig's probe"),
@@ -78,6 +85,8 @@ RECURSIVE = {
     "cpp-ld-cc": (None, "as cpp"),
     "edit": (None, "DevTools's editor: command and repeat, by the command typed"),
     "edit-cc": (None, "as edit"),
+    "edit-ld": (None, "as edit"),
+    "edit-ld-cc": (None, "as edit"),
 }
 
 # stackprobe's `dig`: 1 KiB of buffer and its few words, the frame the stack
@@ -109,22 +118,47 @@ def parse(text):
     later of a name: C's static functions share names across files (two
     `open`s made one function with both sets of calls, and a cycle that was
     not there). Calls are followed by address.
+
+    A function starts at a symbol, and also at any address a `bl` names that
+    no symbol does (`anon@address`). DevTools's linker keeps no symbols for
+    static functions, so in a binary it linked a call to one reads as
+    `bl <stat+0x410>`: with symbols alone half of such a program's calls led
+    nowhere, its static functions' frames were added to whichever symbol
+    came before them, and its recursion was not seen (the review of #441).
     """
-    funcs = {}
-    at = {}  # address -> key
-    cur = None
+    # Pass 1: the instructions, and where the functions start.
+    starts = {}  # address -> name
+    insns = []  # (address, text)
+    seen = set()
     for line in text.splitlines():
         m = re.match(r"^([0-9a-f]+) <(.+)>:$", line)
         if m:
-            addr, cur = int(m.group(1), 16), m.group(2)
-            if cur in funcs:
-                cur = f"{cur}@{addr:x}"
-            at[addr] = cur
-            funcs[cur] = {"frame": 0, "calls": set(), "blr": 0, "dyn": [], "probe": None}
+            addr, name = int(m.group(1), 16), m.group(2)
+            if name in seen:
+                name = f"{name}@{addr:x}"
+            seen.add(name)
+            starts[addr] = name
             continue
-        if cur is None or "\t" not in line:
+        m = re.match(r"^\s*([0-9a-f]+):\s+(.*)$", line)
+        if m:
+            insns.append((int(m.group(1), 16), m.group(2).strip()))
+    for addr, ins in insns:
+        m = re.match(r"bl\t0x([0-9a-f]+)\b", ins)
+        if m:
+            target = int(m.group(1), 16)
+            # A `bl` to the next instruction is a call to a weak symbol
+            # nothing defined, left as a no-op: not a function.
+            if target not in starts and target != addr + 4:
+                starts[target] = f"anon@{target:x}"
+
+    # Pass 2: each instruction to the function it lies in.
+    funcs = {name: {"frame": 0, "calls": set(), "blr": 0, "dyn": [], "probe": None} for name in starts.values()}
+    cur = None
+    for addr, ins in insns:
+        if addr in starts:
+            cur = starts[addr]
+        if cur is None:
             continue
-        ins = line.split("\t", 1)[1].strip()
         f = funcs[cur]
         # A probed frame: `sub x9, sp, #N, lsl #12`, then a loop that takes
         # sp down a page at a time until it is x9. The loop's one `sub sp` is
@@ -141,7 +175,9 @@ def parse(text):
         if m:
             f["frame"] += int(m.group(1), 0) << (12 if m.group(2) else 0)
             continue
-        m = re.search(r"\[sp, #-(0x[0-9a-f]+|\d+)\]!", ins)
+        # Writeback that lowers sp: pre-indexed (`[sp, #-N]!`), and
+        # post-indexed (`[sp], #-N`), which a probe of one more page uses.
+        m = re.search(r"\[sp, #-(0x[0-9a-f]+|\d+)\]!", ins) or re.search(r"\[sp\], #-(0x[0-9a-f]+|\d+)", ins)
         if m:
             f["frame"] += int(m.group(1), 0)
             continue
@@ -149,21 +185,19 @@ def parse(text):
         if re.match(r"(sub|and|mov)\tsp, ", ins) and not re.match(r"mov\tsp, x29\b", ins):
             f["dyn"].append(ins.replace("\t", " "))
             continue
-        m = re.match(r"(bl|b)\t0x([0-9a-f]+) <([^>+]+)(\+0x[0-9a-f]+)?>", ins)
+        m = re.match(r"(bl|b)\t0x([0-9a-f]+)\b", ins)
         if m:
             # A `bl` anywhere, or a `b` to another function's first
             # instruction (a tail call, counted as a call: the caller's frame
-            # may or may not be given back first, and deeper is the safe side).
-            # Kept as an address until every function has been seen.
-            # A `b` to the function's own first instruction is a loop (the
-            # panic handler's `loop {}`, a C `for (;;)`), not a call.
-            if m.group(1) == "bl" or (m.group(4) is None and m.group(3) != cur.split("@")[0]):
-                f["calls"].add(int(m.group(2), 16))
+            # may or may not be given back first, and deeper is the safe
+            # side). A `b` to the function's own first instruction is a loop
+            # (the panic handler's `loop {}`, a C `for (;;)`), not a call.
+            target = int(m.group(2), 16)
+            if target in starts and (m.group(1) == "bl" or starts[target] != cur):
+                f["calls"].add(starts[target])
             continue
         if re.match(r"blr\b", ins):
             f["blr"] += 1
-    for name, f in funcs.items():
-        f["calls"] = {at[a] for a in f["calls"] if a in at}
     return funcs
 
 
@@ -253,6 +287,19 @@ def short(name):
     return "::".join(out[:4]) if out else name[:60]
 
 
+def plain(name):
+    """A function's own name: the last identifier of a mangled Rust path."""
+    if not name.startswith("_R"):
+        return name
+    # v0 mangling spells an identifier as its length then its bytes, and a
+    # function's own name is the one that ends the symbol.
+    for m in re.finditer(r"\d+", name):
+        ident = name[m.end():]
+        if len(ident) == int(m.group(0)) and re.match(r"[A-Za-z_][A-Za-z0-9_]*$", ident):
+            return ident
+    return name
+
+
 def find(funcs, plain):
     """The functions whose Rust path ends in `plain`."""
     return [n for n in funcs if re.search(rf"\d+{re.escape(plain)}(?![a-z0-9_])", n) or n == plain]
@@ -277,46 +324,54 @@ def binaries():
 
 SELF_TEST = """
 0000000000000000 <_start>:
-       0:\tstr\tx30, [sp, #-0x10]!
-       4:\tbl\t0x100 <big>
-       8:\tbl\t0x200 <small>
+       0:      \tstr\tx30, [sp, #-0x10]!
+       4:      \tbl\t0x100 <big>
+       8:      \tbl\t0x200 <small>
 
 0000000000000100 <big>:
-     100:\tstp\tx29, x30, [sp, #-0x60]!
-     104:\tsub\tx9, sp, #0xa, lsl #12   // =0xa000
-     108:\tsub\tsp, sp, #0x1, lsl #12   // =0x1000
-     10c:\tcmp\tsp, x9
-     110:\tstr\txzr, [sp]
-     114:\tb.ne\t0x108 <big+0x8>
-     118:\tsub\tsp, sp, #0x8d0
-     11c:\tbl\t0x300 <leaf>
-     120:\tadd\tsp, sp, #0x8d0
+     100:      \tstp\tx29, x30, [sp, #-0x60]!
+     104:      \tsub\tx9, sp, #0xa, lsl #12   // =0xa000
+     108:      \tsub\tsp, sp, #0x1, lsl #12   // =0x1000
+     10c:      \tcmp\tsp, x9
+     110:      \tstr\txzr, [sp]
+     114:      \tb.ne\t0x108 <big+0x8>
+     118:      \tsub\tsp, sp, #0x8d0
+     11c:      \tbl\t0x300 <leaf>
+     120:      \tadd\tsp, sp, #0x8d0
 
 0000000000000200 <small>:
-     200:\tsub\tsp, sp, #0x1, lsl #12   // =0x1000
-     204:\tsub\tsp, sp, #0x800
-     208:\tb\t0x300 <leaf>
-     20c:\tb\t0x204 <small+0x4>
+     200:      \tsub\tsp, sp, #0x1, lsl #12   // =0x1000
+     204:      \tsub\tsp, sp, #0x800
+     208:      \tb\t0x300 <leaf>
+     20c:      \tb\t0x204 <small+0x4>
 
 0000000000000300 <leaf>:
-     300:\tsub\tsp, sp, #0x40
-     304:\tblr\tx8
+     300:      \tsub\tsp, sp, #0x40
+     304:      \tblr\tx8
+     308:      \tbl\t0x30c <leaf+0xc>
+     30c:      \tbl\t0x400 <leaf+0x100>
+     310:      \tret
+     400:      \tstr\txzr, [sp], #-0x100
+     404:      \tret
 """
 
 
 def self_test():
     """The reading against a disassembly whose answer is known by hand."""
     funcs = parse(SELF_TEST)
-    want = {"_start": 16, "big": 0x60 + 0xa000 + 0x8d0, "small": 0x1800, "leaf": 0x40}
+    want = {"_start": 16, "big": 0x60 + 0xa000 + 0x8d0, "small": 0x1800, "leaf": 0x40, "anon@400": 0x100}
     got = {n: funcs[n]["frame"] for n in want}
     total, chain, cycles = deepest(funcs)
-    ok = got == want and total == 16 + want["big"] + 0x40 and chain == ["_start", "big", "leaf"] \
+    ok = got == want and total == 16 + want["big"] + 0x40 + 0x100 and chain == ["_start", "big", "leaf", "anon@400"] \
         and funcs["leaf"]["blr"] == 1 and cycles == [] and not any(f["dyn"] for f in funcs.values())
     looped = parse(SELF_TEST.replace("\t0x204 <small+0x4>\n", "\t0x100 <big>\n")
                    .replace("bl\t0x300 <leaf>\n     120", "bl\t0x200 <small>\n     120"))
     ok = ok and deepest(looped)[2] == [["big", "small"]]
     selfcall = parse(SELF_TEST.replace("blr\tx8", "bl\t0x300 <leaf>"))
     ok = ok and deepest(selfcall)[2] == [["leaf"]]
+    # A cycle through a function no symbol names.
+    hidden = parse(SELF_TEST.replace("404:      \tret", "404:      \tbl\t0x400 <leaf+0x100>"))
+    ok = ok and deepest(hidden)[2] == [["anon@400"]]
     dyn = parse(SELF_TEST.replace("sub\tsp, sp, #0x40", "sub\tsp, sp, x1"))
     ok = ok and dyn["leaf"]["dyn"] != []
     print(f"check-stack-chains self-test: {'ok' if ok else 'FAILED'}"
@@ -355,7 +410,7 @@ def main():
             failed += 1
             continue
         total, chain, cycles = deepest(funcs)
-        times, why = RECURSIVE.get(name, (1, ""))
+        times, why, *named = RECURSIVE.get(name, (1, ""))
         bounded = not cycles or (name in RECURSIVE and times is not None)
         if cycles and bounded:
             total += (times - 1) * sum(funcs[m]["frame"] for cy in cycles for m in cy)
@@ -372,6 +427,11 @@ def main():
             notes.append(f"FAIL {len(cycles)} call cycle(s), the first through "
                          + ", ".join(short(c) for c in cycles[0])[:120]
                          + ": no deepest chain; look, bound it, and name the program in RECURSIVE")
+        if cycles and named:
+            got = sorted(sorted(plain(m) for m in cy) for cy in cycles)
+            if got != sorted(sorted(cy) for cy in named[0]):
+                failed += 1
+                notes.append(f"FAIL its cycles are {got}, and its bound was written for {named[0]}: look again")
         if not cycles and name in RECURSIVE:
             failed += 1
             notes.append("FAIL named in RECURSIVE and has no call cycle: remove the entry")

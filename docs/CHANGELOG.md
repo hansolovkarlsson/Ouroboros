@@ -60,7 +60,7 @@ stack's 57,344 bytes. Nothing in `netd` is changed yet. The reading is now
 `make check-stack-chains`, over all 103 userland binaries: a program whose
 deepest chain leaves under 4,096 bytes fails the check, `netd` let stand by
 name until its frame is cut down. A recursive program has no deepest chain
-and must be named with its bound; ten are bounded only by their input,
+and must be named with its bound; twelve are bounded only by their input,
 `tree` among them at 1,312 bytes a directory level.
 
 **The stack mark is root's to read (2026-11-10).** As merged in #439 any

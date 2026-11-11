@@ -993,8 +993,8 @@ The small open tails those arcs deliberately left:
     day, over all 103 userland binaries: a program fails when its deepest
     chain leaves under 4,096 bytes. `netd` is let stand at 1,024 by name
     until `serve`'s frame is cut down, and the entry fails once it is.
-    After `netd` the shallowest are `fsd` (14,064 left) and the shell
-    (34,752). It follows direct calls only, and ten programs recurse by
+    After `netd` the shallowest are `fsd` (13,904 left) and the shell
+    (34,752). It follows direct calls only, and twelve programs recurse by
     their input, which it prints and cannot bound: `tree` is one, 1,312
     bytes a directory level, so a tree about forty levels deep is its guard
     page. Not fixed; `tree` with an explicit stack is the repair.
