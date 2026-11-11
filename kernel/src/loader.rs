@@ -183,9 +183,12 @@ const CONFIG_PATH: &str = "\\EFI\\ORBS\\INIT.CFG";
 // measured and both refused: `#[inline(never)]` on `park_run` made it WORSE
 // (3072 bytes over, since inlining had been overlapping its buffers with
 // handle_client's fetch/resolve ones), and sharing one reply buffer in
-// `service_remotes` changed this chain not at all. 14 stays, with ~6.3 KB of
-// headroom; the pages come back when the resident tables shrink, not when a
-// function is deleted.
+// `service_remotes` changed this chain not at all. 14 stays; the pages come
+// back when the resident tables shrink, not when a function is deleted.
+// What 14 leaves is not written here, where it went stale once (the "~6.3 KB"
+// this comment gave was 2.5 KB by 2026-11-10): it is a reading,
+// `/proc/4/stackfree`, which `make test-async-rmount` reports at the end of
+// each boot.
 const STACK_PAGES: u64 = 14;
 /// One inaccessible guard page between the heap and the stack. The stack
 /// grows down from the top of the region; an overflow past the
@@ -291,6 +294,50 @@ pub(crate) fn heap_area(base: u64, size: u64) -> (u64, u64) {
 /// that measurement.
 pub(crate) fn stack_area(base: u64, size: u64) -> (u64, u64) {
     tail(base, size).map_or((0, 0), |t| t.stack)
+}
+
+/// The byte a loaded program's whole stack holds before its first
+/// instruction ([`populate_region`] paints it), so the lowest address the
+/// program ever wrote can be found afterwards: [`stack_untouched`]. Zero
+/// would not do, though the region is zeroed anyway: a frame's zeroed buffer
+/// would read as never reached, and `netd`'s deepest frames hold several.
+/// A byte of this value written at the deepest point of a run is the one
+/// write the count cannot see, so a program that paints its own stack to
+/// measure a part of a run (`/bin/edtest`) uses another byte.
+const STACK_PAINT: u8 = 0xA5;
+
+/// How many bytes at the low end of the stack in region `(base, size)` still
+/// hold [`STACK_PAINT`]: the stack the program has never written since it was
+/// loaded, its low-water headroom (`TASK_STACK_FREE`). `None` for a region
+/// with no stack (the idle task's page, an ended task's `(0, 0)`).
+///
+/// A count of writes, not of where the stack pointer went: a frame that
+/// reserved a buffer and never wrote its low end is counted only as deep as
+/// it wrote. Read with no lock on the task: on another core it may be
+/// writing its stack as this reads, and the answer is then the mark of a
+/// moment ago.
+///
+/// # Safety
+/// `(base, size)` must be a region [`populate_region`] loaded and nothing
+/// has freed, as a live task's `tasks::task_region` is.
+pub(crate) unsafe fn stack_untouched(base: u64, size: u64) -> Option<u64> {
+    let (stack_base, stack_size) = tail(base, size)?.stack;
+    const WORD: u64 = u64::from_ne_bytes([STACK_PAINT; 8]);
+    let mut n = 0u64;
+    // Eight bytes a read while whole words of paint stand (the stack is
+    // whole pages, so word reads are aligned and end at its end), then the
+    // bytes of the first word that is not: the call runs under the kernel
+    // lock, any task may make it, and a stack hardly used is nearly all
+    // paint.
+    // SAFETY: the stack lies inside the region, which the caller holds
+    // loaded; volatile reads, since the task may be writing it.
+    while n + 8 <= stack_size && unsafe { core::ptr::read_volatile((stack_base + n) as *const u64) } == WORD {
+        n += 8;
+    }
+    while n < stack_size && unsafe { core::ptr::read_volatile((stack_base + n) as *const u8) } == STACK_PAINT {
+        n += 1;
+    }
+    Some(n)
 }
 
 /// The stack guard page's address for an EL0 region, or `None` for a
@@ -990,6 +1037,12 @@ pub(crate) unsafe fn populate_region(
     // SAFETY: the region is `region_size` writable bytes, this function's
     // own contract.
     unsafe { core::ptr::write_bytes(region_base as *mut u8, 0, region_size as usize) };
+    // The stack painted over the zeros, for `stack_untouched`. Nothing is
+    // on it yet: the arguments reach a program by syscall, not on its stack.
+    if let Some(t) = tail(region_base, region_size) {
+        // SAFETY: the stack lies inside the region just zeroed.
+        unsafe { core::ptr::write_bytes(t.stack.0 as *mut u8, STACK_PAINT, t.stack.1 as usize) };
+    }
     // SAFETY: forwarded from this function's own contract.
     unsafe { copy_segments(program, phdrs, region_base, region_size)? };
 

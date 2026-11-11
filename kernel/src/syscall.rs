@@ -1618,6 +1618,21 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
                 .and_then(|name| copy_out(arg1, arg2, name))
                 .unwrap_or(0)
         }
+        syscall_abi::TASK_STACK_FREE => {
+            // arg0 = task index. The bytes of that task's stack it has never
+            // written since it was loaded, or TASK_STACK_NONE for a slot
+            // with no stack: out of range, unused, a zombie (its region is
+            // already given back) or the idle task. Read-only and open to
+            // every task, as TASK_STATE is.
+            let Some(t) = tasks::TaskIndex::new(arg0 as usize) else {
+                return syscall_abi::TASK_STACK_NONE;
+            };
+            let (base, size) = tasks::task_region(t.index());
+            // SAFETY: a region recorded for a slot is loaded and held until
+            // `end_task` clears the record, under the kernel lock this
+            // syscall runs in.
+            unsafe { loader::stack_untouched(base, size) }.unwrap_or(syscall_abi::TASK_STACK_NONE)
+        }
         syscall_abi::TASK_EXIT_CODE => {
             // arg0 = task index. The exit status of a zombie (peeked, NOT
             // reaped - unlike WAIT), or TASK_NO_EXIT_CODE for any other slot.

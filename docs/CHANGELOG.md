@@ -48,6 +48,25 @@ parked request's uid, its anchor and its attested flag became one
 `Standing`, made at the park, and every way to a seed takes one; that a
 `Standing` is made nowhere else is review's to hold. No behaviour changed.
 
+**Every task's stack low-water mark, counted by the kernel (2026-11-10).**
+The one measurement of `netd`'s stack was a probe patched into `netd` on a
+branch (`8429d38f`), cherry-picked for each use, whose own log lines landed
+on the shell's prompt and failed two checks of the rig it was read from.
+Hans chose the kernel over a probe in `netd`: the loader paints every
+program's stack with `0xA5` at load, a new syscall, `TASK_STACK_FREE` (78),
+counts the paint still standing at the stack's low end, and `fsd` serves it
+as `/proc/<n>/stackfree`. So any task is measured with no code of its own, a
+restarted server from its restart, and a rig reads the mark with `cat` at a
+moment it chooses. It counts writes: a buffer reserved and not written at its
+low end is seen only as deep as it was written, as with the old probe. `make
+test-stack-free` (new, `/bin/stackprobe`) grades the count against a known
+depth, 19 checks and five controls. `make test-async-rmount` reads `netd`'s
+mark at the end of each boot, after any parked request's deadline: 2,528 of
+57,344 bytes never written, an upper bound on the room left, where the old
+probe applied to the same tree read 2,496. `/bin/edtest`, which paints its
+own stack to measure a signing, changed its byte from the kernel's. At the shell's prompt after
+boot `fsd` has 21,376 unwritten, the shell 38,672 and `cond` 55,600.
+
 ## v0.25.0: per-user keys for the cluster (2026-11-09)
 
 Fifteen pull requests over three days, 2026-11-07 to 2026-11-09, #416 to

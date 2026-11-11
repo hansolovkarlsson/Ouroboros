@@ -226,7 +226,7 @@ ps kill fg wait send recv selftest env set unset cpu`.
 
 | Capability | Status | Notes |
 |---|---|---|
-| Process listing | ◐ | `ps` (slot table, and the core a task runs on); `/proc/<n>/state` and `/proc/<n>/core`. No CPU/memory accounting per task. |
+| Process listing | ◐ | `ps` (slot table, and the core a task runs on); `/proc/<n>/state`, `/proc/<n>/core` and `/proc/<n>/stackfree` (the stack a task has never written). No CPU/memory accounting per task. |
 | Exit-status reporting | ✅ | `wait` returns a byte status. |
 | Kernel/fault reporting | ✅ | Exception handler prints ESR/FAR/ELR; emergency console. |
 | Logging framework / `dmesg` / syslog | ✗ | Ad-hoc console prints; no ring buffer or log files. |

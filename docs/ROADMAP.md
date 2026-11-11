@@ -956,6 +956,36 @@ record is in [`CHANGELOG.md`](CHANGELOG.md):
 
 The small open tails those arcs deliberately left:
 
+- **`netd` has at most 2,528 bytes of its stack left, and now it can be
+  read (2026-11-10).** The kernel counts every task's never-written stack
+  (`TASK_STACK_FREE`, `/proc/<n>/stackfree`, `make test-stack-free`), which
+  replaced the probe patched into `netd` on a branch (`8429d38f`). `make
+  test-async-rmount` reads `netd`'s mark at the end of each of its six
+  boots: 2,528 of 57,344 bytes never written on `main` after #438, the same
+  in all six, the refused connection and the two 5 s deadlines included
+  (read after each deadline's failure line since the medium review of #439;
+  before it the mark was read first), so the deepest moment is one every
+  boot shares and not the park path the older tables named. An upper bound
+  on the room left, by the last point below. Open:
+  - which chain that is. The mark says how deep, not where; a frame-size
+    diff of the build (as step 8 of `roadmap-user-keys.md` did) would name it.
+  - whether a floor should be graded. The rigs report the mark and fail
+    only when it cannot be read; a floor (fail under some number of bytes)
+    would turn the next growth into a failed rig and not a guard-page
+    fault. The number is Hans's to set.
+  - the other `netd` rigs do not read it yet: `test-run-callback`,
+    `test-cred-client`, `test-held-keys`, `test-run-orphan`. The signing
+    paths #438 rewired (`sign_parked`, `service_remotes`) are reached by
+    those, so their depth is still unmeasured.
+  - the count sees writes, not the stack pointer: a buffer reserved and
+    never written at its low end is counted only as deep as it was written,
+    so the true room is the reading or less.
+  - who may read it. `TASK_STACK_FREE` is open to every task and `/proc` is
+    exported, so a peer can read `accountd`'s or `netd`'s mark, and a fall
+    across a login says a deeper path ran for the first time (the medium
+    review of #439). Narrow, since the mark only falls. Left open as
+    `TASK_STATE` is; gating the syscall to `fsd` and the task itself, or the
+    file to root, is Hans's to decide.
 - **The boot-disk matcher in a pure crate, with host tests. DONE
   2026-10-14:** `parttable`, which the kernel's `bootdisk.rs` and `fsd`'s
   partition.rs both call, its host tests in `make test`. As planned

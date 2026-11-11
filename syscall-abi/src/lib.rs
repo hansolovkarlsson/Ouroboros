@@ -902,6 +902,28 @@ pub const TASK_EXIT_CODE: u64 = 55;
 /// which is masked to a byte (`0..=255`) at exit.
 pub const TASK_NO_EXIT_CODE: u64 = u64::MAX;
 
+/// `(task index)` -> how many bytes of that task's stack it has never written
+/// since it was loaded: its low-water headroom, the room its deepest moment
+/// so far left above the guard page. The loader paints every stack before the
+/// program's first instruction and the kernel counts the paint still standing
+/// at the stack's low end, so no program carries a probe of its own, and a
+/// server the supervisor restarted is measured from its restart. The stack's
+/// size is [`HEAP_INFO_STACK_SIZE`], the same for every task.
+///
+/// A count of writes, not of where the stack pointer went: a frame that
+/// reserved a buffer and wrote none of its low end is counted as deep as it
+/// wrote, and a byte of the paint's own value (`0xA5`) written at the deepest
+/// point is not seen. The mark only falls; nothing resets it but a new load.
+/// [`TASK_STACK_NONE`] for a slot with no stack to measure. Read-only and
+/// open to every task, as [`TASK_STATE`] is; `fsd` serves it as
+/// `/proc/<n>/stackfree`.
+pub const TASK_STACK_FREE: u64 = 78;
+
+/// [`TASK_STACK_FREE`]'s answer for a slot with no stack: out of range,
+/// unused, a zombie (its memory is already given back) or the idle task.
+/// Safely distinct from any count, which is at most the stack's size.
+pub const TASK_STACK_NONE: u64 = u64::MAX;
+
 /// `(mode)` -> does not return on success. Machine power control: `mode`
 /// [`POWER_OFF`] powers the machine off (via PSCI `SYSTEM_OFF`, falling back to
 /// a halt if PSCI is unavailable), [`POWER_HALT`] halts the CPU (masks
