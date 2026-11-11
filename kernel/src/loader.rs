@@ -190,7 +190,7 @@ const CONFIG_PATH: &str = "\\EFI\\ORBS\\INIT.CFG";
 // `/proc/4/stackfree`, which `make test-async-rmount` reports at the end of
 // each boot. Since 2026-11-11 netd's resident tables are in its heap region
 // and its deepest chain leaves 37,296 bytes; the shallowest program is fsd
-// (14,064 left), by `make check-stack-chains`, which fails a build that
+// (13,904 left), by `make check-stack-chains`, which fails a build that
 // leaves under 4,096. 14 was not lowered: what fsd needs is the question.
 const STACK_PAGES: u64 = 14;
 /// One inaccessible guard page between the heap and the stack. The stack

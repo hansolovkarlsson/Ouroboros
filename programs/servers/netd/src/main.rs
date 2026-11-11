@@ -204,8 +204,8 @@ fn main() -> ! {
 
 /// Bytes of `/etc/cluster/authorized` netd keeps.
 ///
-/// About fourteen peers at 72 bytes a line. It lives in `Auth`, on `serve`'s
-/// frame, because that is where the rest of the auth config already lives and
+/// About fourteen peers at 72 bytes a line. It lives in `Auth`, in `Tables`
+/// (on `serve`'s frame until 2026-11-11), because that is where the rest of the auth config already lives and
 /// this server has no allocator - and 1 KB against a fixed stack (the loader's
 /// `STACK_PAGES`) that has hit its guard page five times is a deliberate,
 /// measured choice rather than a comfortable one. A file
@@ -1802,8 +1802,9 @@ fn park_remote(dst_mac: &[u8; 6], ip: [u8; 4], port: u16, verb: u64, caller: u64
 /// per (endpoint, uid) whose fids are live. Bounded and small, like `MAX_DIAL`:
 /// a node talks to a handful of peers. Each slot is a whole `SessionConn`
 /// (its send and receive buffers plus the held first verb, ~2.7 KB) resident
-/// on `serve`'s frame, so this trades directly against netd's stack headroom
-/// like `MAX_DIAL` and `MAX_REMOTE`. A new session with the table full is
+/// in `Tables`. Until 2026-11-11 that was `serve`'s frame and this traded
+/// directly against netd's stack headroom, like `MAX_DIAL` and `MAX_REMOTE`;
+/// it is heap now, and the size was not raised when that changed. A new session with the table full is
 /// refused `FS_ERR_BUSY`, the same answer the far side's session budget gives,
 /// never by evicting a live one.
 const MAX_CLIENT_SESSIONS: usize = 3;
@@ -2762,7 +2763,7 @@ impl Drop for TcpConn {
             *f = SessionFid::NONE;
         }
         // The session keys die with the connection too, and are OVERWRITTEN,
-        // not merely dropped: the slot's bytes stay on `serve`'s stack until a
+        // not merely dropped: the slot's bytes stay in `Tables` until a
         // SYN rebuilds it, and a key left there authenticates the session's
         // traffic to anyone who later reads that memory.
         if let Some(k) = self.keyed.as_mut() {
@@ -2858,8 +2859,9 @@ const DIAL_IDLE_TICKS: u64 = 600;
 /// `FS_ERR_BUSY`. That refusal is indistinguishable, in the client's output,
 /// from the by-sender refusal step 3 deleted, so the re-entrant rig could not
 /// tell a genuine regression from ordinary contention (review of #154). Three
-/// keeps two slots free during a run and costs one `RemoteConn` (~2.1 KB) of
-/// the stack headroom measured for `STACK_PAGES`.
+/// keeps two slots free during a run and costs one `RemoteConn` (~2.1 KB), of
+/// the stack headroom measured for `STACK_PAGES` when it was set, of the heap
+/// region since 2026-11-11.
 const MAX_REMOTE: usize = 3;
 /// The NP part of a remote request: a client message is at most `MSG_MAX_LEN`
 /// (768) of which `NETOP_RMOUNT_MSG` (16) is the envelope. It sizes the signed
@@ -2872,7 +2874,8 @@ const REMOTE_NP_MAX: usize = syscall_abi::MSG_MAX_LEN as usize - syscall_abi::NE
 /// `NP_REMOTE_CHUNK` (512) read is under 600, and to a readdir filling the
 /// client's whole 768-byte reply under 840. A framed reply that cannot fit is
 /// a protocol error, failed at once rather than waited for. Sized to the byte
-/// because every slot sits on `serve`'s fixed stack.
+/// because every slot sat on `serve`'s fixed stack when it was sized (in the
+/// heap region since 2026-11-11, the size unchanged).
 const REMOTE_SBUF: usize = ninep_abi::NP_NET_LEN_PREFIX + ninep_abi::NP_AUTH_HDR_SIGNED + CRED_BLOCK_LEN + REMOTE_NP_MAX;
 /// A session slot's send buffer: step 7's size, WITHOUT room for the
 /// credential block beside a full `REMOTE_NP_MAX` message. A session slot
@@ -3386,8 +3389,9 @@ struct Wire<const S: usize, const R: usize, const H: usize, const K: usize> {
     /// bytes at all on a dial or a path slot. An array of `K` rather than a
     /// field because this engine is shared by all three tables, and a plain
     /// field would sit in every `MAX_DIAL` and `MAX_REMOTE` slot as well, on
-    /// `serve`'s frame, where resident bytes are what the stack is short of
-    /// (the plan's Risk 2). Read through `keys.first_mut()`, which is `None`
+    /// `serve`'s frame as it was, where resident bytes were what the stack was
+    /// short of (the plan's Risk 2; the slots are in the heap region since
+    /// 2026-11-11). Read through `keys.first_mut()`, which is `None`
     /// wherever the table carries none.
     keys: [SessionAuth; K],
 }
@@ -3417,7 +3421,7 @@ struct SessionAuth {
 /// Where a client session's keying stands. One enum rather than a struct of
 /// every field, because the handshake's state and the session's keys are
 /// never live together: an enum holds the larger of the two, where fields
-/// held both for the session's whole life, on `serve`'s frame, at the
+/// held both for the session's whole life, on `serve`'s frame as it was, at the
 /// client's deepest point (review of step 7: 144 bytes a slot, now ~80).
 enum KeyState {
     /// No key offered, or the session is unkeyed: signed per request.
@@ -5379,8 +5383,9 @@ fn user_sign_inner(
 /// `ed25519::sign`, about 3.5 KB measured by frame size on this build
 /// (`sign`, `sign_two_part`, SHA-512's `compress`, the curve's `mul`, `add`
 /// and `double`). Affordable because it runs where every signature runs, at
-/// the top of `serve` (`service_remotes`), about 12 KB above the deepest
-/// chain's 2.7 KB of headroom.
+/// the top of `serve` (`service_remotes`), far above the deepest chain: by
+/// `make check-stack-chains` the chains through here leave over 40 KB since
+/// 2026-11-11, where the deepest chain's headroom was once 2.7 KB.
 const SCRUB_BYTES: usize = 6144;
 
 /// Zero the `SCRUB_BYTES` of stack below the caller's frame. VOLATILE, so the

@@ -993,8 +993,8 @@ The small open tails those arcs deliberately left:
     day, over all 103 userland binaries: a program fails when its deepest
     chain leaves under 4,096 bytes. `netd` is let stand at 1,024 by name
     until `serve`'s frame is cut down, and the entry fails once it is.
-    After `netd` the shallowest are `fsd` (14,064 left) and the shell
-    (34,752). It follows direct calls only, and ten programs recurse by
+    After `netd` the shallowest are `fsd` (13,904 left) and the shell
+    (34,752). It follows direct calls only, and twelve programs recurse by
     their input, which it prints and cannot bound: `tree` is one, 1,312
     bytes a directory level, so a tree about forty levels deep is its guard
     page. Not fixed; `tree` with an explicit stack is the repair.
@@ -1005,7 +1005,7 @@ The small open tails those arcs deliberately left:
     chain leaves **37,296** where it left 1,168: by the check, and by
     `/proc/4/stackfree` after `resolve example.com` on a boot. `netd`'s
     entry in the check's below-the-floor table is gone, and the shallowest
-    program is now `fsd` (14,064 left). `STACK_PAGES` is unchanged at 14;
+    program is now `fsd` (13,904 left). `STACK_PAGES` is unchanged at 14;
     whether to give pages back is open, with `fsd` the one to measure.
   - the count sees writes, not the stack pointer: a buffer reserved and
     never written at its low end is counted only as deep as it was written,

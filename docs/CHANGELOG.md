@@ -58,7 +58,9 @@ chain, because userland has no mutable statics. They are now one `Tables` in
 over a larger `STACK_PAGES`. The deepest chain leaves 37,296 bytes by `make
 check-stack-chains`, and `/proc/4/stackfree` reads 37,296 after `resolve
 example.com` on a boot. The check's entry letting `netd` stand below the
-floor failed the first run that kept it, as built, and is gone.
+floor failed the first run that kept it, as built, and is gone. The comments
+that sized each table against the stack now say the tables are heap; the
+sizes themselves were left as they were.
 
 **`netd` is 1,168 bytes from its guard page, and a build check that says so (2026-11-11).**
 The rigs read 2,528 bytes of `netd`'s stack never written, and the question
@@ -72,7 +74,7 @@ stack's 57,344 bytes. Nothing in `netd` is changed yet. The reading is now
 `make check-stack-chains`, over all 103 userland binaries: a program whose
 deepest chain leaves under 4,096 bytes fails the check, `netd` let stand by
 name until its frame is cut down. A recursive program has no deepest chain
-and must be named with its bound; ten are bounded only by their input,
+and must be named with its bound; twelve are bounded only by their input,
 `tree` among them at 1,312 bytes a directory level.
 
 **The stack mark is root's to read (2026-11-10).** As merged in #439 any

@@ -81,7 +81,8 @@ impl Drop for HeldKey {
     }
 }
 
-/// The table. On `serve`'s frame for the whole boot (no mutable statics); a
+/// The table. In `netd`'s `Tables` for the whole boot (its heap region since
+/// 2026-11-11, `serve`'s frame before; no mutable statics); a
 /// `netd` restart loses every key, and users log in again to have one held.
 pub struct Held<T: Tasks> {
     slots: [Option<HeldKey>; NET_KEY_MAX],
