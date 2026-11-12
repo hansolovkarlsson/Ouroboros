@@ -30,9 +30,15 @@ client's TCP retransmits for minutes. The export acknowledges a run's
 request at once now. `make test-run-silent` (new) holds a run open from the
 host for 45 s, and on the two-node pair checks node B keeps its run, reads
 the probes and their answers from a capture, kills node B's QEMU outright,
-and requires the command gone from node A. Left as it is: a dispatching
-`netd` gives a run up after thirty seconds without output, and a run's
-output comes only at its end.
+and requires the command gone from node A. The review of #449 added three
+things: data sent again is acknowledged again on both sides, so one lost ACK
+does not bring the failure back; the time `netd` spends deaf in a
+synchronous client request is not counted as a caller's silence, since a
+probe's answer swallowed there had a live caller's run ended; and a run
+keeps `netd`'s loop on its own timer. Left as it is: a dispatching `netd`
+gives a run up after thirty seconds without output, and a run's output
+comes only at its end; it then closes with a FIN, and the command is ended
+at once.
 
 **A restarted server's children end with it (2026-11-12, #448).**
 `netd` kills a `cpu` run's command when the run's connection goes, from a

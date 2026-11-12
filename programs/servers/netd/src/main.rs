@@ -623,9 +623,14 @@ fn serve(packed_mac: u64) -> ! {
         // data unacked (server or dial), use a timeout so we still wake to
         // service the retransmit timer even if a peer has gone silent (no
         // frames); otherwise block indefinitely (the health-ping still wakes us).
+        // A connection carrying a run needs the timer too: its keepalive
+        // probes and its idle reap fire from this loop, and neither side of
+        // a run sends a frame to wake it. Without this they rode the
+        // supervisor's health ping, whose interval is the kernel's to change
+        // (the review of #449).
         let unacked = t.conns
             .iter()
-            .any(|c| matches!(c, Some(c) if c.snd_nxt != c.snd_una))
+            .any(|c| matches!(c, Some(c) if c.snd_nxt != c.snd_una || c.cpu_child != CPU_NONE))
             || t.dials.iter().any(|c| matches!(c, Some(d) if d.state == DialState::Connecting || d.inflight > 0 || (d.state == DialState::Closing && !d.fin_sent)))
             // A remote slot with a request parked needs the timer whatever its
             // state: its SYN and data retransmits, and its deadline, all fire
@@ -834,6 +839,26 @@ fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<Tc
     }
 }
 
+/// Time `netd` could not hear is not a run's caller's silence. A client
+/// request handled synchronously (a ping, a name lookup, a fetch: their
+/// waits read frames off the NIC and drop every one that is not their own
+/// reply) can swallow the answer to a keepalive probe, and a user keeping
+/// `netd` in such requests for thirty seconds would have a live caller's run
+/// reaped and its command killed (the review of #449). So the ticks a
+/// request took are given back to every run's `last_rx`, the clock
+/// `probe_run` and `reap_idle` both read: a run is ended for the silence of
+/// its caller while `netd` was listening, and for no other.
+fn credit_deaf(conns: &mut [Option<TcpConn>; MAX_CONNS], deaf: u64) {
+    if deaf == 0 {
+        return;
+    }
+    for c in conns.iter_mut().flatten() {
+        if c.cpu_child != CPU_NONE {
+            c.last_rx = c.last_rx.wrapping_add(deaf);
+        }
+    }
+}
+
 /// Whether a `cpu` run's command has ended: its slot no longer holds it
 /// (killed and reaped, by `kill N` here or a fault), or holds it as a
 /// zombie, exited and waiting to be collected. `false` for no child.
@@ -910,12 +935,16 @@ fn drain_mailbox(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<TcpConn>; 
             let is_request = op == syscall_abi::NETOP_RMOUNT
                 || (syscall_abi::NETOP_KEY_HOLD..=syscall_abi::NETOP_KEY_LIST).contains(&op);
             if is_request {
+                let before = now();
                 handle_client(packed_mac, buf, len, dials, remotes, sessions, auth, pending, held);
+                credit_deaf(conns, now().wrapping_sub(before));
             } else {
                 cpu_child_msg(conns[ci].as_mut().unwrap(), &buf[..len]);
             }
         } else {
+            let before = now();
             handle_client(packed_mac, buf, len, dials, remotes, sessions, auth, pending, held);
+            credit_deaf(conns, now().wrapping_sub(before));
         }
         // A HOLD carried a user's seed, and `buf` is never cleared between
         // messages: a shorter one leaves bytes 16..48 as they were. key_op
@@ -4067,6 +4096,14 @@ fn handle_conn_segment(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, c: &mut TcpConn
     // next request - which may be in this very segment.
     session_reset_if_done(c);
 
+    // Data this side already took, sent again: the peer has not seen it
+    // acknowledged. Asked before the arm below moves `rcv_nxt`, answered
+    // after it. A run's request is the case that matters: its one ACK may be
+    // lost, no reply follows to carry another until the command ends, and the
+    // caller's `netd` closes its side after eight unanswered copies (the
+    // review of #449).
+    let again = seg.data_len > 0 && seq_gt(c.rcv_nxt, seg.seq);
+
     // The request (may arrive with the handshake ACK, or just after) -> set up
     // the response. Only once per request; the streaming itself is driven by
     // pump_send. Still ONE SEGMENT per request, session or not: a request split
@@ -4114,6 +4151,10 @@ fn handle_conn_segment(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, c: &mut TcpConn
         } else {
             start_response(c, request);
         }
+    }
+
+    if again {
+        send_seg(mac, c, TCP_ACK, false, &[]);
     }
 
     // Note: the actual sending (pump_send) is NOT done here. It runs once per
@@ -6285,17 +6326,20 @@ fn dial_on_segment<const S: usize, const R: usize, const H: usize, const K: usiz
                 }
             }
             DialState::Established | DialState::Closing => {
-                // A keepalive probe: no data, no SYN or FIN, one sequence
-                // number back from what is expected next. Answered with an
-                // ACK, which is all the prober wants: the far export probes
-                // the caller of a `cpu` run while its command runs
-                // (`probe_run`) and ends the run when nothing answers. Until
-                // 2026-11-12 this side answered nothing to it. Only this one
-                // shape, not every segment outside the window: the wider
-                // rule belongs to the receive-path hardening on the ledger
-                // (docs/ROADMAP.md), and a narrow answer cannot make an ACK
-                // storm, the reply itself being in sequence.
-                if s.data_len == 0 && s.flags & (TCP_SYN | TCP_FIN) == 0 && s.seq == c.rcv_nxt.wrapping_sub(1) {
+                // A segment that starts before what is expected next: a
+                // keepalive probe in either of its shapes (no data, or one
+                // byte, one sequence number back: RFC 1122 4.2.3.6), or data
+                // already taken and sent again. Answered with an ACK, which
+                // is all its sender wants: the far export probes the caller
+                // of a `cpu` run while its command runs (`probe_run`) and
+                // ends the run when nothing answers, and a real TCP with
+                // keepalive on gives a silent peer up. Until 2026-11-12 this
+                // side answered nothing to any of them. Segments AHEAD of
+                // what is expected are still not answered: that rule belongs
+                // to the receive-path hardening on the ledger
+                // (docs/ROADMAP.md). The answer is itself in sequence, so two
+                // ends cannot answer each other for ever.
+                if seq_gt(c.rcv_nxt, s.seq) && s.flags & TCP_SYN == 0 {
                     if let Some(nn) = build_tcp(mac, &c.peer_mac, &c.peer_ip, c.src_port, c.peer_port, c.snd_nxt, c.rcv_nxt, TCP_ACK, false, &[], &mut out) {
                         let _ = send(&out[..nn]);
                     }

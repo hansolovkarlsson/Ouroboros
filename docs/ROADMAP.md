@@ -3850,9 +3850,21 @@ would otherwise silently shrink into looking like nothing was ever found.
       clients' own TCP retransmits for minutes. **Left as it is:** a
       dispatching `netd` gives a run up after 30 s without output
       (`RUN_DEADLINE_TICKS`), and a run's output comes only at its end, so
-      a run from another node cannot take longer than that; and when it
-      gives one up it still closes with no FIN and no RST, which the
-      executing side now notices by its probes, up to 30 s later), and every child of a `netd` the supervisor restarts, whose
+      a run from another node cannot take longer than that. When it gives
+      one up it closes with a FIN, now that its request was acknowledged,
+      and the executing side ends the command at once (measured: the
+      caller told after 43.7 s of wall clock under QEMU, the command gone
+      and its kill line printed 3 s later; the first write-up of this
+      said "no FIN and no RST", which was main's behaviour, where the
+      unacknowledged request ran out of retries first). **From the high
+      review of #449:** a request sent again is acknowledged again, on the
+      export and on the dial side, so one lost ACK does not bring the
+      failure back; the time `netd` spends in a synchronous client request,
+      whose wait drops every frame but its own reply, is given back to a
+      run's clock (`credit_deaf`), since a probe's answer swallowed there
+      had a live caller's run reaped; and a run's connection keeps the
+      serve loop on its timer, where the probes rode the supervisor's
+      health ping), and every child of a `netd` the supervisor restarts, whose
       table goes without a `Drop` (**the second FIXED 2026-11-12**: the
       kernel ends a torn-down server's direct children before the fresh
       one goes in, found by the parent link it already kept,
