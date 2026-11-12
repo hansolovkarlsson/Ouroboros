@@ -202,7 +202,8 @@ path, so it does not help (`testing-pi4.md`, "Develop on QEMU first").
    `0x0000000500080000`.
 
 0b. **Read the controller's address, then its registers.** `amlscan` takes
-   a device by its `_HID` string and reads two method shapes exactly, no
+   a device by its `_HID` string and reads two method shapes exactly (three
+   since 2026-11-12, `roadmap-pi-net.md` step 1), no
    more general: a `_STA` that is only `Return (<constant>)`, and a `_CRS`
    that is only `CreateDWordField (^<buffer>, <offset>, <field>);
    Store (<constant>, <field>); Return (^<buffer>)` over a `Name`d

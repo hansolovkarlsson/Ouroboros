@@ -907,13 +907,12 @@ not yet checked on this tree are marked (predicted).
       step 1 (the NIC read from the board's saved ACPI tables on the host)
       is built. What it had to settle first, and what was read:
       - **Which NIC: decided by Hans on 2026-11-12, the on-board GENET
-        first.** It is Broadcom GENET v5 with a BCM54213PE PHY over MDIO,
-        plain MMIO ((predicted) at CPU address `0xfd580000`, to be
-        discovered from the firmware's tables as EMMC2 was, never
-        hardcoded). The Pi's DSDT declares it as `ETH0` with `_HID
-        "BCM6E4E"` (read in `amlscan/testdata/pi4-dsdt.aml`, 2026-11-12), at
-        `0xfd580000` as predicted, and `amlscan::declared` reads it since
-        the plan's step 1. A
+        first.** It is Broadcom GENET v5 with a BCM54213PE PHY over MDIO
+        (the PHY (predicted)), plain MMIO, discovered from the firmware's
+        tables as EMMC2 was, never hardcoded. The Pi's DSDT declares it as
+        `ETH0` with `_HID "BCM6E4E"` at CPU address `0xfd580000` (read in
+        `amlscan/testdata/pi4-dsdt.aml`, 2026-11-12), and
+        `amlscan::declared` reads it since the plan's step 1. A
         USB Ethernet adapter on the xHCI stack (CDC-ECM, CDC-NCM or an
         ASIX chip), which would also give Parallels a NIC, is wanted too,
         later and not as part of this item: item 8 below.
@@ -923,7 +922,7 @@ not yet checked on this tree are marked (predicted).
         its eleven `unimplemented-device` regions), no GENET device can be
         added to `virt`, and `raspi4b` does not boot this kernel's UEFI
         path in any case. So every step that touches the device is a card
-        round trip, and the plan must say, step by step, what check can
+        round trip, and the plan says, step by step, what check can
         fail without the board: the pure parts (frame and descriptor
         layout, the MDIO sequences, the `_CRS` read on the Pi's saved
         tables) host-tested as `parttable` and `amlscan` are, and the

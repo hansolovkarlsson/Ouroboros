@@ -11,7 +11,7 @@ here actually works today, see [`architecture.md`](architecture.md) and
 
 **Not yet released.** Changes since v0.25.0, drafted as they land.
 
-**The Pi 4's Ethernet is read from its ACPI tables, and networking on the Pi has a plan (2026-11-12).**
+**The Pi 4's Ethernet is read from its ACPI tables, and networking on the Pi has a plan (2026-11-12, #451).**
 Hans chose the on-board NIC, Broadcom GENET v5, over a USB adapter, which
 becomes a later item. The plan is `docs/roadmap/roadmap-pi-net.md`. No QEMU
 machine models GENET (`raspi4b` leaves its range unimplemented and does not

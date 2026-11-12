@@ -985,12 +985,16 @@ fn the_pi4s_genet_is_read_from_its_crs_method() {
 }
 
 /// The DSDT with `from` replaced by `to` once, at the only place `from`
-/// occurs inside `ETH0` (191 bytes from its PkgLength, which is 12 bytes
-/// before its `_HID`), its length kept.
+/// occurs inside `ETH0`, its length kept. The device ends where its
+/// PkgLength says, and the PkgLength is 6 bytes before the `_HID` (two
+/// bytes of it, then the name `ETH0`).
 fn pi4_dsdt_with(from: &[u8], to: &[u8]) -> Vec<u8> {
     assert_eq!(from.len(), to.len());
     let eth0 = hid_string_at(PI4_DSDT, GENET_HID).unwrap();
-    let at: Vec<usize> = (eth0..eth0 + 191 - 6 - from.len()).filter(|&i| &PI4_DSDT[i..i + from.len()] == from).collect();
+    assert_eq!(&PI4_DSDT[eth0 - 8..eth0 - 6], &[0x5b, 0x82], "ETH0's DeviceOp");
+    assert_eq!(&PI4_DSDT[eth0 - 4..eth0], b"ETH0");
+    let end = eth0 - 6 + pkg_length(PI4_DSDT, eth0 - 6).unwrap().0;
+    let at: Vec<usize> = (eth0..=end - from.len()).filter(|&i| &PI4_DSDT[i..i + from.len()] == from).collect();
     assert_eq!(at.len(), 1, "the bytes to replace occur once");
     let mut t = PI4_DSDT.to_vec();
     t[at[0]..at[0] + to.len()].copy_from_slice(to);
@@ -1101,9 +1105,7 @@ fn a_local_crs_method_is_read_exactly() {
 fn a_second_crs_beside_a_local_one_is_unreadable() {
     // A `Name (_CRS, ...)` in the same device as the method: two
     // definitions, neither taken.
-    let rbuf_data = [0x86, 0x09, 0x00, 0x01, 0, 0, 0x58, 0xfd, 0x00, 0x00, 0x01, 0x00, 0x79, 0x00];
-    let mut crs = std::vec![0x08, b'_', b'C', b'R', b'S', 0x11, (3 + rbuf_data.len()) as u8, 0x0a, rbuf_data.len() as u8];
-    crs.extend_from_slice(&rbuf_data);
+    let crs = crs(&[0x86, 0x09, 0x00, 0x01, 0, 0, 0x58, 0xfd, 0x00, 0x00, 0x01, 0x00]);
     let body = [local_crs_body(&[]).as_slice(), crs.as_slice()].concat();
     let found = genet(&[&table(&[&device(b"ETH0", &body)])]);
     assert!(found.is_empty(), "{:?}", found.as_slice());
@@ -1122,4 +1124,41 @@ fn a_crs_method_naming_its_buffer_outside_itself_is_unreadable() {
     let found = genet(&[&table(&[&device(b"ETH0", &local_crs_body_named(b"^", &[]))])]);
     assert!(found.is_empty(), "{:?}", found.as_slice());
     assert_eq!(found.unreadable, 1);
+}
+
+#[test]
+fn a_local_crs_method_ending_in_another_op_is_unreadable() {
+    // The Return's one byte made an Increment, the name after it kept:
+    // `Name (RBUF, ...); Increment (RBUF)` returns nothing.
+    let ret = [0xa4, b'R', b'B', b'U', b'F', 0x08, b'_', b'D', b'S', b'D'];
+    let mut inc = ret;
+    inc[0] = 0x75;
+    let found = genet(&[&pi4_dsdt_with(&ret, &inc)]);
+    assert!(found.is_empty(), "{:?}", found.as_slice());
+    assert_eq!(found.unreadable, 1);
+}
+
+/// The `_CRS` method of the patching shape and the `RBUF` it patches, as
+/// `patching_device` holds them, without the device or its `_HID`.
+fn patching_crs() -> Vec<u8> {
+    let dev = patching_device(&[]);
+    let hid = hid(b"BRCME88C");
+    let at = dev.windows(hid.len()).position(|w| w == hid.as_slice()).unwrap();
+    dev[at + hid.len()..].to_vec()
+}
+
+#[test]
+fn a_patching_crs_beside_a_local_one_is_unreadable() {
+    // Two `_CRS` methods, each of a shape this scan reads: two
+    // definitions, neither taken, in either order.
+    let local = local_crs_body(&[]);
+    let patching = patching_crs();
+    for body in [[local.as_slice(), &patching].concat(), [patching.as_slice(), &local].concat()] {
+        let found = genet(&[&table(&[&device(b"ETH0", &body)])]);
+        assert!(found.is_empty(), "{:?}", found.as_slice());
+        assert_eq!(found.unreadable, 1);
+    }
+    // The control: the patching `_CRS` alone under this `_HID` is read.
+    let alone = [hid(b"BCM6E4E").as_slice(), &patching].concat();
+    assert_eq!(genet(&[&table(&[&device(b"ETH0", &alone)])]).as_slice(), &[PI4_EMMC2]);
 }

@@ -8,7 +8,9 @@
 //! one-disk stick"). A platform that declares no transport is now never
 //! scanned. The same walk finds any device by its `_HID` string
 //! ([`declared`]): the Raspberry Pi 4's SD card controller, EMMC2
-//! ([`EMMC2_HID`]), is the second user (`docs/roadmap/roadmap-sd-card.md`).
+//! ([`EMMC2_HID`]), is the second user (`docs/roadmap/roadmap-sd-card.md`),
+//! and its Ethernet, GENET ([`GENET_HID`]), the third
+//! (`docs/roadmap/roadmap-pi-net.md`).
 //!
 //! QEMU declares each transport as a `Device` holding `_HID "LNRO0005"` and
 //! a `_CRS` buffer of a `Memory32Fixed` descriptor (the registers) and an
@@ -220,9 +222,10 @@ pub const EMMC2_HID: &[u8; 8] = b"BRCME88C";
 
 /// The `_HID` the BCM2711's on-board Ethernet, GENET v5, is declared by on
 /// the Raspberry Pi 4 (`Device (ETH0)` in the board's DSDT; Linux's
-/// `bcmgenet` matches it too). Its `_CRS` names two interrupts, and the
-/// first, the one kept, is the default queue's and the link's
-/// (`docs/roadmap/roadmap-pi-net.md`).
+/// `bcmgenet` matches it too). Its `_CRS` names two interrupts, and only
+/// the first is kept. That the first is the default queue's and the
+/// link's is predicted, not yet read off the board
+/// (`docs/roadmap/roadmap-pi-net.md`, "What is known" and step 2).
 pub const GENET_HID: &[u8; 7] = b"BCM6E4E";
 
 /// Adds to `into` the register block and interrupt of every device the
@@ -755,6 +758,19 @@ struct Facts {
     crs_patch: Option<([u8; 4], usize, u32)>,
 }
 
+impl Facts {
+    /// Whether a `_CRS` was already defined at this path, readable or not.
+    fn crs_defined(&self) -> bool {
+        self.crs.is_some() || self.crs_bad || self.crs_patch.is_some()
+    }
+
+    /// A second `_CRS`, or one this scan cannot read: none is taken,
+    /// since [`declared`] looks at `crs_bad` before either reading.
+    fn crs_unreadable(&mut self) {
+        self.crs_bad = true;
+    }
+}
+
 /// The `_CRS` a patching method returns: its buffer, copied, the DWord at
 /// its offset set, read as any `_CRS` buffer is. `None` when the buffer is
 /// defined other than once by a `Name` kept whole, or the DWord does not
@@ -846,15 +862,12 @@ impl Visit for Gather<'_> {
                     _ => Sta::Unknown,
                 }
             }
-            b"_CRS" => match (f.crs.is_some() || f.crs_bad || f.crs_patch.is_some(), value) {
+            b"_CRS" => match (f.crs_defined(), value) {
                 (false, Data::Buffer(at)) => match buffer_bytes(table, *at).and_then(resource_bytes) {
                     Some(t) => f.crs = Some(t),
                     None => f.crs_bad = true,
                 },
-                _ => {
-                    f.crs = None;
-                    f.crs_bad = true;
-                }
+                _ => f.crs_unreadable(),
             },
             _ => {}
         }
@@ -873,22 +886,14 @@ impl Visit for Gather<'_> {
                 // The buffer must be the device's own, beside the method.
                 let device = path.split_last().map(|(d, _)| d);
                 let own = buffer.split_last().filter(|(d, _)| Some(*d) == device).map(|(_, s)| s);
-                match (f.crs.is_some() || f.crs_bad || f.crs_patch.is_some(), own, usize::try_from(*offset)) {
+                match (f.crs_defined(), own, usize::try_from(*offset)) {
                     (false, Some(s), Ok(offset)) => f.crs_patch = Some((s, offset, *value)),
-                    _ => {
-                        f.crs = None;
-                        f.crs_patch = None;
-                        f.crs_bad = true;
-                    }
+                    _ => f.crs_unreadable(),
                 }
             }
-            (b"_CRS", MethodShape::CrsLocal(t)) => match (f.crs.is_some() || f.crs_bad || f.crs_patch.is_some(), t) {
+            (b"_CRS", MethodShape::CrsLocal(t)) => match (f.crs_defined(), t) {
                 (false, Some(t)) => f.crs = Some(*t),
-                _ => {
-                    f.crs = None;
-                    f.crs_patch = None;
-                    f.crs_bad = true;
-                }
+                _ => f.crs_unreadable(),
             },
             _ => self.opaque(path),
         }
@@ -898,10 +903,7 @@ impl Visit for Gather<'_> {
         let Some((f, seg)) = self.at(path) else { return };
         match &seg {
             b"_STA" => f.sta = Sta::Unknown,
-            b"_CRS" => {
-                f.crs = None;
-                f.crs_bad = true;
-            }
+            b"_CRS" => f.crs_unreadable(),
             b"_HID" => f.hids = f.hids.saturating_add(1),
             _ => {}
         }

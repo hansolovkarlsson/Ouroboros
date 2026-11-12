@@ -96,8 +96,19 @@ it network-booted.
   `virtio_net::Device::discover`. The device then sits in one `SyncCell` in
   `syscall.rs` behind `NET_SEND`, `NET_RECV`, `NET_MAC` and `NET_WAIT`, all
   gated to `netd`.
-- `NET_WAIT` takes a timeout: `netd` wakes on a frame's interrupt, a
-  message, or the deadline.
+- **The kernel reaches the NIC in six places, not four.** Beside the four
+  syscalls, `syscall::net_has_frame()` asks the device whether a frame
+  waits, and `syscall::net_intid()` gives `main.rs` the interrupt it
+  enables at the GIC whenever the device reports one.
+- **An idle `netd` waits with no deadline** (`NET_WAIT` with timeout 0;
+  200 ms, `RTO_POLL_MS`, only while TCP data is unacknowledged). What
+  wakes it without an interrupt is the tick: every 20 ms `tasks.rs`'s
+  `on_tick` calls `net_has_frame()` for a task parked in `NET_WAIT`. So a
+  NIC with no interrupt is already polled, by the kernel, at the tick.
+- **The non-cacheable DMA memory is the xHCI's own.** `xhci.rs`'s
+  `DMA_POOL` is one static of that driver's fields, and it is the only
+  range `main.rs` passes to `mmu::install_identity_map` as `uncached`.
+  There is no general pool to take a NIC's buffers from.
 - `netd` has no address configuration. `our_ip()` returns a `10.0.2.x`
   address, with the gateway and DNS server at QEMU SLIRP's fixed addresses
   (`programs/servers/netd/src/main.rs`, whose module doc says "DHCP/routing
@@ -136,19 +147,33 @@ and the design's point 2 is the answer to that.
    device's DMA and its transmit and receive enables go off before the
    kernel uses memory the firmware owned, the same rule the xHCI takeover
    follows. Step 2 reads whether the firmware leaves DMA running.
-5. **One queue, buffers in the DMA pool.** Ring 16 alone, 2048-byte
-   buffers, no priority queues, no checksum offload, the second interrupt
-   unused. The buffers live in the kernel's DMA pool, which is already
-   non-cacheable on the Pi, so the driver does no cache maintenance of its
-   own; frames are copied in and out at the syscall, as virtio-net's are.
+5. **One queue, its buffers in a non-cacheable range of their own.** Ring
+   16 alone, 2048-byte buffers, no priority queues, no checksum offload,
+   the second interrupt unused. The receive and transmit buffers are one
+   page-aligned static in `genet.rs`, and `main.rs` passes its range as a
+   second `uncached` entry beside `xhci::dma_region()` when the firmware
+   says `_CCA 0`, so the driver does no cache maintenance of its own, as
+   `xhci.rs` does none; frames are copied in and out at the syscall, as
+   virtio-net's are. Without that entry the buffers are cacheable memory
+   on a non-coherent device, and the fault would show only on the board:
+   step 5 has the check. How many receive buffers (U-Boot's 256 is half a
+   megabyte) is step 4's to settle.
 6. **A NIC enum behind the syscalls, `netd` unchanged.** `nic.rs` holds
    `enum Nic { Virtio, Genet }` the way `block.rs` holds the disks, and
    `syscall.rs`'s cell holds a `Nic`. `NET_SEND`, `NET_RECV`, `NET_MAC` and
-   `NET_WAIT` keep their numbers and meanings.
-7. **Polled first, then the interrupt.** `netd` already wakes on
-   `NET_WAIT`'s deadline, so a polled driver works, slowly. The interrupt
-   (INTID 189, receive done unmasked in INTRL2_0, cleared in the kernel's
-   IRQ path) is its own step with its own check.
+   `NET_WAIT` keep their numbers and meanings. The enum also answers the
+   kernel's two other questions, `has_frame` and `intid`. `has_frame` on
+   GENET is one register read (the producer index against the consumer),
+   made from the tick's IRQ path under the kernel lock, so it must be a
+   read with no side effect and no wait.
+7. **Polled first, then the interrupt.** The tick already asks the NIC
+   for a waiting frame every 20 ms, so a driver with no interrupt works,
+   a frame late by up to a tick. Until step 9 the GENET arm's `intid` is
+   `None`, whatever the `_CRS` names: `main.rs` enables any INTID the
+   device reports, and a level-triggered line enabled with nothing to
+   clear it hangs the board at the first frame. The interrupt (INTID 189,
+   receive done unmasked in INTRL2_0, cleared in the kernel's IRQ path) is
+   its own step with its own check.
 8. **An address from a file.** `netd` reads its address, mask, gateway and
    DNS server from a file on the root, and falls back to today's SLIRP
    values when the file is absent, so every QEMU rig runs unchanged.
@@ -161,8 +186,8 @@ Each has a recommendation; none blocks step 2.
   board publishes no devicetree.
 - **D2. Polled first, the interrupt as a later step** (design 7), or the
   interrupt from the start. Recommended: polled first. It is one variable
-  fewer in the first round trips, and U-Boot's driver is the proof that it
-  works.
+  fewer in the first round trips, the kernel's tick already does the
+  polling, and U-Boot's driver is the proof the device works that way.
 - **D3. The link.** Recommended: autonegotiation as the PHY does it out of
   reset, whatever speed and duplex result, read once at bring-up with a
   bounded wait and again whenever a send finds the link down. A cable
@@ -195,12 +220,17 @@ Each has a recommendation; none blocks step 2.
    tests bend the shape (an argument, a Return of another name, a Name of
    another name, no Return, a statement after the Return, a buffer named
    outside the method with `^`, a second `_CRS` before or after, a moved
-   base and a zero length), and each condition of the new reader was
+   base and a zero length), and the conditions of the new reader were
    taken out in turn to see one of them fail. One was found with no test
    that could fail for it (a second `_CRS` defined before the method),
    and got one; one was redundant (a bound the line after it implies) and
-   was removed. `Transport` still carries one INTID: the second interrupt
-   is not kept, by design 5.
+   was removed. **The review of #451 found that sweep incomplete:** the
+   check that the method ends in a Return had no test that could fail for
+   it (the test meant for it broke the name after the opcode too), and
+   neither had a patching `_CRS` beside a local one. Both have a test now,
+   each seen to fail with its condition out, and the rule "a second `_CRS`
+   means none" is one function where it was three copies. `Transport`
+   still carries one INTID: the second interrupt is not kept, by design 5.
 
 2. **Read the board.** One boot under a new flag file, `\NETDUMP`, that
    logs before the exit: what `amlscan::declared` finds for `GENET_HID`,
@@ -241,13 +271,18 @@ Each has a recommendation; none blocks step 2.
    hang. Every bound is mutated once.
 
 5. **The board: bring-up and link.** The kernel's `genet.rs`, the device
-   quiet at the exit, reset, the MAC address kept, the PHY read. The boot
-   log gains one line: the version, the MAC address, the link and its
-   speed.
+   quiet at the exit, reset, the MAC address kept, the PHY read, its
+   buffers' range mapped non-cacheable (design 5), `intid` `None` (design
+   7). The boot log gains one line: the version, the MAC address, the
+   link and its speed.
    **Check:** the line matches step 2's values; cable out reads link down
    and the boot goes on to a login; `NET_MAC` gives `netd` the address
-   (`ping` then fails for want of an answer, not for want of a NIC). A
-   sustained boot shows no fault. One variable: nothing is sent yet.
+   (`ping` then fails for want of an answer, not for want of a NIC). The
+   buffers' mapping is read back from the translation tables by a walk,
+   not from the list handed to `mmu.rs`, and logged; on QEMU, where
+   nothing says `_CCA 0`, the same line must say cacheable (the control).
+   A sustained boot shows no fault, with the tick calling `has_frame`
+   throughout. One variable: nothing is sent yet.
 
 6. **The board: transmit.** `netd` sends what it sends now. With the
    address file in place (step 8 may come first if that is simpler), a
@@ -274,12 +309,15 @@ Each has a recommendation; none blocks step 2.
 
 9. **The interrupt.** INTID 189 enabled in the GIC, receive done unmasked,
    cleared in the kernel's IRQ path, `NET_WAIT` woken by it.
-   **Check:** a `ping` of an idle Pi from the Mac answers in well under
-   `NET_WAIT`'s polling period, which a polled driver cannot do; `make
-   test-smp`'s concerns apply (the IRQ path runs under the kernel lock),
-   and a soak of repeated `fetch`es shows no fault and no stuck interrupt
-   (a level-triggered line left uncleared would hang the board at the
-   first frame, which is the check that it is cleared).
+   **Check:** the kernel counts the interrupts it takes on INTID 189 and
+   shows the count; after a hundred pings from the Mac it is at least a
+   hundred, and with the unmask left out it stays 0 while the pings are
+   still answered by the tick's poll. That second run is why the count is
+   the check and a ping's latency is not: a polled driver answers within
+   a tick too. `make test-smp`'s concerns apply (the IRQ path runs under
+   the kernel lock), and a soak of repeated `fetch`es shows no fault and
+   no stuck interrupt (a level-triggered line left uncleared would hang
+   the board at the first frame, which is the check that it is cleared).
 
 10. **Two boards.** Two Pi 4s on one switch, each with its address file
     and cluster keys.
