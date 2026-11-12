@@ -1536,8 +1536,13 @@ The small open tails those arcs deliberately left:
   and whether two simultaneous calls there can meet has not been examined. A
   reply needs to be told apart from a request at delivery.
 
-- **`check-site-freshness.py` prints a page name its `--update` refuses
-  (found 2026-09-27).** A stale page is reported as `docs/site/<page>`, the
+- ~~**`check-site-freshness.py` prints a page name its `--update` refuses
+  (found 2026-09-27).**~~ **Fixed 2026-11-11:** `--update` takes a page as
+  the report prints it (`docs/site/<page>`), as the manifest keys it
+  (`site/<page>`), with `./` or as an absolute path, and the report prints
+  the whole command with the stale pages in it. A name that is no page of
+  the site is said as that, not as "not currently reported stale". As
+  found: A stale page is reported as `docs/site/<page>`, the
   manifest keys it as `site/<page>`, and `--update docs/site/<page>` answers
   "not currently reported stale". Print the key, or accept both spellings.
 

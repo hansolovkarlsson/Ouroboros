@@ -44,7 +44,12 @@ confirming it needs no edit. Over-reporting in that direction is the safe one.
 TO CLEAR A FAILURE: re-read the source, update the page to match, then re-stamp
 that page:
 
-    python3 scripts/check-site-freshness.py --update site/manual.html
+    python3 scripts/check-site-freshness.py --update docs/site/manual.html
+
+A page is named as the report prints it, from the repository's root
+(`docs/site/manual.html`), or as the MANIFEST keys it, from `docs/`
+(`site/manual.html`). Until 2026-11-11 only the second worked, and the first,
+the one on the screen, was answered "not currently reported stale".
 
 Naming pages is deliberate - a bare --update re-stamps everything reported,
 which asserts a review that did not happen and is the one way this check can be
@@ -128,6 +133,26 @@ def listed_pages():
     return pages
 
 
+def manifest_key(arg):
+    """A page named on the command line, as the MANIFEST keys it.
+
+    The report prints a page from the repository's root (`docs/site/x.html`)
+    and the MANIFEST keys it from `docs/` (`site/x.html`); either is taken,
+    and so is an absolute path or one starting `./`. Anything else is
+    returned as it came, for `update` to refuse by name.
+    """
+    docs = os.path.join(ROOT, "docs")
+    full = os.path.abspath(arg)
+    if full.startswith(docs + os.sep):
+        from_cwd = os.path.relpath(full, docs)
+        if from_cwd in MANIFEST:
+            return from_cwd
+    key = os.path.normpath(arg)
+    if key.startswith("docs" + os.sep):
+        key = key[len("docs" + os.sep):]
+    return key.replace(os.sep, "/")
+
+
 def update(stale, only):
     """Re-stamp stale pages, rewriting this file's MANIFEST in place.
 
@@ -138,7 +163,10 @@ def update(stale, only):
         unknown = [p for p in only if p not in {s[0] for s in stale}]
         if unknown:
             for p in unknown:
-                print(f"  ! {p} is not currently reported stale - nothing to re-stamp")
+                if p in MANIFEST:
+                    print(f"  ! {p} is not currently reported stale - nothing to re-stamp")
+                else:
+                    print(f"  ! {p} is not a page of the site (name it as the report prints it: docs/site/<page>.html)")
             return 1
         stale = [s for s in stale if s[0] in only]
 
@@ -189,12 +217,12 @@ def main():
 
     if stale:
         if "--update" in sys.argv:
-            named = [a for a in sys.argv[1:] if a != "--update"]
+            named = [manifest_key(a) for a in sys.argv[1:] if a != "--update"]
             if not named:
                 print(
                     f"re-stamping ALL {len(stale)} reported page(s). This asserts that every\n"
                     "one of them has been re-read and updated. If that is not true, name the\n"
-                    "pages instead: --update site/manual.html\n"
+                    "pages instead: --update docs/site/manual.html\n"
                 )
             return update(stale, named)
         print(f"check-site-freshness: {len(stale)} page(s) BEHIND their source")
@@ -204,7 +232,9 @@ def main():
         print(
             "\nThe site is live, so these are public pages serving a stale answer.\n"
             "Fix by re-reading the source and updating the page, then re-stamp it:\n"
-            "    python3 scripts/check-site-freshness.py --update <page> [<page>...]\n"
+            "    python3 scripts/check-site-freshness.py --update "
+            + " ".join(f"docs/{page}" for page, *_ in stale)
+            + "\n(one page or several, named as above)\n"
             "Re-stamping WITHOUT updating the page asserts a review that did not\n"
             "happen - that is the one way to make this check lie."
         )
