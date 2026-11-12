@@ -121,9 +121,19 @@ const SESSION_MAX: usize = MAX_CONNS - 1;
 /// this long is reaped with a RST: 30 s at 20 ms per tick. This is what bounds
 /// a session whose peer died without a FIN (and, since 2026-09-07, an HTTP or
 /// one-shot 9P connection whose peer never sent a request or never finished
-/// closing - the same leak, which nothing bounded before). A `cpu` run
-/// connection is exempt while its child runs, since neither side speaks then.
+/// closing - the same leak, which nothing bounded before). A `cpu` run's
+/// connection is under it too since 2026-11-12: neither side speaks while
+/// the command runs, so `netd` probes the caller ([`RUN_PROBE_TICKS`]) and a
+/// live one's answers are the segments this timer counts. Until then a run
+/// was exempt, and a caller that vanished with no FIN and no RST left its
+/// command running for good (the review of #437).
 const CONN_IDLE_TICKS: u64 = 1500;
+/// How long a run's connection stays quiet before `netd` probes its caller,
+/// and the least between two probes: 5 s at 20 ms per tick, so a caller that
+/// is there has five probes to answer one of before [`CONN_IDLE_TICKS`]
+/// takes the connection, and a run costs one small segment each way every
+/// five seconds.
+const RUN_PROBE_TICKS: u64 = 250;
 /// Max SACK blocks parsed from one segment's TCP options (RFC 2018 allows up
 /// to 4 in the 40-byte option area, 3 alongside timestamps).
 const MAX_SACK: usize = 4;
@@ -674,6 +684,7 @@ fn serve(packed_mac: u64) -> ! {
                     t.conns[i] = None;
                     continue;
                 }
+                probe_run(&mac, t.conns[i].as_mut().unwrap(), now());
                 if reap_idle(&mac, t.conns[i].as_ref().unwrap(), now()) {
                     t.conns[i] = None;
                     continue;
@@ -2672,6 +2683,9 @@ struct TcpConn {
     /// The tick (`now()`) of the last segment from the peer; `reap_idle` reads
     /// it.
     last_rx: u64,
+    /// The tick of the last keepalive probe sent on a run's connection
+    /// ([`probe_run`]).
+    probed: u64,
     /// The sequence number of `prefix[0]` for the reply being streamed: what
     /// `rewind_to` and `retransmit_one` map a sequence number back to a buffer
     /// offset against. Recorded at the staging site (the `responded = true`
@@ -3837,6 +3851,7 @@ fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conns: &mut [Option<TcpC
             keyed: None,
             carried: false,
             last_rx: now(),
+            probed: 0,
             data_base: SERVER_ISN.wrapping_add(1),
         };
         send_seg(mac, &c, TCP_SYN | TCP_ACK, true, &[]);
@@ -3907,12 +3922,36 @@ fn reply_pending(c: &TcpConn) -> bool {
     c.prefix_off < c.prefix_len || (c.file && !c.eof)
 }
 
+/// A keepalive probe on a `cpu` run's connection: while its command runs and
+/// nothing is in flight, a peer silent for [`RUN_PROBE_TICKS`] is sent a bare
+/// ACK one sequence number back, a segment no receiver can accept and every
+/// TCP answers with an ACK of its own (RFC 9293 3.8.4, and 3.10.7.4's "send
+/// an acknowledgment in reply" for a segment outside the window). That answer
+/// is a segment from the peer, so it is what `reap_idle` then counts; a
+/// caller that is gone answers nothing and is reaped at `CONN_IDLE_TICKS`,
+/// its command ended by the slot's `Drop`.
+///
+/// Sent only while a child runs: every other connection either has a reply
+/// in flight (the retransmit timer's) or is waiting on the peer to speak,
+/// where silence is the thing the idle reap is for.
+fn probe_run(mac: &[u8; 6], c: &mut TcpConn, now: u64) {
+    if c.cpu_child == CPU_NONE || c.snd_nxt != c.snd_una {
+        return;
+    }
+    if now.wrapping_sub(c.last_rx) <= RUN_PROBE_TICKS || now.wrapping_sub(c.probed) <= RUN_PROBE_TICKS {
+        return;
+    }
+    c.probed = now;
+    send_seg_at(mac, c, c.snd_nxt.wrapping_sub(1), TCP_ACK, &[]);
+}
+
 /// The idle reap: `true` when `c` has had nothing in flight and no segment from
 /// its peer for `CONN_IDLE_TICKS`, in which case a RST has been sent and the
 /// caller frees the slot. Unacked data is the retransmit timer's business, not
-/// this one's, and a running `cpu` child is exempt (see `CONN_IDLE_TICKS`).
+/// this one's. A running `cpu` child is no exemption (see `CONN_IDLE_TICKS`):
+/// its caller is probed, and freeing the slot ends the child (`Drop`).
 fn reap_idle(mac: &[u8; 6], c: &TcpConn, now: u64) -> bool {
-    if c.cpu_child != CPU_NONE || c.snd_nxt != c.snd_una {
+    if c.snd_nxt != c.snd_una {
         return false;
     }
     // NOTHING PROBES A SHUT WINDOW, so a reply stalled on one is reaped here
@@ -6229,6 +6268,21 @@ fn dial_on_segment<const S: usize, const R: usize, const H: usize, const K: usiz
                 }
             }
             DialState::Established | DialState::Closing => {
+                // A keepalive probe: no data, no SYN or FIN, one sequence
+                // number back from what is expected next. Answered with an
+                // ACK, which is all the prober wants: the far export probes
+                // the caller of a `cpu` run while its command runs
+                // (`probe_run`) and ends the run when nothing answers. Until
+                // 2026-11-12 this side answered nothing to it. Only this one
+                // shape, not every segment outside the window: the wider
+                // rule belongs to the receive-path hardening on the ledger
+                // (docs/ROADMAP.md), and a narrow answer cannot make an ACK
+                // storm, the reply itself being in sequence.
+                if s.data_len == 0 && s.flags & (TCP_SYN | TCP_FIN) == 0 && s.seq == c.rcv_nxt.wrapping_sub(1) {
+                    if let Some(nn) = build_tcp(mac, &c.peer_mac, &c.peer_ip, c.src_port, c.peer_port, c.snd_nxt, c.rcv_nxt, TCP_ACK, false, &[], &mut out) {
+                        let _ = send(&out[..nn]);
+                    }
+                }
                 // ACK processing: advance snd_una, drop acked send data.
                 if seq_gt(s.ack, c.snd_una) {
                     let acked = s.ack.wrapping_sub(c.snd_una) as usize;
