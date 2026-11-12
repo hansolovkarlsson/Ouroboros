@@ -11,7 +11,7 @@ here actually works today, see [`architecture.md`](architecture.md) and
 
 **Not yet released.** Changes since v0.25.0, drafted as they land.
 
-**A read-only scan of the Pi 4's Ethernet, under `\NETDUMP` (2026-11-12).**
+**A read-only scan of the Pi 4's Ethernet, under `\NETDUMP` (2026-11-12, #452).**
 Step 2 of `docs/roadmap/roadmap-pi-net.md`, built and not yet run on a
 board. With the flag file at the boot partition's root the kernel logs,
 before the exit, the GENET the ACPI tables declare and, with exactly one,
