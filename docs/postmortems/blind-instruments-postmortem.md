@@ -1,6 +1,6 @@
 # Blind instruments
 
-*A process retrospective, 2026-09-02, extended through 2026-11-11. It began
+*A process retrospective, 2026-09-02, extended through 2026-11-12. It began
 with a day of small roadmap items (five PRs, one release, no arc) during which
 five separate tools reported success while proving nothing. Every later day
 that found another instrument of the same kind added a dated section after
@@ -8,7 +8,7 @@ that found another instrument of the same kind added a dated section after
 off a phone photo, the Raspberry Pi's bench tools, and on 2026-10-09 the
 stale-image guard and the four blind spots in the guard that replaced it, and
 on 2026-10-10 the controls a keyboard change blinded and then the multi-core
-rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's, and on 2026-10-20 the volume bounds', and on 2026-10-21 the exFAT sets' and names', and on 2026-10-22 the stall classifier's and sector 0's, and on 2026-10-23 the blank disk's, and on 2026-10-24 the exFAT frees' mutants and plants, and on 2026-10-25 the disk-trace stalls' classifier, fake, arithmetic and a host sleep, and on 2026-10-28 the read-only gate's control, review, run script and wait, and on 2026-10-29 the open probes' and the disk gate rig's silence, sites, truncate check and unspellable control, and on 2026-10-30 the read-only mount's shared tail, unheld order, overwritten transcript and unread pass, and the disk-gate staging's check run once, and that evening the boot start's bug no mount showed, its rig's absent step read as empty and its recomputed signature, and on 2026-10-31 the exFAT free's counts blind to order, the batch model's assertion that skipped the head, a fix no boot could grade, and a count I predicted for an order, and on 2026-11-01 an exit code that flattened two verdicts, a hint a byte wide read a cluster at a time, a model that started where it assumed and two citations that pointed at nothing, and on 2026-11-04 a rig that attached its disks so macOS could not mount them, a test helper whose encoding broke a deep nest before the walk reached it, and a grep that hid where a fault happened, and on 2026-11-05 a probe whose two writes libc joined into one, a control run without its boot flag, and a diagnostic whose only first run was on the Pi, and on 2026-11-07 a self-test case refused by the wrong rule, a rig that graded only runs that succeed, and a mutation caught as a crash, and on 2026-11-08 a filter that read a refused boot as silence, a control placed where the two answers agree, and a glob that read yesterday's logs, and on 2026-11-09 a control the far side's reap graded, a control a new guard answered for, and a review that read a mutant as the code, and on 2026-11-10 to 2026-11-11 a rig whose two rounds could have been one, a mark that covered only the paths driven, a reading that dropped the calls it could not name, a self-test that passed on text its author wrote, and a clause and a premise nothing observed. The spine below has held for all of them.*
+rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's, and on 2026-10-20 the volume bounds', and on 2026-10-21 the exFAT sets' and names', and on 2026-10-22 the stall classifier's and sector 0's, and on 2026-10-23 the blank disk's, and on 2026-10-24 the exFAT frees' mutants and plants, and on 2026-10-25 the disk-trace stalls' classifier, fake, arithmetic and a host sleep, and on 2026-10-28 the read-only gate's control, review, run script and wait, and on 2026-10-29 the open probes' and the disk gate rig's silence, sites, truncate check and unspellable control, and on 2026-10-30 the read-only mount's shared tail, unheld order, overwritten transcript and unread pass, and the disk-gate staging's check run once, and that evening the boot start's bug no mount showed, its rig's absent step read as empty and its recomputed signature, and on 2026-10-31 the exFAT free's counts blind to order, the batch model's assertion that skipped the head, a fix no boot could grade, and a count I predicted for an order, and on 2026-11-01 an exit code that flattened two verdicts, a hint a byte wide read a cluster at a time, a model that started where it assumed and two citations that pointed at nothing, and on 2026-11-04 a rig that attached its disks so macOS could not mount them, a test helper whose encoding broke a deep nest before the walk reached it, and a grep that hid where a fault happened, and on 2026-11-05 a probe whose two writes libc joined into one, a control run without its boot flag, and a diagnostic whose only first run was on the Pi, and on 2026-11-07 a self-test case refused by the wrong rule, a rig that graded only runs that succeed, and a mutation caught as a crash, and on 2026-11-08 a filter that read a refused boot as silence, a control placed where the two answers agree, and a glob that read yesterday's logs, and on 2026-11-09 a control the far side's reap graded, a control a new guard answered for, and a review that read a mutant as the code, and on 2026-11-10 to 2026-11-11 a rig whose two rounds could have been one, a mark that covered only the paths driven, a reading that dropped the calls it could not name, a self-test that passed on text its author wrote, and a clause and a premise nothing observed, and on 2026-11-11 to 2026-11-12 an instrument's note taken for a finding, a check that passed for another reason, an observer too patient to see the fault, and a round that passed with its fix taken out. The spine below has held for all of them.*
 
 The previous day's retrospective
 ([`repairing-the-repairs-postmortem.md`](repairing-the-repairs-postmortem.md))
@@ -2843,3 +2843,64 @@ nothing. **A control that changes no check has found dead text or a blind
 rig, and either is worth the minute it takes to learn which. A check's
 precondition belongs in the check.**
 
+## Four more, from a day of fixes (2026-11-11 to 2026-11-12)
+
+**An instrument's note taken for a finding.** `make check-stack-chains`
+cannot bound a program that recurses by its input, so it prints each one
+with a line saying why. For `tree` the line said "about forty levels deep is
+the guard page", and the roadmap and the standup carried that as a defect to
+repair with an explicit stack. It was the check describing what it could not
+see. `tree` has capped its walk at sixteen levels since the day it was
+written, in a variable, and a reading that follows calls does not read
+variables. Opening the source to plan the repair is what found it; nothing
+had been run. What was wrong was smaller and elsewhere: the two constants
+the cap is computed from were a comment's measurements, 1,024 and 8 KiB
+against a binary of 1,312 and 8,240 (#444). **When an instrument says it
+cannot bound something, that is a statement about the instrument. Before it
+goes on a list as a defect, someone has to look at the thing.** The check
+now reads `tree`'s three constants from its source and holds them against
+the binary.
+
+**A check that passed for another reason.** `make test-sd` had a check named
+"format over the firmware partition refused". `format` picks its target by
+`mount`'s rule, which on that card is the root, 24 MiB and too small for
+FAT32: it was refused before any write, by arithmetic, and the SD driver's
+guard was never reached. The check had passed since the day it was written,
+through the control that removed the guard as well, which the entry in
+`make-targets.md` nonetheless listed as failing it. It was found when the
+same refusal was given a new message and `format`'s did not change (#445).
+A tenth boot now puts the firmware partition where `format` targets it, and
+the kernel's line must name that partition's first sector. **A check named
+for a cause proves the outcome and not the cause. Where two rules can
+produce the same refusal, the check has to observe which one spoke.**
+
+**An observer too patient to see the fault.** The export did not acknowledge
+a `cpu` run's request until its reply, which is held until the command ends.
+A dispatching `netd` retransmits eight times and closes its side, so every
+run between two nodes that took over about four and a half seconds failed on
+the caller and ran on, orphaned, on the far machine. The rigs that hold a
+run open for long (`test-run-orphan`, and the first half of the new
+`test-run-silent`) dispatch from the host, through the host's TCP, which
+retransmits for minutes and so never gave up. The two-node rigs use our own
+dial side and run commands that end in a second. The defect needed our
+client and a slow command at once, and no rig had both; it was seen in a
+capture taken for something else, nine copies of one segment with no answer
+(#449). The host peers are the foreign observer by design, there to catch
+what two copies of one implementation agree on. **A foreign observer also
+brings its own tolerances, and where it is more forgiving than the real
+peer it hides the fault. Each behaviour needs one check driven by the peer
+that will really be there.**
+
+**A round that passed with its fix taken out.** The review of #449 found
+that `netd`'s blocking waits drop every frame but their own reply, so a
+keepalive's answer could be swallowed and a live caller's run ended. The
+fix gives that time back to the run's clock. I added a round to the rig,
+forty-five seconds of back-to-back pings of a dead address during a run,
+and it passed. Its control, the fix's one line removed, passed too: the
+shell's paced typing left the loop passes enough to hear an answer. The
+round also failed once on its own floor of ten pings, with nothing wrong.
+It was removed, and the fix stays on reading alone, said so in five places.
+**This is the first rule of the family again, and the reason the control is
+run even for a round that was hard to build: a new check is a claim until it
+has been seen to fail. One that cannot is worse than none, since it reads as
+coverage.**

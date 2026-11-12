@@ -1546,6 +1546,31 @@ The small open tails those arcs deliberately left:
   manifest keys it as `site/<page>`, and `--update docs/site/<page>` answers
   "not currently reported stale". Print the key, or accept both spellings.
 
+- **`test-boot-partition`'s `usb-boot-beside` stopped once at the password
+  prompt (seen 2026-11-11).** One run of three that day: the boot reached
+  `login:`, `root` and the password were typed, and nothing followed, with
+  no fault line; two checks failed, and the rerun and a later run passed
+  all 140. It happened on the SD write's branch (#445), which touches
+  neither login nor the USB path, and is not shown to be unrelated. It
+  reads as a keystroke lost to the PL011, the Enter after the password. If
+  it comes back, the transcript's last line is the thing to keep.
+
+- **Two rigs share five helpers by copy (2026-11-12).** `test-run-silent.py`
+  took `load`, `check`, `ps`, `until` and the pcap record walk from
+  `test-run-orphan.py`, and `test-server-children.py` three of them; the
+  capture walk is a third copy beside `drive-2vm.py`'s `auth_census` (the
+  review of #449, left). `drive-qemu.py` is where the others' shared code
+  went.
+
+- **Four pieces of 2026-11-11 and 11-12 that no check can fail for.** The
+  SD card's write-protect switch, at the mount and at a write (QEMU refuses
+  a read-only drive as a card, #445). The acknowledgement of data sent
+  again, on the export and the dial side (no link here loses an ACK, #449).
+  `credit_deaf` (a round built for it passed with it taken out, #449).
+  `KILL_ID` refusing a slot that holds another task (it needs a reap and a
+  spawn between two instants, #447). And `cpu_child_msg` with an empty
+  message mid-run: no program was found that sends one.
+
 - **A server past its restart cap draws a second wedge line (seen
   2026-09-27).** Forcing `netd` through four ping-timeout wedges in one boot
   printed `failed more than 3 times this boot - giving up` and then

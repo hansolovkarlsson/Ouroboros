@@ -11,7 +11,7 @@ here actually works today, see [`architecture.md`](architecture.md) and
 
 **Not yet released.** Changes since v0.25.0, drafted as they land.
 
-**A `cpu` run from another node can take more than five seconds, and ends when its caller is gone (2026-11-12).**
+**A `cpu` run from another node can take more than five seconds, and ends when its caller is gone (2026-11-12, #449).**
 Two defects, one found while repairing the other. The one on the ledger (the
 review of #437): a caller that vanished with no FIN and no RST, a machine
 switched off, left its command running on the executing machine for good,
