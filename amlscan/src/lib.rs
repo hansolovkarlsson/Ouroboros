@@ -8,7 +8,9 @@
 //! one-disk stick"). A platform that declares no transport is now never
 //! scanned. The same walk finds any device by its `_HID` string
 //! ([`declared`]): the Raspberry Pi 4's SD card controller, EMMC2
-//! ([`EMMC2_HID`]), is the second user (`docs/roadmap/roadmap-sd-card.md`).
+//! ([`EMMC2_HID`]), is the second user (`docs/roadmap/roadmap-sd-card.md`),
+//! and its Ethernet, GENET ([`GENET_HID`]), the third
+//! (`docs/roadmap/roadmap-pi-net.md`).
 //!
 //! QEMU declares each transport as a `Device` holding `_HID "LNRO0005"` and
 //! a `_CRS` buffer of a `Memory32Fixed` descriptor (the registers) and an
@@ -57,16 +59,22 @@
 //! bytes, and each review found a way for it to read an absent device as
 //! present.
 //!
-//! **Two method bodies are read, each in one exact shape** ([`MethodShape`],
-//! since 2026-11-05, as the Pi's firmware writes them): a `_STA` that is
+//! **Three method bodies are read, each in one exact shape**
+//! ([`MethodShape`], the first two since 2026-11-05 and the third since
+//! 2026-11-12, as the Pi's firmware writes them): a `_STA` that is
 //! only `Return (<constant>)`, which nothing can store to, so it counts as
-//! a constant `_STA`; and a `_CRS` that is only `CreateDWordField
+//! a constant `_STA`; a `_CRS` that is only `Name (<buffer>, Buffer
+//! {...}); Return (<buffer>)`, the buffer named inside the method itself,
+//! which is read as a `_CRS` buffer is (the name lives only while the
+//! method runs, and the method does nothing between making it and
+//! returning it, so nothing can change its bytes); and a `_CRS` that is
+//! only `CreateDWordField
 //! (^<buffer>, <offset>, <field>); Store (<constant>, <field>);
 //! Return (^<buffer>)`, where `<buffer>` is a `Name` in the same device. A
 //! third pass finds that buffer's definitions in every table; with exactly
 //! one, a Buffer kept whole, a copy is patched and read as a `_CRS` buffer
-//! is. Any other method body is skipped whole, as before. The base this
-//! gives cannot be moved by another method: the `_CRS` stores its constant
+//! is. Any other method body is skipped whole, as before. The base the
+//! patching shape gives cannot be moved by another method: the `_CRS` stores its constant
 //! into the buffer each time it is evaluated, right before returning it, so
 //! a store by `_INI` or any other method to the same bytes is overwritten.
 //! What another method could change unseen is the rest of the buffer, its
@@ -212,10 +220,18 @@ pub fn virtio_mmio(tables: &[&[u8]], into: &mut Transports) {
 /// `sdhci-iproc` matches it too).
 pub const EMMC2_HID: &[u8; 8] = b"BRCME88C";
 
+/// The `_HID` the BCM2711's on-board Ethernet, GENET v5, is declared by on
+/// the Raspberry Pi 4 (`Device (ETH0)` in the board's DSDT; Linux's
+/// `bcmgenet` matches it too). Its `_CRS` names two interrupts, and only
+/// the first is kept. That the first is the default queue's and the
+/// link's is predicted, not yet read off the board
+/// (`docs/roadmap/roadmap-pi-net.md`, "What is known" and step 2).
+pub const GENET_HID: &[u8; 7] = b"BCM6E4E";
+
 /// Adds to `into` the register block and interrupt of every device the
 /// tables declare present with `Name (_HID, "<hid>")`, by the same rules as
 /// [`virtio_mmio`]: the walk, `_STA` and `_CRS` as the module doc says,
-/// each a `Name` or one of the two method shapes it reads.
+/// each a `Name` or one of the method shapes it reads.
 pub fn declared(tables: &[&[u8]], hid: &[u8], into: &mut Transports) {
     if hid.is_empty() {
         return;
@@ -383,9 +399,9 @@ trait Visit {
     }
 }
 
-/// The two method bodies this scan reads, each in exactly one shape, as
-/// edk2-platforms writes them for the Raspberry Pi 4 (`Emmc.asl`, read off
-/// the board on 2026-11-05):
+/// The three method bodies this scan reads, each in exactly one shape, as
+/// edk2-platforms writes them for the Raspberry Pi 4. Two are `Emmc.asl`'s
+/// (read off the board on 2026-11-05):
 ///
 /// ```text
 /// 14 09 "_STA" 00 A4 0A 0F               Method (_STA) { Return (0x0F) }
@@ -395,7 +411,17 @@ trait Visit {
 ///   A4 5E "RBUF"                           Return (^RBUF) }
 /// ```
 ///
-/// Anything else in either body, another statement, an argument, a
+/// The third is the `_CRS` of the board's Ethernet, `ETH0` in its DSDT
+/// (read in the dumped table on 2026-11-12), its buffer a name of the
+/// method's own:
+///
+/// ```text
+/// 14 2F "_CRS" 08                        Method (_CRS, 0, Serialized) {
+///   08 "RBUF" 11 1E 0A 1B ...              Name (RBUF, Buffer (0x1B) {...})
+///   A4 "RBUF"                              Return (RBUF) }
+/// ```
+///
+/// Anything else in a body, another statement, an argument, a
 /// different field op, leaves the method unknowable, as every other is.
 enum MethodShape {
     /// `Return (<constant>)`.
@@ -403,6 +429,10 @@ enum MethodShape {
     /// A buffer at `buffer`, a DWord at byte `offset` of it set to `value`,
     /// the buffer returned.
     CrsPatch { buffer: Path, offset: u64, value: u32 },
+    /// A buffer named inside the method and returned: what its bytes
+    /// describe, `None` when they are no register block (no
+    /// `Memory32Fixed`, a zero length, a length past the buffer).
+    CrsLocal(Option<Transport>),
 }
 
 /// The shape of the method at `path`, its MethodFlags byte at `flags`, its
@@ -422,6 +452,21 @@ fn method_shape(table: &[u8], path: &Path, flags: usize, end: usize) -> Option<M
             }
             let (Data::Int(v), next) = data(table, code + 1)? else { return None };
             (next == end).then_some(MethodShape::Sta(v))
+        }
+        [b'_', b'C', b'R', b'S'] if table.get(code) == Some(&0x08) => {
+            // Name (<a name of the method's own>, Buffer {...}).
+            let (buffer, l1) = name_string(table, code + 1, path)?;
+            if buffer.split_last()?.0 != *path {
+                return None;
+            }
+            let (Data::Buffer(at), q) = data(table, code + 1 + l1)? else { return None };
+            // Return (<that buffer>), and nothing after it.
+            if *table.get(q)? != 0xa4 {
+                return None;
+            }
+            let (returned, l2) = name_string(table, q + 1, path)?;
+            (returned == buffer && q + 1 + l2 == end)
+                .then(|| MethodShape::CrsLocal(buffer_bytes(table, at).and_then(resource_bytes)))
         }
         [b'_', b'C', b'R', b'S'] => {
             // CreateDWordField (SourceBuff, ByteIndex, NameString).
@@ -713,6 +758,19 @@ struct Facts {
     crs_patch: Option<([u8; 4], usize, u32)>,
 }
 
+impl Facts {
+    /// Whether a `_CRS` was already defined at this path, readable or not.
+    fn crs_defined(&self) -> bool {
+        self.crs.is_some() || self.crs_bad || self.crs_patch.is_some()
+    }
+
+    /// A second `_CRS`, or one this scan cannot read: none is taken,
+    /// since [`declared`] looks at `crs_bad` before either reading.
+    fn crs_unreadable(&mut self) {
+        self.crs_bad = true;
+    }
+}
+
 /// The `_CRS` a patching method returns: its buffer, copied, the DWord at
 /// its offset set, read as any `_CRS` buffer is. `None` when the buffer is
 /// defined other than once by a `Name` kept whole, or the DWord does not
@@ -804,15 +862,12 @@ impl Visit for Gather<'_> {
                     _ => Sta::Unknown,
                 }
             }
-            b"_CRS" => match (f.crs.is_some() || f.crs_bad || f.crs_patch.is_some(), value) {
+            b"_CRS" => match (f.crs_defined(), value) {
                 (false, Data::Buffer(at)) => match buffer_bytes(table, *at).and_then(resource_bytes) {
                     Some(t) => f.crs = Some(t),
                     None => f.crs_bad = true,
                 },
-                _ => {
-                    f.crs = None;
-                    f.crs_bad = true;
-                }
+                _ => f.crs_unreadable(),
             },
             _ => {}
         }
@@ -831,15 +886,15 @@ impl Visit for Gather<'_> {
                 // The buffer must be the device's own, beside the method.
                 let device = path.split_last().map(|(d, _)| d);
                 let own = buffer.split_last().filter(|(d, _)| Some(*d) == device).map(|(_, s)| s);
-                match (f.crs.is_some() || f.crs_bad || f.crs_patch.is_some(), own, usize::try_from(*offset)) {
+                match (f.crs_defined(), own, usize::try_from(*offset)) {
                     (false, Some(s), Ok(offset)) => f.crs_patch = Some((s, offset, *value)),
-                    _ => {
-                        f.crs = None;
-                        f.crs_patch = None;
-                        f.crs_bad = true;
-                    }
+                    _ => f.crs_unreadable(),
                 }
             }
+            (b"_CRS", MethodShape::CrsLocal(t)) => match (f.crs_defined(), t) {
+                (false, Some(t)) => f.crs = Some(*t),
+                _ => f.crs_unreadable(),
+            },
             _ => self.opaque(path),
         }
     }
@@ -848,10 +903,7 @@ impl Visit for Gather<'_> {
         let Some((f, seg)) = self.at(path) else { return };
         match &seg {
             b"_STA" => f.sta = Sta::Unknown,
-            b"_CRS" => {
-                f.crs = None;
-                f.crs_bad = true;
-            }
+            b"_CRS" => f.crs_unreadable(),
             b"_HID" => f.hids = f.hids.saturating_add(1),
             _ => {}
         }

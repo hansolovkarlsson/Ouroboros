@@ -902,21 +902,32 @@ not yet checked on this tree are marked (predicted).
       `resolve`, `fetch`, `mount -r`, `cpu` and the whole cluster are
       QEMU-only, and a second board is a spare and not a peer. Item 5 (SSH)
       waits on this, and so does the two-node cluster on real hardware, the
-      north star's first proof off an emulator. Not planned yet; what a plan
-      has to settle first:
-      - **Which NIC.** The on-board Ethernet is Broadcom GENET v5 with a
-        BCM54213PE PHY over MDIO, plain MMIO ((predicted) at CPU address
-        `0xfd580000`, to be discovered from the firmware's tables as EMMC2
-        was, never hardcoded). The other way is a USB Ethernet adapter on
-        the xHCI stack that already runs on the board (CDC-ECM, CDC-NCM or
-        an ASIX chip), which would also give Parallels a NIC. Recommended:
-        GENET, since it needs no hardware beyond the board and is the
-        device every Pi 4 has; the choice is Hans's.
-      - **What tests it off the board.** The SD arc was built on QEMU's
-        `sdhci-pci` before EMMC2 saw it. Whether any QEMU machine this
-        kernel boots can model GENET has not been read; if none can, every
-        step is a card round trip, and the plan must say what check can
-        fail without the board.
+      north star's first proof off an emulator. **The plan, written
+      2026-11-12, is [`roadmap-pi-net.md`](roadmap/roadmap-pi-net.md)**; its
+      step 1 (the NIC read from the board's saved ACPI tables on the host)
+      is built. What it had to settle first, and what was read:
+      - **Which NIC: decided by Hans on 2026-11-12, the on-board GENET
+        first.** It is Broadcom GENET v5 with a BCM54213PE PHY over MDIO
+        (the PHY (predicted)), plain MMIO, discovered from the firmware's
+        tables as EMMC2 was, never hardcoded. The Pi's DSDT declares it as
+        `ETH0` with `_HID "BCM6E4E"` at CPU address `0xfd580000` (read in
+        `amlscan/testdata/pi4-dsdt.aml`, 2026-11-12), and
+        `amlscan::declared` reads it since the plan's step 1. A
+        USB Ethernet adapter on the xHCI stack (CDC-ECM, CDC-NCM or an
+        ASIX chip), which would also give Parallels a NIC, is wanted too,
+        later and not as part of this item: item 8 below.
+      - **What tests it off the board: no emulator does.** Read on
+        2026-11-12 against QEMU 11.1.3: `raspi4b` is the only machine near
+        it, its device tree holds no GENET (the Ethernet range is among
+        its eleven `unimplemented-device` regions), no GENET device can be
+        added to `virt`, and `raspi4b` does not boot this kernel's UEFI
+        path in any case. So every step that touches the device is a card
+        round trip, and the plan says, step by step, what check can
+        fail without the board: the pure parts (frame and descriptor
+        layout, the MDIO sequences, the `_CRS` read on the Pi's saved
+        tables) host-tested as `parttable` and `amlscan` are, and the
+        first board step a read-only scan under a boot flag, as `sdscan.rs`
+        was for EMMC2.
       - **Where the driver sits.** `virtio_net.rs` is the DMA-owning half
         in the kernel behind the `NET_*` syscalls, and `netd` holds the
         stack. A second NIC wants the shape `block.rs` gave disks: one
@@ -924,6 +935,14 @@ not yet checked on this tree are marked (predicted).
       - **What the firmware leaves behind.** The Pi's UEFI drives the NIC
         itself for network boot, so the MAC address may be readable from
         it, and the device may arrive mid-use at the exit, as the xHCI did.
+- [ ] **8. A USB Ethernet adapter on the xHCI stack.** Wanted by Hans on
+      2026-11-12, after item 7 and not before it. A class driver on bulk
+      endpoints beside `usb_msd.rs` (CDC-ECM, CDC-NCM or an ASIX chip; the
+      adapter decides which), as a second arm of whatever enum item 7 puts
+      behind the `NET_*` syscalls. It would give Parallels its first NIC,
+      and QEMU has a `usb-net` device (listed by QEMU 11.1.3, not yet tried
+      on the `run-usb-*` rigs), so unlike item 7 it can be tested off the
+      board. Not planned yet.
 
 ## Completed arcs (moved out)
 
