@@ -11,7 +11,37 @@ here actually works today, see [`architecture.md`](architecture.md) and
 
 **Not yet released.** Changes since v0.25.0, drafted as they land.
 
-**A restarted server's children end with it (2026-11-12).**
+**A `cpu` run from another node can take more than five seconds, and ends when its caller is gone (2026-11-12).**
+Two defects, one found while repairing the other. The one on the ledger (the
+review of #437): a caller that vanished with no FIN and no RST, a machine
+switched off, left its command running on the executing machine for good,
+because a run's connection was exempt from the idle reap. `netd` now probes
+a quiet run's caller every five seconds with a TCP keepalive; a live
+caller's answers keep the connection, and one silent for thirty seconds is
+reaped, which ends the command. `netd`'s own dial side answers a probe,
+which it did not. The one found: the export did not acknowledge a run's
+request until its reply, which is held until the command ends. A
+dispatching `netd` retransmits an unacknowledged request eight times and
+then closes its side without a word, so any run from another node that took
+longer than about four and a half seconds had its caller told "cpu: remote
+run failed" while the command ran on with nobody to answer to (5.9 s,
+measured on main). No rig ran one that long between two guests, and a host
+client's TCP retransmits for minutes. The export acknowledges a run's
+request at once now. `make test-run-silent` (new) holds a run open from the
+host for 45 s, and on the two-node pair checks node B keeps its run, reads
+the probes and their answers from a capture, kills node B's QEMU outright,
+and requires the command gone from node A. The review of #449 added three
+things: data sent again is acknowledged again on both sides, so one lost ACK
+does not bring the failure back; the time `netd` spends deaf in a
+synchronous client request is not counted as a caller's silence, since a
+probe's answer swallowed there would end a live caller's run (by reading;
+no rig shows it); and a run
+keeps `netd`'s loop on its own timer. Left as it is: a dispatching `netd`
+gives a run up after thirty seconds without output, and a run's output
+comes only at its end; it then closes with a FIN, and the command is ended
+at once.
+
+**A restarted server's children end with it (2026-11-12, #448).**
 `netd` kills a `cpu` run's command when the run's connection goes, from a
 table a crash or a wedge takes whole. The supervisor then restarted `netd`
 and left every running command behind, holding a task slot with nothing to

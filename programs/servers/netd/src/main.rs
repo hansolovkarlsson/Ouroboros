@@ -121,9 +121,19 @@ const SESSION_MAX: usize = MAX_CONNS - 1;
 /// this long is reaped with a RST: 30 s at 20 ms per tick. This is what bounds
 /// a session whose peer died without a FIN (and, since 2026-09-07, an HTTP or
 /// one-shot 9P connection whose peer never sent a request or never finished
-/// closing - the same leak, which nothing bounded before). A `cpu` run
-/// connection is exempt while its child runs, since neither side speaks then.
+/// closing - the same leak, which nothing bounded before). A `cpu` run's
+/// connection is under it too since 2026-11-12: neither side speaks while
+/// the command runs, so `netd` probes the caller ([`RUN_PROBE_TICKS`]) and a
+/// live one's answers are the segments this timer counts. Until then a run
+/// was exempt, and a caller that vanished with no FIN and no RST left its
+/// command running for good (the review of #437).
 const CONN_IDLE_TICKS: u64 = 1500;
+/// How long a run's connection stays quiet before `netd` probes its caller,
+/// and the least between two probes: 5 s at 20 ms per tick, so a caller that
+/// is there has five probes to answer one of before [`CONN_IDLE_TICKS`]
+/// takes the connection, and a run costs one small segment each way every
+/// five seconds.
+const RUN_PROBE_TICKS: u64 = 250;
 /// Max SACK blocks parsed from one segment's TCP options (RFC 2018 allows up
 /// to 4 in the 40-byte option area, 3 alongside timestamps).
 const MAX_SACK: usize = 4;
@@ -613,9 +623,14 @@ fn serve(packed_mac: u64) -> ! {
         // data unacked (server or dial), use a timeout so we still wake to
         // service the retransmit timer even if a peer has gone silent (no
         // frames); otherwise block indefinitely (the health-ping still wakes us).
+        // A connection carrying a run needs the timer too: its keepalive
+        // probes and its idle reap fire from this loop, and neither side of
+        // a run sends a frame to wake it. Without this they rode the
+        // supervisor's health ping, whose interval is the kernel's to change
+        // (the review of #449).
         let unacked = t.conns
             .iter()
-            .any(|c| matches!(c, Some(c) if c.snd_nxt != c.snd_una))
+            .any(|c| matches!(c, Some(c) if c.snd_nxt != c.snd_una || c.cpu_child != CPU_NONE))
             || t.dials.iter().any(|c| matches!(c, Some(d) if d.state == DialState::Connecting || d.inflight > 0 || (d.state == DialState::Closing && !d.fin_sent)))
             // A remote slot with a request parked needs the timer whatever its
             // state: its SYN and data retransmits, and its deadline, all fire
@@ -674,6 +689,7 @@ fn serve(packed_mac: u64) -> ! {
                     t.conns[i] = None;
                     continue;
                 }
+                probe_run(&mac, t.conns[i].as_mut().unwrap(), now());
                 if reap_idle(&mac, t.conns[i].as_ref().unwrap(), now()) {
                     t.conns[i] = None;
                     continue;
@@ -823,6 +839,28 @@ fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<Tc
     }
 }
 
+/// Time `netd` could not hear is not a run's caller's silence. A client
+/// request handled synchronously (a ping, a name lookup, a fetch: their
+/// waits read frames off the NIC and drop every one that is not their own
+/// reply) can swallow the answer to a keepalive probe, and a user keeping
+/// `netd` in such requests for thirty seconds would have a live caller's run
+/// reaped and its command killed (the review of #449, by reading: a rig
+/// round of back-to-back pings did not bring it about, and passed with this
+/// taken out, so nothing grades it). So the ticks a
+/// request took are given back to every run's `last_rx`, the clock
+/// `probe_run` and `reap_idle` both read: a run is ended for the silence of
+/// its caller while `netd` was listening, and for no other.
+fn credit_deaf(conns: &mut [Option<TcpConn>; MAX_CONNS], deaf: u64) {
+    if deaf == 0 {
+        return;
+    }
+    for c in conns.iter_mut().flatten() {
+        if c.cpu_child != CPU_NONE {
+            c.last_rx = c.last_rx.wrapping_add(deaf);
+        }
+    }
+}
+
 /// Whether a `cpu` run's command has ended: its slot no longer holds it
 /// (killed and reaped, by `kill N` here or a fault), or holds it as a
 /// zombie, exited and waiting to be collected. `false` for no child.
@@ -899,12 +937,16 @@ fn drain_mailbox(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<TcpConn>; 
             let is_request = op == syscall_abi::NETOP_RMOUNT
                 || (syscall_abi::NETOP_KEY_HOLD..=syscall_abi::NETOP_KEY_LIST).contains(&op);
             if is_request {
+                let before = now();
                 handle_client(packed_mac, buf, len, dials, remotes, sessions, auth, pending, held);
+                credit_deaf(conns, now().wrapping_sub(before));
             } else {
                 cpu_child_msg(conns[ci].as_mut().unwrap(), &buf[..len]);
             }
         } else {
+            let before = now();
             handle_client(packed_mac, buf, len, dials, remotes, sessions, auth, pending, held);
+            credit_deaf(conns, now().wrapping_sub(before));
         }
         // A HOLD carried a user's seed, and `buf` is never cleared between
         // messages: a shorter one leaves bytes 16..48 as they were. key_op
@@ -2672,6 +2714,9 @@ struct TcpConn {
     /// The tick (`now()`) of the last segment from the peer; `reap_idle` reads
     /// it.
     last_rx: u64,
+    /// The tick of the last keepalive probe sent on a run's connection
+    /// ([`probe_run`]).
+    probed: u64,
     /// The sequence number of `prefix[0]` for the reply being streamed: what
     /// `rewind_to` and `retransmit_one` map a sequence number back to a buffer
     /// offset against. Recorded at the staging site (the `responded = true`
@@ -2791,10 +2836,13 @@ fn kill_run_child(child: u64) {
 /// What this does not reach: a task the child itself spawned (the kernel has
 /// no kill of a tree), and whatever of the child's is still queued in the
 /// mailbox, which finds no connection and is answered as an unknown request.
-/// Nor a connection that is never freed: a caller that vanishes with no FIN
-/// and no RST is not noticed while its child runs (`reap_idle` exempts it and
-/// nothing is in flight to time out), and a `netd` the supervisor restarts
-/// loses its table without a `Drop`. Both leave the child as before.
+/// A connection that was never freed used to be out of its reach, in two
+/// ways, both closed on 2026-11-12. A caller that vanished with no FIN and no
+/// RST was not noticed while its child ran; the run's connection is probed
+/// now and reaped when nothing answers (`probe_run`, `reap_idle`), which
+/// comes through here. And a `netd` the supervisor restarts loses its table
+/// without a `Drop`; the kernel ends its children with it
+/// (`tasks::end_children_of_last_occupant`).
 ///
 /// What it costs: every way this table frees a connection now ends a
 /// command, the receive path's unauthenticated ones included. A RST is
@@ -3837,6 +3885,7 @@ fn handle_tcp(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, conns: &mut [Option<TcpC
             keyed: None,
             carried: false,
             last_rx: now(),
+            probed: 0,
             data_base: SERVER_ISN.wrapping_add(1),
         };
         send_seg(mac, &c, TCP_SYN | TCP_ACK, true, &[]);
@@ -3907,12 +3956,36 @@ fn reply_pending(c: &TcpConn) -> bool {
     c.prefix_off < c.prefix_len || (c.file && !c.eof)
 }
 
+/// A keepalive probe on a `cpu` run's connection: while its command runs and
+/// nothing is in flight, a peer silent for [`RUN_PROBE_TICKS`] is sent a bare
+/// ACK one sequence number back, a segment no receiver can accept and every
+/// TCP answers with an ACK of its own (RFC 9293 3.8.4, and 3.10.7.4's "send
+/// an acknowledgment in reply" for a segment outside the window). That answer
+/// is a segment from the peer, so it is what `reap_idle` then counts; a
+/// caller that is gone answers nothing and is reaped at `CONN_IDLE_TICKS`,
+/// its command ended by the slot's `Drop`.
+///
+/// Sent only while a child runs: every other connection either has a reply
+/// in flight (the retransmit timer's) or is waiting on the peer to speak,
+/// where silence is the thing the idle reap is for.
+fn probe_run(mac: &[u8; 6], c: &mut TcpConn, now: u64) {
+    if c.cpu_child == CPU_NONE || c.snd_nxt != c.snd_una {
+        return;
+    }
+    if now.wrapping_sub(c.last_rx) <= RUN_PROBE_TICKS || now.wrapping_sub(c.probed) <= RUN_PROBE_TICKS {
+        return;
+    }
+    c.probed = now;
+    send_seg_at(mac, c, c.snd_nxt.wrapping_sub(1), TCP_ACK, &[]);
+}
+
 /// The idle reap: `true` when `c` has had nothing in flight and no segment from
 /// its peer for `CONN_IDLE_TICKS`, in which case a RST has been sent and the
 /// caller frees the slot. Unacked data is the retransmit timer's business, not
-/// this one's, and a running `cpu` child is exempt (see `CONN_IDLE_TICKS`).
+/// this one's. A running `cpu` child is no exemption (see `CONN_IDLE_TICKS`):
+/// its caller is probed, and freeing the slot ends the child (`Drop`).
 fn reap_idle(mac: &[u8; 6], c: &TcpConn, now: u64) -> bool {
-    if c.cpu_child != CPU_NONE || c.snd_nxt != c.snd_una {
+    if c.snd_nxt != c.snd_una {
         return false;
     }
     // NOTHING PROBES A SHUT WINDOW, so a reply stalled on one is reaped here
@@ -4025,6 +4098,14 @@ fn handle_conn_segment(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, c: &mut TcpConn
     // next request - which may be in this very segment.
     session_reset_if_done(c);
 
+    // Data this side already took, sent again: the peer has not seen it
+    // acknowledged. Asked before the arm below moves `rcv_nxt`, answered
+    // after it. A run's request is the case that matters: its one ACK may be
+    // lost, no reply follows to carry another until the command ends, and the
+    // caller's `netd` closes its side after eight unanswered copies (the
+    // review of #449).
+    let again = seg.data_len > 0 && seq_gt(c.rcv_nxt, seg.seq);
+
     // The request (may arrive with the handshake ACK, or just after) -> set up
     // the response. Only once per request; the streaming itself is driven by
     // pump_send. Still ONE SEGMENT per request, session or not: a request split
@@ -4055,9 +4136,27 @@ fn handle_conn_segment(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, c: &mut TcpConn
                 send_seg(mac, c, TCP_RST | TCP_ACK, false, &[]);
                 return true;
             }
+            // A run's request is acknowledged now. Every other request is
+            // acknowledged by its reply's first segment, which the next pump
+            // sends; a run's reply is held until its command ends, and until
+            // 2026-11-12 so was the ACK. The caller's `netd` retransmits an
+            // unacknowledged request eight times, half a second apart, and
+            // then closes its side without a word (`DIAL_DATA_TRIES`), so a
+            // command that took over about four and a half seconds had its
+            // caller told "cpu: remote run failed" while it ran on here with
+            // nobody to answer to (measured on main the day this went in:
+            // 5.9 s, and the command still in `ps` after). The host clients
+            // never showed it: a real TCP retransmits for minutes.
+            if c.cpu_child != CPU_NONE {
+                send_seg(mac, c, TCP_ACK, false, &[]);
+            }
         } else {
             start_response(c, request);
         }
+    }
+
+    if again {
+        send_seg(mac, c, TCP_ACK, false, &[]);
     }
 
     // Note: the actual sending (pump_send) is NOT done here. It runs once per
@@ -6229,6 +6328,24 @@ fn dial_on_segment<const S: usize, const R: usize, const H: usize, const K: usiz
                 }
             }
             DialState::Established | DialState::Closing => {
+                // A segment that starts before what is expected next: a
+                // keepalive probe in either of its shapes (no data, or one
+                // byte, one sequence number back: RFC 1122 4.2.3.6), or data
+                // already taken and sent again. Answered with an ACK, which
+                // is all its sender wants: the far export probes the caller
+                // of a `cpu` run while its command runs (`probe_run`) and
+                // ends the run when nothing answers, and a real TCP with
+                // keepalive on gives a silent peer up. Until 2026-11-12 this
+                // side answered nothing to any of them. Segments AHEAD of
+                // what is expected are still not answered: that rule belongs
+                // to the receive-path hardening on the ledger
+                // (docs/ROADMAP.md). The answer is itself in sequence, so two
+                // ends cannot answer each other for ever.
+                if seq_gt(c.rcv_nxt, s.seq) && s.flags & TCP_SYN == 0 {
+                    if let Some(nn) = build_tcp(mac, &c.peer_mac, &c.peer_ip, c.src_port, c.peer_port, c.snd_nxt, c.rcv_nxt, TCP_ACK, false, &[], &mut out) {
+                        let _ = send(&out[..nn]);
+                    }
+                }
                 // ACK processing: advance snd_una, drop acked send data.
                 if seq_gt(s.ack, c.snd_una) {
                     let acked = s.ack.wrapping_sub(c.snd_una) as usize;
