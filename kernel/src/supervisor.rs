@@ -244,6 +244,11 @@ pub fn restart(slot: usize) {
     let Some(e) = reg.iter_mut().find(|e| e.slot == Some(slot)) else {
         return;
     };
+    // The dead server's children go with it, whether or not a fresh one
+    // comes up below (no kept image, past the cap): they answered to a
+    // table that is gone. Before `install_task`, which gives the slot the
+    // new generation this is found by the old one of.
+    tasks::end_children_of_last_occupant(slot);
     if e.image_len == 0 {
         console::println!("Ouroboros kernel: no kept image for server slot {slot} - not restarting");
         return;

@@ -11,7 +11,22 @@ here actually works today, see [`architecture.md`](architecture.md) and
 
 **Not yet released.** Changes since v0.25.0, drafted as they land.
 
-**A `cpu` run ends when its command has, and `netd` never waits for it (2026-11-12).**
+**A restarted server's children end with it (2026-11-12).**
+`netd` kills a `cpu` run's command when the run's connection goes, from a
+table a crash or a wedge takes whole. The supervisor then restarted `netd`
+and left every running command behind, holding a task slot with nothing to
+answer to (the review of #437). The fresh `netd` cannot find them: it has no
+record and cannot name its predecessor. The kernel can: it keeps every
+task's parent by identity, and a slot's generation stands until the slot is
+filled again. `supervisor::restart`, which all three teardown paths call,
+now ends the last occupant's direct children first, whether or not a fresh
+server comes up. A child on another core is ended by that core, and one the
+kernel is about to return into is ended at this core's next entry.
+`make test-server-children` (new) boots a `netd` built to fault or spin on
+request and grades three rounds of it, on one core and on four. A task such
+a child spawned is not ended: the kernel ends no tree.
+
+**A `cpu` run ends when its command has, and `netd` never waits for it (2026-11-12, #447).**
 On the executing machine a run ended on the command's own empty
 end-of-stream message, at which `netd` called a blocking `WAIT`. Two
 defects sat in that (the review of #437). A command that sent an empty

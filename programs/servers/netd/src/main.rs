@@ -193,6 +193,9 @@ pub extern "C" fn _start() -> ! {
 }
 
 fn main() -> ! {
+    if cfg!(feature = "restart-rig") {
+        log(b"netd: the restart rig's build: a ping of 192.0.2.250 faults it, of 192.0.2.251 spins it\r\n");
+    }
     log(b"netd: network server ready\r\n");
     let packed_mac = syscall(syscall_abi::NET_MAC, 0);
     if packed_mac == syscall_abi::NET_ERROR {
@@ -1177,6 +1180,21 @@ fn handle_ping(packed_mac: u64, target_packed: u64) -> u64 {
         (target_packed >> 16) as u8,
         (target_packed >> 24) as u8,
     ];
+    // The restart rig's build alone (`restart-rig`, never the shipped netd):
+    // the two ways the supervisor comes to restart a server, on request. The
+    // addresses are TEST-NET-1's, which no host answers at.
+    if cfg!(feature = "restart-rig") {
+        if target == [192, 0, 2, 250] {
+            // SAFETY: none, by design: a read of an address no task maps,
+            // which the kernel answers by ending this task.
+            unsafe { core::ptr::read_volatile(8 as *const u8) };
+        }
+        if target == [192, 0, 2, 251] {
+            loop {
+                core::hint::spin_loop();
+            }
+        }
+    }
 
     let Some(target_mac) = arp_resolve(&mac, &target) else {
         return syscall_abi::NET_PING_NO_ARP;

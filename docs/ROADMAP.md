@@ -3838,7 +3838,11 @@ would otherwise silently shrink into looking like nothing was ever found.
       exempts a connection with a live child, nothing is in flight for the
       RTO, and there is no keepalive, so the slot and the child are held
       for good), and every child of a `netd` the supervisor restarts, whose
-      table goes without a `Drop`. **A new cost, accepted by Hans the same day:** the
+      table goes without a `Drop` (**the second FIXED 2026-11-12**: the
+      kernel ends a torn-down server's direct children before the fresh
+      one goes in, found by the parent link it already kept,
+      `make test-server-children`; a task such a child spawned is still
+      not ended). **A new cost, accepted by Hans the same day:** the
       blind RST and the duplicate SYN above used to lose a run's output and
       now stop the command midway, a half-written file where there was a
       whole one; and a peer that half-closes and reads on has its command
