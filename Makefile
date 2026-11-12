@@ -2320,10 +2320,12 @@ test-run-orphan: image-ext2
 # A `cpu` run's command ends when its caller goes silent, and not before
 # (scripts/test-run-silent.py): a host caller that holds its connection open
 # and says nothing for 45 s keeps its command; on the two-node ext2 pair node
-# B's `cpu` keeps its command on node A for 45 s, and once B's QEMU is killed
+# B's `cpu` must still hold its run 20 s in, node A's keepalive probes and
+# node B's answers must be in the capture, and once B's QEMU is killed
 # outright (no FIN, no RST) A must end the command within 45 s more. Minutes,
 # so not in `make test`. Run it whenever netd's probe_run, reap_idle,
-# CONN_IDLE_TICKS, RUN_PROBE_TICKS, dial_on_segment or TcpConn's Drop changes.
+# CONN_IDLE_TICKS, RUN_PROBE_TICKS, RUN_DEADLINE_TICKS, DIAL_DATA_TRIES,
+# dial_on_segment, handle_conn_segment's request arm or TcpConn's Drop changes.
 test-run-silent: image-ext2 images-2vm-ext2
 	python3 scripts/test-run-silent.py
 

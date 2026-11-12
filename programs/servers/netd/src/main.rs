@@ -2805,10 +2805,13 @@ fn kill_run_child(child: u64) {
 /// What this does not reach: a task the child itself spawned (the kernel has
 /// no kill of a tree), and whatever of the child's is still queued in the
 /// mailbox, which finds no connection and is answered as an unknown request.
-/// Nor a connection that is never freed: a caller that vanishes with no FIN
-/// and no RST is not noticed while its child runs (`reap_idle` exempts it and
-/// nothing is in flight to time out), and a `netd` the supervisor restarts
-/// loses its table without a `Drop`. Both leave the child as before.
+/// A connection that was never freed used to be out of its reach, in two
+/// ways, both closed on 2026-11-12. A caller that vanished with no FIN and no
+/// RST was not noticed while its child ran; the run's connection is probed
+/// now and reaped when nothing answers (`probe_run`, `reap_idle`), which
+/// comes through here. And a `netd` the supervisor restarts loses its table
+/// without a `Drop`; the kernel ends its children with it
+/// (`tasks::end_children_of_last_occupant`).
 ///
 /// What it costs: every way this table frees a connection now ends a
 /// command, the receive path's unauthenticated ones included. A RST is
@@ -4093,6 +4096,20 @@ fn handle_conn_segment(mac: &[u8; 6], frame: &[u8], seg: &TcpIn, c: &mut TcpConn
                 // keys, is freed by the caller.
                 send_seg(mac, c, TCP_RST | TCP_ACK, false, &[]);
                 return true;
+            }
+            // A run's request is acknowledged now. Every other request is
+            // acknowledged by its reply's first segment, which the next pump
+            // sends; a run's reply is held until its command ends, and until
+            // 2026-11-12 so was the ACK. The caller's `netd` retransmits an
+            // unacknowledged request eight times, half a second apart, and
+            // then closes its side without a word (`DIAL_DATA_TRIES`), so a
+            // command that took over about four and a half seconds had its
+            // caller told "cpu: remote run failed" while it ran on here with
+            // nobody to answer to (measured on main the day this went in:
+            // 5.9 s, and the command still in `ps` after). The host clients
+            // never showed it: a real TCP retransmits for minutes.
+            if c.cpu_child != CPU_NONE {
+                send_seg(mac, c, TCP_ACK, false, &[]);
             }
         } else {
             start_response(c, request);

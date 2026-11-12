@@ -21,7 +21,11 @@ guest's `ps`.
 **A guest caller**, the two-node ext2 pair on a socket link: node B's shell
 runs `cpu 10.0.2.10:564 recv` against node A. The probes are answered by
 node B's `netd`, its dial side, which until the same day answered nothing to
-one. A dispatching `netd` gives a run up itself after thirty seconds without
+one, and by then had closed its side anyway: the export did not acknowledge
+a run's request until its reply, so node B retransmitted it for four and a
+half seconds, gave up, and told its user "cpu: remote run failed" while the
+command ran on (measured on main: 5.9 s). So twenty seconds in, node B must
+not have said that. A dispatching `netd` gives a run up itself after thirty seconds without
 output (`RUN_DEADLINE_TICKS`, and a run's output comes only at its end), so
 "kept for forty-five seconds" cannot be asked of this caller: whichever side
 ends the run, `ps` shows the same. What is asked, twenty seconds in, is read
@@ -202,6 +206,8 @@ def guest_caller():
         still = ps(a)
         check(still == running and re.findall(KILLED, a.transcript()) == [],
               f"guest caller: {PROBED} s in, with node B alive, the command still runs and nothing was killed: slots {still}")
+        said = re.findall(r"cpu: [^\r\n]*", b.transcript())
+        check(said == [], f"guest caller: {PROBED} s in, node B's `cpu` has not given the run up: it said {said}")
         sent, answered = probes(PCAP)
         check(sent >= 2, f"guest caller: node A probed its quiet caller: {sent} probe(s) in its NIC's capture")
         check(answered >= sent - 1 and answered >= 1,
@@ -231,7 +237,7 @@ def guest_caller():
 def main():
     host_caller()
     guest_caller()
-    want = 4 + 10
+    want = 4 + 11
     if checks != want and not failed:
         print(f"[FAIL] {checks} checks ran, want {want}", flush=True)
         return 1

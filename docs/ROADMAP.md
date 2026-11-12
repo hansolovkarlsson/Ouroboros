@@ -3837,7 +3837,22 @@ would otherwise silently shrink into looking like nothing was ever found.
       child of a caller that vanishes with no FIN and no RST (`reap_idle`
       exempts a connection with a live child, nothing is in flight for the
       RTO, and there is no keepalive, so the slot and the child are held
-      for good), and every child of a `netd` the supervisor restarts, whose
+      for good; **FIXED 2026-11-12**: a run's connection is probed every
+      five seconds of quiet with a TCP keepalive, a live caller's answers
+      keep it, and one silent for thirty seconds is reaped, which ends the
+      child; the dial side answers a probe, which it did not;
+      `make test-run-silent`. **Found on the way, and fixed with it:** the
+      export did not acknowledge a run's request until its reply, so a
+      dispatching `netd` retransmitted it eight times, closed its side with
+      no word after about 4.5 s, and told its user "cpu: remote run failed"
+      while the command ran on: every cross-node run longer than that, on
+      main at 5.9 s. No rig ran one that long from a guest, and the host
+      clients' own TCP retransmits for minutes. **Left as it is:** a
+      dispatching `netd` gives a run up after 30 s without output
+      (`RUN_DEADLINE_TICKS`), and a run's output comes only at its end, so
+      a run from another node cannot take longer than that; and when it
+      gives one up it still closes with no FIN and no RST, which the
+      executing side now notices by its probes, up to 30 s later), and every child of a `netd` the supervisor restarts, whose
       table goes without a `Drop` (**the second FIXED 2026-11-12**: the
       kernel ends a torn-down server's direct children before the fresh
       one goes in, found by the parent link it already kept,

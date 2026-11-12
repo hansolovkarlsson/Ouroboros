@@ -221,6 +221,7 @@ make test-call-interrupt      # an interrupted call's late answer goes nowhere
 make test-held-keys           # six driven QEMU boots of the held user keys
 make test-run-callback        # a `cpu` run's /host callbacks served while the run is in flight, and only then
 make test-run-orphan          # a `cpu` run's command dies with the run's connection, closed by a FIN or a RST
+make test-run-silent          # a `cpu` run's command ends when its caller goes silent (a node killed outright), and not while the caller lives
 make test-server-children     # a restarted server's children end with it: netd faulted and spun on request, its `cpu` command ended each time
 make test-cred-client         # the client sends a user credential: served while the user is logged in, refused and its session closed after
 make test-no-identity         # an export with no /etc/cluster/id runs nothing, in either signed format
