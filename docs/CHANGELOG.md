@@ -11,6 +11,17 @@ here actually works today, see [`architecture.md`](architecture.md) and
 
 **Not yet released.** Changes since v0.25.0, drafted as they land.
 
+**The Pi 4's Ethernet is read from its ACPI tables, and networking on the Pi has a plan (2026-11-12).**
+Hans chose the on-board NIC, Broadcom GENET v5, over a USB adapter, which
+becomes a later item. The plan is `docs/roadmap/roadmap-pi-net.md`. No QEMU
+machine models GENET (`raspi4b` leaves its range unimplemented and does not
+boot this kernel), so the driver's logic will be a pure crate tested on the
+host against a model, with the board as the only foreign observer. Step 1
+is in: `amlscan` reads a third `_CRS` method shape, a buffer named inside
+the method and returned, which is how the Pi's DSDT declares `ETH0`
+(`_HID "BCM6E4E"`), and gives its registers at `0xFD580000`, 64 KB, and
+INTID 189 from the board's dumped table. No kernel code calls it yet.
+
 **A `cpu` run from another node can take more than five seconds, and ends when its caller is gone (2026-11-12, #449).**
 Two defects, one found while repairing the other. The one on the ledger (the
 review of #437): a caller that vanished with no FIN and no RST, a machine

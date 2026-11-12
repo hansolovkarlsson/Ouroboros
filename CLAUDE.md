@@ -352,7 +352,8 @@ docs/                every document is annotated in full in `docs/README.md` - r
                      roadmap-ctrl-c.md (Ctrl-C as a key for a raw program, with Ctrl+\ as the way out)
                      roadmap-smp.md (multi-core: the end of the single-core argument, the arc from 2026-10-12)
                      roadmap-one-disk.md (one disk for boot and root: the ESP first, the root beside it, the arc after multi-core)
-                     and roadmap-sd-card.md (the SD card as the Pi's only disk: an SDHCI driver, QEMU first, then EMMC2)
+                     roadmap-sd-card.md (the SD card as the Pi's only disk: an SDHCI driver, QEMU first, then EMMC2)
+                     and roadmap-pi-net.md (networking on the Pi 4: the on-board GENET, which no emulator models)
   work-journal/      chronological dev-log, one file per day plus an index README - a lighter companion to CHANGELOG.md
   testing/           testing-qemu.md (every `make run-*` target, the test images, the 9P host peers, the two-node
                      cluster rig), testing-parallels.md and testing-pi4.md (the real-hardware guides, sharing one
@@ -475,8 +476,8 @@ regex/               a small POSIX-ERE engine behind grep. An explicit backtrack
 parttable/           partition tables, read: the MBR and GPT parsing (both CRCs, the backup header, checked bounds), the partition list
                      with root types, and the boot-disk matcher, through a read-sector closure; the ONE copy, which the kernel's
                      bootdisk.rs and fsd's partition.rs both call, host-tested in make test
-amlscan/             the devices an ACPI table declares present by _HID (virtio-mmio's "LNRO0005", the Pi's EMMC2 "BRCME88C"), their _CRS
-                     registers and interrupt, by a bounded walk of the AML that reads two method shapes exactly; the kernel probes no
+amlscan/             the devices an ACPI table declares present by _HID (virtio-mmio's "LNRO0005", the Pi's EMMC2 "BRCME88C" and Ethernet
+                     "BCM6E4E"), their _CRS registers and interrupt, by a bounded walk of the AML that reads three method shapes exactly; the kernel probes no
                      other virtio-mmio address. Host-tested in make test, on the Pi's own tables too
 heldkeys/            netd's held user keys: the table, whose key signs for a parked request, and when a run sent under one ends; liveness
                      is passed in, so the rules that turn on a login dead and not yet reaped run on the host. netd is the one caller
