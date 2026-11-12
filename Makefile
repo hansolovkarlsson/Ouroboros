@@ -36,6 +36,11 @@ FSD_BIN      := target/$(USER_TARGET)/release/fsd.bin
 FSD_GATE_DIR := target/disk-gate
 FSD_GATE_ELF := $(FSD_GATE_DIR)/$(USER_TARGET)/release/fsd
 FSD_GATE_BIN := $(FSD_GATE_DIR)/$(USER_TARGET)/release/fsd.bin
+# netd built for test-server-children alone (netd's `restart-rig` feature),
+# in a target dir of its own for the reason FSD_GATE_DIR has one.
+NETD_RESTART_DIR := target/restart-rig
+NETD_RESTART_ELF := $(NETD_RESTART_DIR)/$(USER_TARGET)/release/netd
+NETD_RESTART_BIN := $(NETD_RESTART_DIR)/$(USER_TARGET)/release/netd.bin
 UPPER_ELF    := target/$(USER_TARGET)/release/upper
 UPPER_BIN    := target/$(USER_TARGET)/release/upper.bin
 COND_ELF     := target/$(USER_TARGET)/release/cond
@@ -464,7 +469,7 @@ ifeq ($(PROFILE),release)
 CARGO_FLAGS += --release
 endif
 
-.PHONY: all build check-site srcid-begin shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin syscost-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin fpprobe-bin coreprobe-bin stageprobe-bin cursorprobe-bin dirprobe-bin mountprobe-bin stackprobe-bin openprobe-bin vtprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cfidwait-bin cbig-bin cwrite-bin cpico-bin cmem-bin cmalloc-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin ccreat-bin cenv-bin cenvh-bin cclock-bin cwinsz-bin ctermios-bin cpoll-bin cpp-bin edit-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 disk run-disk run-sd images-2vm images-2vm-ext2 parallels-hdd sdcard stick bootstick run-bootstick release test check-relocs check-stack-chains check-xhci-barriers check-statics check-disk-handle check-doc-pointers check-link-layout check-picolibc test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-call-interrupt test-held-keys test-run-callback test-run-orphan test-cred-client test-no-identity test-heap test-malloc test-fpsimd test-spawn-owner test-spawn-size test-proc-cpus test-stack-free test-sd test-boot-partition test-bootstick test-sdcard test-cond-vt test-nav-keys test-cwinsz test-kbd-queue test-kbd-mode test-kbd-cut test-ctermios test-cpoll test-smp measure-syscost test-listing-walk test-spawn-reads test-write-walk test-stale-cursor test-grow-dir test-edit test-cargs test-cerrno test-cenv test-cclock test-cfenv test-include test-cpp test-unmount test-mount-points test-crename test-mv-into test-fat-link test-mount-gate test-probe-ioerr test-blank-disk test-volume-bound test-ext2-blocks test-long-set test-disk-gate fsd-disk-gate-bin test-valid-length test-exfat-names test-fat32-names test-fat-extflags test-mv-undo test-dir-scan test-free-chain test-alloc-batch test-batch-refused clean
+.PHONY: all build check-site srcid-begin shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin netd-bin accountd-bin args-bin echo-bin uptime-bin syscost-bin clear-bin ls-bin cat-bin mkdir-bin rmdir-bin touch-bin rm-bin cp-bin mv-bin writeat-bin chmod-bin chown-bin tree-bin pwd-bin printenv-bin rdprobe-bin fpprobe-bin coreprobe-bin stageprobe-bin cursorprobe-bin dirprobe-bin mountprobe-bin stackprobe-bin openprobe-bin vtprobe-bin id-bin passwd-bin useradd-bin groupadd-bin usermod-bin clusterkey-bin chello-bin cdemo-bin cfile-bin cleak-bin cfidhold-bin nsdemo-bin cremote-bin cfidwait-bin cbig-bin cwrite-bin cpico-bin cmem-bin cmalloc-bin crename-bin cfstat-bin cargs-bin cargsh-bin cerrno-bin ccreat-bin cenv-bin cenvh-bin cclock-bin cwinsz-bin ctermios-bin cpoll-bin cpp-bin edit-bin write-bin readkey-bin more-bin send-bin recv-bin selftest-bin bootid-bin edtest-bin keyprobe-bin man-bin ping-bin resolve-bin fetch-bin dial-bin serve-bin wc-bin grep-bin head-bin sort-bin esp run run-virtio-console run-usb-kbd run-usb-multi run-usb-hub run-gicv3 image run-image run-image-9p run-image-9p-client run-image-2vm-a run-image-2vm-b run-image-2vm-ext2-a run-image-2vm-ext2-b image-gpt run-image-gpt image-exfat run-image-exfat image-ext2 run-image-ext2 disk run-disk run-sd images-2vm images-2vm-ext2 parallels-hdd sdcard stick bootstick run-bootstick release test check-relocs check-stack-chains check-xhci-barriers check-statics check-disk-handle check-doc-pointers check-link-layout check-picolibc test-parallels test-keyboard-chain test-usb-hub image-stall test-early-fault run-el2 test-el1-drop test-reentrant-session test-async-rmount test-call-interrupt test-held-keys test-run-callback test-run-orphan test-cred-client test-no-identity test-heap test-malloc test-fpsimd test-spawn-owner test-spawn-size test-proc-cpus test-stack-free test-sd test-boot-partition test-bootstick test-sdcard test-cond-vt test-nav-keys test-cwinsz test-kbd-queue test-kbd-mode test-kbd-cut test-ctermios test-cpoll test-smp measure-syscost test-listing-walk test-spawn-reads test-write-walk test-stale-cursor test-grow-dir test-edit test-cargs test-cerrno test-cenv test-cclock test-cfenv test-include test-cpp test-unmount test-mount-points test-crename test-mv-into test-fat-link test-mount-gate test-probe-ioerr test-blank-disk test-volume-bound test-ext2-blocks test-long-set test-disk-gate fsd-disk-gate-bin netd-restart-rig-bin test-server-children test-valid-length test-exfat-names test-fat32-names test-fat-extflags test-mv-undo test-dir-scan test-free-chain test-alloc-batch test-batch-refused clean
 
 # Overridable by `make test-parallels VM_NAME=... CMDS=... BOOT_WAIT=...`.
 VM_NAME     ?= Ouroboros
@@ -513,6 +518,12 @@ pong-bin:
 fsd-bin:
 	cargo build -p fsd --target $(USER_TARGET) --release
 	"$(OBJCOPY)" --strip-all $(FSD_ELF) $(FSD_BIN)
+
+# The restart rig's netd (see NETD_RESTART_DIR): staged by
+# test-server-children.py on a copy of esp.img, never by `esp`.
+netd-restart-rig-bin:
+	cargo build -p netd --target $(USER_TARGET) --release --features restart-rig --target-dir $(NETD_RESTART_DIR)
+	"$(OBJCOPY)" --strip-all $(NETD_RESTART_ELF) $(NETD_RESTART_BIN)
 
 # The disk-gate rig's fsd (see FSD_GATE_DIR): staged by test-long-set.py
 # --disk-gate on a copy of esp.img, never by `esp`.
@@ -2306,6 +2317,19 @@ test-run-callback: image-ext2
 test-run-orphan: image-ext2
 	python3 scripts/test-run-orphan.py
 
+# A restarted server's children end with it (scripts/test-server-children.py):
+# one driven boot of a copy of esp.img whose netd is the `restart-rig` build,
+# which a ping of one address faults and of another spins. Three rounds: the
+# host dispatches a `cpu` command and keeps its connection, the guest pings,
+# the supervisor restarts netd, and the kernel must end the command's task
+# with it, by name, the command gone from `ps` and a fresh run served.
+# Minutes, so not in `make test`. Run it whenever supervisor::restart,
+# tasks::end_children_of_last_occupant, the parent link (PARENTS, set_parent),
+# issue_generation, kill_task, end_if_doomed or a path that tears a server
+# down (the EL0 fault handler, the tick's wedge arm) changes.
+test-server-children: image netd-restart-rig-bin
+	NETD_RESTART_BIN=$(NETD_RESTART_BIN) python3 scripts/test-server-children.py
+
 # netd's client sends a user credential (step 8 of docs/roadmap/roadmap-user-keys.md,
 # scripts/test-cred-client.py): on the two-node ext2 pair, `user` logged in on B
 # is served at A by a path verb, a keyed session and `cpu`; after the logout, or
@@ -3109,6 +3133,10 @@ test:
 	@# fsd.bin, so it cannot touch the shipped one (the review of #371).
 	@echo "== cargo check -p fsd --features disk-gate-rig"
 	@cargo check -q -p fsd --target $(USER_TARGET) --release --features disk-gate-rig --target-dir $(FSD_GATE_DIR) || exit 1
+	@# netd's restart-rig feature (test-server-children's build), for the
+	@# same reason.
+	@echo "== cargo check -p netd --features restart-rig"
+	@cargo check -q -p netd --target $(USER_TARGET) --release --features restart-rig --target-dir $(NETD_RESTART_DIR) || exit 1
 	@# The host 9P peer's docstring lists which verbs it serves, and nothing
 	@# compared that prose to its dispatch chain - so when a range test silently
 	@# swallowed the five fid verbs, the prose went on claiming otherwise. This

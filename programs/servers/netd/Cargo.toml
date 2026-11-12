@@ -16,6 +16,14 @@ clusterkeys = { path = "../../../clusterkeys" }
 # The held user keys' table and rules, host-tested; netd supplies liveness.
 heldkeys = { path = "../../../heldkeys" }
 
+# test-server-children's build alone (`make test-server-children`): a ping of
+# one address makes netd fault and of another makes it spin, so a rig can
+# have the supervisor restart netd at a moment it chooses, which no request
+# to the shipped netd does. Built into target/restart-rig, apart from the
+# shipped netd.bin, and it says so at startup.
+[features]
+restart-rig = []
+
 [[bin]]
 name = "netd"
 path = "src/main.rs"

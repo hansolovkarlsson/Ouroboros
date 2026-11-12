@@ -1698,8 +1698,9 @@ static DELEGATED_SEND: [AtomicU64; NUM_TASKS] =
 /// parent exited and whose slot was reused does not acquire a stranger as its
 /// parent - the same reason `SENDER_TASK` exists.
 ///
-/// The one consumer today is [`may_delegate`]: authority over a task's own
-/// direct children is what lets a nested shell wire its children's pipelines
+/// Two consumers. [`end_children_of_last_occupant`] ends a torn-down
+/// server's children by it (since 2026-11-12). [`may_delegate`]: authority
+/// over a task's own direct children is what lets a nested shell wire its children's pipelines
 /// and hand them the network right it was handed, without any task ever being
 /// able to give a right to a stranger. It is also the primitive the owner-less
 /// `WAIT` and `KILL` and the pipeline teardown are waiting on
@@ -1737,6 +1738,68 @@ pub(crate) fn is_child_of(child: usize, parent: usize) -> bool {
     // The 0 that PARENTS holds for "no parent" matches nothing: see
     // occupant_is for why.
     child < NUM_TASKS && occupant_is(parent, PARENTS[child].load(Ordering::Relaxed))
+}
+
+/// End every task the LAST occupant of `slot` spawned: for a supervised
+/// server that has just been torn down, called by `supervisor::restart`
+/// before the fresh one goes in. Returns how many it ended.
+///
+/// A server's children are its own business: `netd` spawns a `cpu` run's
+/// command, holds the connection it answers to in a table, and kills the
+/// command when that connection goes (`TcpConn`'s `Drop`). A crash or a
+/// wedge takes the table without any `Drop`, and until 2026-11-12 the
+/// commands ran on with nothing to answer to and nothing to collect them,
+/// each holding a task slot (the review of #437). The fresh server cannot
+/// find them: it has no record, and its predecessor's identity is not one
+/// it can name. The kernel can, since every task's parent is kept by
+/// identity ([`PARENTS`]) and a slot's generation stands until the slot is
+/// filled again ([`issue_generation`]), so the identity of the occupant just
+/// torn down is still spellable here though [`task_id_of`] no longer
+/// answers for it.
+///
+/// Direct children only, as the parent link is: a task a child spawned is
+/// its child's, and the kernel ends no tree. A child that has exited and
+/// not been collected is collected, since the server that would have is
+/// gone. One running on another core is ended by that core
+/// ([`kill_task`]). One that is THIS core's current task cannot be torn
+/// down from under the `eret` that returns into it, so it is marked as a
+/// task another core asked to end, which [`end_if_doomed`] honours at this
+/// core's next entry, a tick away at most. Its line there still says "as
+/// another core asked", which `test-smp` reads to the letter; the line
+/// printed here, first, says what did ask.
+///
+/// The caller holds the kernel lock and rebuilds the tables after, as it
+/// already does for the server's own region.
+pub(crate) fn end_children_of_last_occupant(slot: usize) -> usize {
+    if slot >= NUM_TASKS {
+        return 0;
+    }
+    let parent = (GENERATIONS[slot].load(Ordering::Relaxed) << syscall_abi::TASK_ID_SLOT_BITS) | slot as u64;
+    let mut ended = 0;
+    for child in TaskIndex::all().filter(|c| c.is_spawnable()) {
+        let c = child.index();
+        if PARENTS[c].load(Ordering::Relaxed) != parent {
+            continue;
+        }
+        let Some(id) = task_id_of(c) else {
+            continue; // the slot is empty: a child long gone
+        };
+        if try_reap(c).is_some() {
+            crate::console::println!("Ouroboros kernel: task {c} had exited, collected: server slot {slot}, which spawned it, is gone");
+        } else if child == current_index() {
+            DOOMED[c].store(id, Ordering::Relaxed);
+            crate::console::println!("Ouroboros kernel: task {c} ends at this core's next entry: server slot {slot}, which spawned it, is gone");
+        } else {
+            match kill_task(child) {
+                Ended::Now => crate::console::println!("Ouroboros kernel: task {c} ended: server slot {slot}, which spawned it, is gone"),
+                Ended::OnCore(core) => crate::console::println!(
+                    "Ouroboros kernel: task {c} ended (running on core {core}, which ends it): server slot {slot}, which spawned it, is gone"
+                ),
+            }
+        }
+        ended += 1;
+    }
+    ended
 }
 
 /// Whether `id` (a packed identity, see [`task_id_of`]) still names the

@@ -221,6 +221,7 @@ make test-call-interrupt      # an interrupted call's late answer goes nowhere
 make test-held-keys           # six driven QEMU boots of the held user keys
 make test-run-callback        # a `cpu` run's /host callbacks served while the run is in flight, and only then
 make test-run-orphan          # a `cpu` run's command dies with the run's connection, closed by a FIN or a RST
+make test-server-children     # a restarted server's children end with it: netd faulted and spun on request, its `cpu` command ended each time
 make test-cred-client         # the client sends a user credential: served while the user is logged in, refused and its session closed after
 make test-no-identity         # an export with no /etc/cluster/id runs nothing, in either signed format
 make test-heap                # the user heap on a booted image
@@ -398,7 +399,7 @@ kernel/              every file annotated in full in `docs/source-map.md`; each 
   src/gicv3.rs       GICv3 backend: redistributor + ICC_* sysreg CPU interface - confirmed on QEMU and Parallels
   src/timer.rs       ARM generic timer (EL1 physical, PPI 14 / INTID 30), TICK_INTERVAL_MS
   src/loader.rs      INIT.CFG + the boot programs off the ESP; ELF64 parsing + R_AARCH64_RELATIVE processing
-  src/supervisor.rs  server supervision: restart a crashed or wedged server from its boot image, per-boot cap
+  src/supervisor.rs  server supervision: restart a crashed or wedged server from its boot image, per-boot cap; its children end with it
   src/synccell.rs    SyncCell<T>, the one mutable-static wrapper: the single-core argument stated once, not per cell
   src/lock.rs        the kernel lock (multi-core step 4(a)): one core in the kernel at a time, taken at every resumable entry's
                      Rust half and released before its eret, owned by core index, never reentrant (a re-entry halts with a line)
