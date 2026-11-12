@@ -2394,13 +2394,16 @@ test-stack-free: image
 # reads it, the kernel cannot) and disk.img on QEMU's sdhci-pci, as a
 # standard-capacity card and a 4 GiB high-capacity one, two boots each: the
 # root mounted from the card, a file written and read back across a power
-# off, partition and format refused over the firmware partition and its
-# table, their bytes unchanged; a fifth boot, a card with no table entries,
+# off, the firmware partition mounted read-only with its reason and a write
+# there refused as read-only, erase and partition refused at the table and
+# said as read-only, the bytes unchanged; a fifth boot, a card with no table entries,
 # kept whole; a sixth, the card read beside a virtio disk installed first;
 # a seventh, the card as the boot disk installed ahead of a USB stick that
 # is not; an eighth, a boot card with no root of its own (as `make sdcard`
-# stages it), which gives way to the stick; and a ninth, a boot card whose
-# typed root holds no filesystem, which gives way too.
+# stages it), which gives way to the stick; a ninth, a boot card whose
+# typed root holds no filesystem, which gives way too; and a tenth, the
+# firmware partition as the card's only one, where format targets it and
+# says read-only.
 test-sd: disk
 	python3 scripts/test-sd.py
 

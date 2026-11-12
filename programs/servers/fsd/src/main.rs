@@ -254,7 +254,7 @@ fn try_mount(device: &disk::Device, mounts: &mut [Option<vfs::Mount>; MAX_MOUNTS
             // A partition tried before it would not read: said, since what
             // it held is not known (a failing disk, not an empty partition).
             let unread = if unread { "fsd: a partition before it would not read (disk I/O error)\r\n" } else { "" };
-            let ([hro, hwhy, hend], [ro, why, end]) = read_only_lines(&mounted);
+            let [[hro, hwhy, hend], [kro, kwhy, kend], [ro, why, end]] = read_only_lines(&mounted);
             // What the kernel answered of the boot partition, last: the one
             // place a rig can see it, so a start answered for a table that no
             // longer holds it is graded (test-boot-partition's disk-rewrite,
@@ -267,7 +267,7 @@ fn try_mount(device: &disk::Device, mounts: &mut [Option<vfs::Mount>; MAX_MOUNTS
                 }
                 None => ["", "", ""],
             };
-            con_write_parts(&[unread, hro, hwhy, hend, "fsd: ", mounted.fs().name(), " mounted, disk commands available\r\n", ro, why, end, bpre, blba, bend]);
+            con_write_parts(&[unread, hro, hwhy, hend, kro, kwhy, kend, "fsd: ", mounted.fs().name(), " mounted, disk commands available\r\n", ro, why, end, bpre, blba, bend]);
             mounts[0] = Some(mounted);
             0
         }
@@ -345,7 +345,9 @@ fn tree_of(mounts: &[Option<vfs::Mount>; MAX_MOUNTS], candidate: &vfs::Filesyste
 /// destructive first step of preparing a blank disk: it removes the
 /// partition table and any filesystem metadata near the start, so a
 /// subsequent partition/format starts clean. Returns `0`,
-/// [`MOUNT_NO_DEVICE`] (no block device), or [`FS_ERR_IO`].
+/// [`MOUNT_NO_DEVICE`] (no block device), [`FS_ERR_IO`], or
+/// `FS_ERR_READ_ONLY` for a sector the device never writes
+/// ([`disk::DiskError::status`]).
 fn erase_disk(device: &disk::Device, sectors: u64) -> u64 {
     let Ok(capacity) = device.disk().capacity_sectors() else {
         return syscall_abi::MOUNT_NO_DEVICE;
@@ -360,8 +362,8 @@ fn erase_disk(device: &disk::Device, sectors: u64) -> u64 {
     let zero = [0u8; 512];
     let mut lba = 0u64;
     while lba < count {
-        if disk.write_sector(lba, &zero).is_err() {
-            return syscall_abi::FS_ERR_IO;
+        if let Err(e) = disk.write_sector(lba, &zero) {
+            return e.status();
         }
         lba += 1;
     }
@@ -431,8 +433,8 @@ fn partition_disk(device: &disk::Device, type_byte: u8) -> u64 {
     mbr[510] = 0x55;
     mbr[511] = 0xAA;
 
-    if device.disk().write_sector(0, &mbr).is_err() {
-        return syscall_abi::FS_ERR_IO;
+    if let Err(e) = device.disk().write_sector(0, &mbr) {
+        return e.status();
     }
     0
 }
@@ -542,6 +544,7 @@ fn format_disk(device: &disk::Device, fstype: u64) -> u64 {
     match result {
         Ok(()) => 0,
         Err(fat32::Error::DiskFull) => syscall_abi::FS_ERR_DISK_FULL,
+        Err(fat32::Error::Io(e)) => e.status(),
         Err(_) => syscall_abi::FS_ERR_IO,
     }
 }
@@ -720,6 +723,12 @@ fn handle(device: &disk::Device, mounts: &mut [Option<vfs::Mount>; MAX_MOUNTS], 
             Err(_) => return status_reply(reply, syscall_abi::NO_FS),
         };
         if let Some(existing) = tree_of(mounts, mount.fs()) {
+            // Said to this caller too: the tree may be one another shell
+            // mounted, or `/` itself, and its read-only reasons were printed
+            // to whoever was looking then (the review of #445).
+            if let Some(held) = mounts[existing].as_ref() {
+                say_read_only(held);
+            }
             return status_reply(reply, existing as u64);
         }
         let Some(tree) = (1..MAX_MOUNTS).find(|&t| mounts[t].is_none()) else {
@@ -727,11 +736,11 @@ fn handle(device: &disk::Device, mounts: &mut [Option<vfs::Mount>; MAX_MOUNTS], 
         };
         // `mount N` prints nothing when it mounts; a read-only one says why,
         // or its first write's refusal would be the first word of it.
-        // A partition mount holds no reason of fsd's (D5 is tree 0's), but
-        // both are printed so this line cannot drop one if that changes. A
-        // writable one writes nothing: every piece is empty.
-        let (held, volume) = read_only_lines(&mount);
-        con_write_parts(&[held[0], held[1], held[2], volume[0], volume[1], volume[2]]);
+        // A partition mount never holds D5's reason (that is tree 0's) and
+        // may hold the device's (an SD card's firmware partition, `mount 0`
+        // on the Pi); every reason is printed, so this line cannot drop one.
+        // A writable one writes nothing: every piece is empty.
+        say_read_only(&mount);
         mounts[tree] = Some(mount);
         status_reply(reply, tree as u64)
     } else if op == syscall_abi::FSOP_MOUNT_INFO {
@@ -2012,6 +2021,10 @@ fn error_code(e: &fat32::Error) -> u64 {
         fat32::Error::DiskFull => syscall_abi::FS_ERR_DISK_FULL,
         fat32::Error::ReadOnly => syscall_abi::FS_ERR_READ_ONLY,
         fat32::Error::Unsupported => syscall_abi::FS_ERR_NOT_SUPPORTED,
+        // A write the device declined, where the gate did not refuse first
+        // (`format` over a kept partition, a mount made before the device
+        // was swapped): read-only, as the gate would have said.
+        fat32::Error::Io(disk::DiskError::Protected) => syscall_abi::FS_ERR_READ_ONLY,
         fat32::Error::Io(_)
         | fat32::Error::NoFat32Partition
         | fat32::Error::NotFat32
@@ -2071,13 +2084,18 @@ fn print(s: &str) {
 /// 2026-10-26 exFAT made a volume read-only with no word (the high review
 /// that day); since 2026-10-30 D5's fallback says so in this form too, before
 /// the mount line.
-fn read_only_lines(mount: &vfs::Mount) -> ([&'static str; 3], [&'static str; 3]) {
-    let line = |why: Option<&'static str>| match why {
+fn read_only_lines(mount: &vfs::Mount) -> [[&'static str; 3]; 3] {
+    mount.reasons().map(|why| match why {
         Some(why) => ["fsd: mounted read-only: ", why, "\r\n"],
         None => ["", "", ""],
-    };
-    let (held, volume) = mount.reasons();
-    (line(held), line(volume))
+    })
+}
+
+/// Every read-only reason of `mount`, in one write; nothing when it is
+/// writable. What `mount N` prints, for a new tree and for one already there.
+fn say_read_only(mount: &vfs::Mount) {
+    let [held, kept, volume] = read_only_lines(mount);
+    con_write_parts(&[held[0], held[1], held[2], kept[0], kept[1], kept[2], volume[0], volume[1], volume[2]]);
 }
 
 /// `parts` joined and written in one write, so no other task's line lands
@@ -2094,9 +2112,22 @@ fn con_write_parts(parts: &[&str]) {
     let mut line = [0u8; syscall_abi::FS_DATA_MAX as usize];
     let mut len = 0;
     for part in parts {
-        let take = part.len().min(line.len() - len);
-        line[len..len + take].copy_from_slice(&part.as_bytes()[..take]);
-        len += take;
+        let mut rest = part.as_bytes();
+        while !rest.is_empty() {
+            // Full: written and begun again, so text past one message is
+            // said in a second write and not dropped. The boot mount's
+            // lines reach about 470 of 512 bytes since the device's reason
+            // joined them (2026-11-11), and what a cut would drop is the
+            // boot partition's line, which a rig grades (the review of #445).
+            if len == line.len() {
+                con_write(&line[..len]);
+                len = 0;
+            }
+            let take = rest.len().min(line.len() - len);
+            line[len..len + take].copy_from_slice(&rest[..take]);
+            len += take;
+            rest = &rest[take..];
+        }
     }
     con_write(&line[..len]);
 }

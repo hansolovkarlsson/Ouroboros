@@ -30,6 +30,24 @@ pub enum DiskError {
     NoDevice,
     /// The device-level read/write failed.
     Io,
+    /// The device does not write there (`BLOCK_ERR_PROTECTED`: an SD card's
+    /// firmware partition, or its write-protect switch). Nothing was tried,
+    /// so it is answered as read-only, not as an I/O error
+    /// ([`DiskError::status`]).
+    Protected,
+}
+
+impl DiskError {
+    /// The status a client is answered with for this error where it is the
+    /// whole answer: read-only for a write the device declined, an I/O
+    /// error for the rest (no device included, as it was before the two
+    /// were told apart on 2026-11-11).
+    pub fn status(self) -> u64 {
+        match self {
+            DiskError::Protected => syscall_abi::FS_ERR_READ_ONLY,
+            DiskError::NoDevice | DiskError::Io => syscall_abi::FS_ERR_IO,
+        }
+    }
 }
 
 /// Whether the [`Device`] has been claimed ([`Device::claim`]). fsd is one
@@ -100,6 +118,17 @@ impl Device {
             start => Ok(Some(start)),
         }
     }
+
+    /// Whether the device never writes one of the `count` sectors from
+    /// `first` (`BLOCK_PROTECTED`): asked of a partition as it is mounted,
+    /// so the mount is held read-only ([`crate::vfs::Mount`]) and says so,
+    /// and no change is begun that the driver would then decline sector by
+    /// sector. Only that one answer is `true`: with no device, or a kernel
+    /// without the call, nothing is known to be kept, and the driver's own
+    /// refusal is still under every write.
+    pub fn never_writes(&self, first: u64, count: u64) -> bool {
+        block_svc(syscall_abi::BLOCK_PROTECTED, first, count) == syscall_abi::BLOCK_ERR_PROTECTED
+    }
 }
 
 /// A handle on the device for one holder - all real state (the device, its
@@ -135,6 +164,7 @@ impl Disk {
         match block_svc(syscall_abi::BLOCK_WRITE, sector, buf.as_ptr() as u64) {
             0 => Ok(()),
             syscall_abi::BLOCK_ERR_NO_DEVICE => Err(DiskError::NoDevice),
+            syscall_abi::BLOCK_ERR_PROTECTED => Err(DiskError::Protected),
             _ => Err(DiskError::Io),
         }
     }
@@ -151,6 +181,7 @@ pub const fn is_device_call(number: u64) -> bool {
             | syscall_abi::BLOCK_READ
             | syscall_abi::BLOCK_WRITE
             | syscall_abi::BLOCK_BOOT_START
+            | syscall_abi::BLOCK_PROTECTED
             | syscall_abi::MOUNT
     )
 }

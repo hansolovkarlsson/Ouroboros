@@ -159,6 +159,17 @@ pub enum Error {
     CardStatus { index: u8, status: u32 },
 }
 
+impl Error {
+    /// Whether this is the driver declining to write, by its own rule or
+    /// the card's switch, and not a write that was tried and failed.
+    /// `BLOCK_WRITE` answers the two apart (`BLOCK_ERR_PROTECTED`, since
+    /// 2026-11-11): until then both were an I/O error, and a program
+    /// writing to the firmware partition was told the device had failed.
+    pub fn is_refusal(&self) -> bool {
+        matches!(self, Error::Protected(_) | Error::WriteProtected)
+    }
+}
+
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -218,6 +229,29 @@ impl Device {
     /// before the card is installed.
     pub fn protect(&mut self, ranges: [(u64, u64); 2]) {
         self.protected = ranges;
+    }
+
+    /// The protected range that holds any of the `count` sectors from
+    /// `first`, if one does: the one rule `write_sector` refuses by and
+    /// `BLOCK_PROTECTED` answers by, so what fsd is told at a mount is
+    /// what a write there would meet.
+    pub fn protecting(&self, first: u64, count: u64) -> Option<(u64, u64)> {
+        self.protected.into_iter().find(|&(held, len)| {
+            // Two ranges meet when each starts before the other ends; an
+            // empty one, `(0, 0)` or a count of 0, meets nothing.
+            len > 0 && count > 0 && first < held.saturating_add(len) && held < first.saturating_add(count)
+        })
+    }
+
+    /// Whether a write to any of the `count` sectors from `first` would be
+    /// declined now: a protected range holds one, or the card's
+    /// write-protect switch is set, read as `write_one` reads it. What
+    /// `BLOCK_PROTECTED` answers, so a switched card's mount is read-only
+    /// from its first line too (the review of #445; the first cut asked the
+    /// ranges alone). The switch is the one answer that can change after it
+    /// is given, and `write_one` still reads it at every write.
+    pub fn declines(&self, first: u64, count: u64) -> bool {
+        self.protecting(first, count).is_some() || self.read(PRESENT_STATE) & WRITE_ENABLED == 0
     }
 
     /// The command argument for `sector`: bytes on a standard-capacity
@@ -541,17 +575,15 @@ impl Device {
     /// # Safety
     /// As [`Device::read_sector`].
     pub unsafe fn write_sector(&mut self, sector: u64, buf: &[u8; 512]) -> Result<(), Error> {
-        for (first, count) in self.protected {
-            if sector >= first && sector - first < count {
-                self.refused += 1;
-                if self.refused == 1 {
-                    console::println!(
-                        "Ouroboros kernel: sd: a write to sector {sector} refused: sectors {first} to {} hold the card's firmware partition or the table that finds it, never written",
-                        first + count - 1
-                    );
-                }
-                return Err(Error::Protected(sector));
+        if let Some((first, count)) = self.protecting(sector, 1) {
+            self.refused += 1;
+            if self.refused == 1 {
+                console::println!(
+                    "Ouroboros kernel: sd: a write to sector {sector} refused: sectors {first} to {} hold the card's firmware partition or the table that finds it, never written",
+                    first + count - 1
+                );
             }
+            return Err(Error::Protected(sector));
         }
         let result = self.write_one(sector, buf);
         if let Err(Error::Timeout(_) | Error::CardStatus { .. }) = result {

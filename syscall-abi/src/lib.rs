@@ -431,8 +431,23 @@ pub const BLOCK_READ: u64 = 27;
 
 /// `(lba, buf ptr)` -> `0` on success, or a `BLOCK_ERR_*` code. Writes
 /// exactly one [`BLOCK_SECTOR_SIZE`]-byte sector from `buf`. Same
-/// [`FSD_TASK`]-only gate as [`BLOCK_READ`].
+/// [`FSD_TASK`]-only gate as [`BLOCK_READ`]. A sector the device never
+/// writes answers [`BLOCK_ERR_PROTECTED`], and nothing is sent to it.
 pub const BLOCK_WRITE: u64 = 28;
+
+/// `(first lba, sector count)` -> `0` when the device would take a write
+/// to each of those sectors, [`BLOCK_ERR_PROTECTED`] when it would decline
+/// one (an SD card's firmware partition and the tables that find it, or
+/// any sector of a card whose write-protect switch is set, the only such
+/// cases today), [`BLOCK_ERR_NO_DEVICE`] with no
+/// device, [`BLOCK_ERR_DENIED`] for any caller but [`FSD_TASK`]. Answered
+/// by the rule [`BLOCK_WRITE`] refuses by, and nothing is read or written.
+/// For `fsd` to ask of a partition as it mounts it, so the mount is
+/// read-only from its first line and no change is begun there (since
+/// 2026-11-11; until then the first word of it was a program's "device I/O
+/// error"). The switch is answered as it reads at the call; a switch moved
+/// after a mount is met by [`BLOCK_WRITE`], which reads it at each write.
+pub const BLOCK_PROTECTED: u64 = 79;
 
 /// The fixed sector size the `BLOCK_*` syscalls transfer, in bytes.
 /// Matches the kernel's own `block::BlockDevice` (a hardcoded
@@ -1950,6 +1965,14 @@ pub const BLOCK_ERR_IO: u64 = u64::MAX - 24;
 /// `BLOCK_*`: the caller isn't [`FSD_TASK`] (or passed a bad buffer).
 /// Only the filesystem server may touch the disk.
 pub const BLOCK_ERR_DENIED: u64 = u64::MAX - 25;
+/// [`BLOCK_WRITE`], [`BLOCK_PROTECTED`]: the device does not write there,
+/// by the driver's own rule (an SD card's firmware partition) or the
+/// card's write-protect switch. Nothing was tried and nothing failed,
+/// which is what tells it from [`BLOCK_ERR_IO`]; `fsd` answers
+/// [`FS_ERR_READ_ONLY`] for it. The kernel's answer to `fsd` alone, never
+/// a reply to a client. Reserved 2026-11-11, after `write test hello` in
+/// the Pi card's firmware partition said "device I/O error".
+pub const BLOCK_ERR_PROTECTED: u64 = u64::MAX - 46;
 
 /// [`GRANT`]: a bad argument - grantee out of range/nonexistent, an
 /// invalid direction, a zero/oversized (`> `[`SAFECOPY_MAX`]) length,
@@ -2089,8 +2112,11 @@ pub const FS_ERR_BUSY: u64 = u64::MAX - 40;
 /// own caller, never a 9P reply (`cpu` turns it into a text line), with
 /// the same two steps in `sys.h`. `MAX-45` is [`FS_ERR_MOUNTS_ONLY`]
 /// (2026-11-08), the same kind again: a client's own reading of a
-/// server's "not found", never sent by any server.
-pub const FS_ERR_MIN: u64 = u64::MAX - 46;
+/// server's "not found", never sent by any server. `MAX-46` is
+/// [`BLOCK_ERR_PROTECTED`] (2026-11-11), the same kind: the kernel's
+/// answer to `fsd`, which turns it into [`FS_ERR_READ_ONLY`] before any
+/// client sees it, with the same two steps in `sys.h`.
+pub const FS_ERR_MIN: u64 = u64::MAX - 47;
 /// **Nothing can be made here: the directory is made of mount points
 /// only.** A server answered [`FS_ERR_NOT_FOUND`] or
 /// [`FS_ERR_NOT_A_DIRECTORY`] for making (or writing into) a path whose

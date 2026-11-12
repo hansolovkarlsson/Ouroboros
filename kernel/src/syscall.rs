@@ -2010,7 +2010,25 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
             let buf = unsafe { &*(arg1 as *const [u8; 512]) };
             match unsafe { device.write_sector(arg0, buf) } {
                 Ok(()) => 0,
+                // Declined, not failed: fsd answers "read-only" for it,
+                // where an I/O error sent the user after a failing disk.
+                Err(e) if e.is_refusal() => syscall_abi::BLOCK_ERR_PROTECTED,
                 Err(_) => syscall_abi::BLOCK_ERR_IO,
+            }
+        }
+        syscall_abi::BLOCK_PROTECTED => {
+            // arg0 = first LBA, arg1 = sector count. Asked by fsd of a
+            // partition as it mounts it, so a mount no write can land in is
+            // read-only from its first line; the driver's own refusal
+            // stays under it, by the same rule (`sdhci::Device::declines`:
+            // the kept ranges, and the write-protect switch as it reads now).
+            if !block_access_allowed() {
+                return syscall_abi::BLOCK_ERR_DENIED;
+            }
+            match unsafe { &*BLOCK.get() } {
+                Some(device) if device.protects(arg0, arg1) => syscall_abi::BLOCK_ERR_PROTECTED,
+                Some(_) => 0,
+                None => syscall_abi::BLOCK_ERR_NO_DEVICE,
             }
         }
         syscall_abi::NET_SEND => {
