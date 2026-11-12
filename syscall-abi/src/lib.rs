@@ -282,6 +282,21 @@ pub const TASK_STATE_INVALID: u64 = u64::MAX;
 /// moment may still find the slot occupied. [`WAIT`] is how to know it ended.
 pub const KILL: u64 = 19;
 
+/// `(packed task identity)` -> as [`KILL`], of the task that identity
+/// names and of no other: [`TASK_ERR_NO_SUCH_TASK`] when the identity's
+/// slot is empty or holds another task now, whatever that task is. The
+/// identity is one [`TASK_IDENTITY`] or [`SENDER_TASK`] gave. For a caller
+/// that kept a task's identity and means that task: a slot outlives its
+/// occupant, so "read the slot's identity, then `KILL` the slot" is two
+/// calls with a reap and a spawn able to land between them, and the kill
+/// then takes a stranger. Here the test and the kill are one call, under
+/// the kernel lock. A task that has exited and not been waited for (a
+/// zombie) still holds its identity, and this reaps it, at once and
+/// without blocking, which is how `netd` collects a `cpu` run's command
+/// that has ended. Since 2026-11-12, named as a follow-up by the review of
+/// #437.
+pub const KILL_ID: u64 = 80;
+
 /// `(task index, foreground)` -> `0` on success, [`TASK_ERR_PROTECTED`]
 /// (idle or a server can't be foregrounded, OR the caller does not
 /// currently own the keyboard - only the owner may hand it off, so the

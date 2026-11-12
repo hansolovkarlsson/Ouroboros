@@ -1667,11 +1667,33 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
             // unmodified by the SVC trampoline.
             unsafe { tasks::yield_current_and_switch(frame) }
         }
-        syscall_abi::KILL => {
+        syscall_abi::KILL | syscall_abi::KILL_ID => {
+            // KILL_ID names a task, not a slot: the slot is the identity's,
+            // and the kill goes on only while that slot still holds that
+            // very task (a zombie included, which the kill reaps). One call
+            // under the kernel lock, so nothing can reap the task and spawn
+            // into its slot between the test and the kill, which a caller's
+            // TASK_IDENTITY followed by KILL allowed (netd's kill_run_child
+            // until 2026-11-12).
+            let slot = if number == syscall_abi::KILL_ID {
+                let slot = syscall_abi::task_id_slot(arg0);
+                if tasks::task_id_of(slot as usize) != Some(arg0) {
+                    return syscall_abi::TASK_ERR_NO_SUCH_TASK;
+                }
+                // Already exited: collected like a WAIT's zombie, with no
+                // "killed" line, since nothing was killed. What is left of
+                // it is its state alone (end_task ran at its exit).
+                if tasks::try_reap(slot as usize).is_some() {
+                    return 0;
+                }
+                slot
+            } else {
+                arg0
+            };
             // Range first (the checked constructor), then every other
             // question on the typed value; nothing below names the raw
             // argument.
-            let Some(target) = tasks::TaskIndex::new(arg0 as usize) else {
+            let Some(target) = tasks::TaskIndex::new(slot as usize) else {
                 return syscall_abi::TASK_ERR_NO_SUCH_TASK;
             };
             if !target.is_spawnable() {

@@ -2297,9 +2297,12 @@ test-run-callback: image-ext2
 # A `cpu` run's command dies with the run's connection (scripts/test-run-orphan.py):
 # one driven boot of the ext2 image as the executing machine. The host dispatches
 # `cpu recv`, which blocks for good, and closes mid-run, by a FIN and by a RST;
-# the guest's `ps` must lose the task and the kernel name its slot. Minutes, so
-# not in `make test`. Run it whenever TcpConn's Drop, kill_run_child,
-# cpu_child_msg, handle_cpu_run or a site that frees a connection changes.
+# the guest's `ps` must lose the task and the kernel name its slot; then the
+# command is killed on the executing machine with the caller's connection open,
+# and the caller must be sent the run's end. Minutes, so not in `make test`.
+# Run it whenever TcpConn's Drop, kill_run_child, run_child_ended,
+# drain_client_messages, cpu_child_msg, handle_cpu_run, the kernel's KILL or
+# KILL_ID arm, or a site that frees a connection changes.
 test-run-orphan: image-ext2
 	python3 scripts/test-run-orphan.py
 

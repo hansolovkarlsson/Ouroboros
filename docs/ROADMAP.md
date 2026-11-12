@@ -3849,9 +3849,17 @@ would otherwise silently shrink into looking like nothing was ever found.
       **Pre-existing, found by the same review:** `cpu_child_msg` takes any
       zero-length message from the child as its end of stream, so a command
       that writes nothing mid-run has netd `WAIT` on it, event loop blocked,
-      until it exits. **A follow-up it names:** a `KILL` that takes a packed
+      until it exits. **FIXED 2026-11-12:** a run ends when its command
+      has (`run_child_ended`: its slot empty, another's, or a zombie),
+      asked once a pass after the mailbox is drained, and collected with
+      no call that blocks; the empty message ends nothing. That also ends
+      the run of a command that never sends it, killed or faulted, whose
+      caller waited for good until then (`make test-run-orphan`'s third
+      round). **A follow-up it names:** a `KILL` that takes a packed
       identity, which the kernel already keeps (`DOOMED`), would close the
-      two-syscall window in `kill_run_child` and in any later caller; and
+      two-syscall window in `kill_run_child` and in any later caller
+      (**DONE 2026-11-12**, `KILL_ID`, 80: one call, under the kernel
+      lock; it collects a zombie too, without a kill line); and
       `kill_run_child`'s identity test reads like a second copy of
       `held.rs`'s `alive`, and is not one: `alive` refuses a zombie, which
       holds no key, and the kill must reach one, to reap it. They stay two.
