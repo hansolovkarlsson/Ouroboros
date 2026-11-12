@@ -13,7 +13,15 @@ host dispatches `cpu recv`, a command that blocks for good, sees it in the
 guest's `ps`, closes the connection, and the command must be gone from `ps`
 with the kernel's kill line for its slot. Once with a FIN and once with a RST,
 the two closes a peer can make. Around them, `cpu id` runs to its end and
-kills nothing: a run that ends in the ordinary way is reaped by its `WAIT`.
+kills nothing: a run that ends in the ordinary way is collected when its
+command has exited, with no kill line.
+
+Then the other way round: the host dispatches `cpu recv` and keeps its
+connection open, and the command is killed on the executing machine (`kill N`
+typed there). The run must end: the host must be sent the reply's end (a FIN)
+and the connection freed. Until 2026-11-12 a run ended only on the command's
+own empty end-of-stream message, which a killed command never sends, so the
+caller waited for good on a connection the idle reap exempts.
 
 Usage:  python3 scripts/test-run-orphan.py      (make test-run-orphan builds the image)
 Exit status: the number of failed checks.
@@ -152,6 +160,34 @@ def cut_short(g, how):
         s.close()
 
 
+def killed_here(g):
+    """Dispatch COMMAND, see it running, kill it on the executing machine,
+    and check the run ends for the caller, whose connection stays open."""
+    cmd = COMMAND.encode()
+    frame, _nonce = client.request_frame(client.build_frame(client.NP_RUN, 0, [len(cmd), 0, 0, 0], cmd))
+    s = socket.create_connection(("localhost", PORT), timeout=10)
+    try:
+        s.sendall(frame)
+        running = until(g, lambda slots: len(slots) == 1, 20)
+        if not check(running is not None and len(running) == 1,
+                     f"killed here: the run's command is a task on the executing machine: `{COMMAND}` in slots {running}"):
+            return
+        g.type_line(f"kill {running[0]}")
+        gone = until(g, lambda slots: slots == [], 20)
+        check(gone == [], f"killed here: the command is gone: `{COMMAND}` in slots {gone}")
+        # The reply's end: bytes or none, then the peer's FIN (recv of b"").
+        s.settimeout(20)
+        ended = False
+        try:
+            while not ended:
+                ended = s.recv(4096) == b""
+        except (socket.timeout, ConnectionResetError):
+            pass
+        check(ended, "killed here: the caller is sent the run's end (a FIN) with its connection still open")
+    finally:
+        s.close()
+
+
 def main():
     shutil.copyfile(IMAGE, COPY)
     g = drive_qemu.Guest(COPY, extra_args=(
@@ -166,11 +202,12 @@ def main():
         check("uid=" in out, f"before: `cpu id` runs to its end: {out.strip()[:80]!r}")
         cut_short(g, "FIN")
         cut_short(g, "RST")
+        killed_here(g)
         out = run_to_end("id")
         check("uid=" in out, f"after: `cpu id` still runs to its end: {out.strip()[:80]!r}")
         text = g.transcript()
         kills = len(re.findall(KILLED, text))
-        check(kills == 2, f"two tasks were ended in the whole boot, the two cut short: {kills}")
+        check(kills == 3, f"three tasks were killed in the whole boot, the two cut short and the one killed by hand: {kills}")
         restarts = len(re.findall(r"restarted \(attempt", text))
         check(restarts == 0, f"no server was restarted: {restarts} restart line(s)")
         check(g.proc.poll() is None, "the guest is alive at the end")
@@ -182,7 +219,7 @@ def main():
         os.unlink(COPY)
         if os.path.exists(PCAP) and not failed:
             os.unlink(PCAP)
-    want = 14
+    want = 17
     if checks != want and not failed:
         print(f"[FAIL] {checks} checks ran, want {want}", flush=True)
         return 1

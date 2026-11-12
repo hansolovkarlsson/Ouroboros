@@ -796,13 +796,64 @@ fn tables() -> &'static mut Tables {
 /// the normal client dispatch; everything else is a client request.
 #[allow(clippy::too_many_arguments)]
 fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], auth: &Auth, pending: &mut PendingRun, held: &mut held::Held) {
+    drain_mailbox(packed_mac, buf, conns, dials, remotes, sessions, auth, pending, held);
+    // A run's command that has ended is collected here, where nothing
+    // blocks: see `run_child_ended`. Which ones have ended is asked BEFORE
+    // the second drain, so everything such a command sent is already
+    // queued (a task that has exited sends no more) and that drain takes
+    // the last of its output; one that ends during it is found next pass.
+    let mut ended = [false; MAX_CONNS];
+    for (flag, c) in ended.iter_mut().zip(conns.iter()) {
+        *flag = matches!(c, Some(c) if run_child_ended(c.cpu_child));
+    }
+    if !ended.contains(&true) {
+        return;
+    }
+    drain_mailbox(packed_mac, buf, conns, dials, remotes, sessions, auth, pending, held);
+    for (flag, c) in ended.iter().zip(conns.iter_mut()) {
+        if let (true, Some(c)) = (*flag, c.as_mut()) {
+            // Reaps a zombie; refused for a slot already empty or another
+            // task's, which leaves nothing of ours to collect either.
+            let _ = syscall(syscall_abi::KILL_ID, c.cpu_child);
+            c.cpu_child = CPU_NONE;
+        }
+    }
+}
+
+/// Whether a `cpu` run's command has ended: its slot no longer holds it
+/// (killed and reaped, by `kill N` here or a fault), or holds it as a
+/// zombie, exited and waiting to be collected. `false` for no child.
+///
+/// This is how a run ends, since 2026-11-12. Until then the end was the
+/// command's empty end-of-stream message, on which `netd` called a
+/// blocking `WAIT`: a command that sent an empty message mid-run (any
+/// zero-length write) stopped the whole event loop until it exited, and
+/// one that died without sending it, killed or faulted, was never
+/// collected, its connection held for good (the review of #437). The
+/// command's state is the fact; its message was a claim about it.
+///
+/// The two reads are not atomic and need not be: a slot refilled between
+/// them reads as "not ours" or as the newcomer's state, and either way the
+/// collection is `KILL_ID`, which acts on the child's identity or not at all.
+fn run_child_ended(child: u64) -> bool {
+    if child == CPU_NONE {
+        return false;
+    }
+    let slot = syscall_abi::task_id_slot(child);
+    syscall(syscall_abi::TASK_IDENTITY, slot) != child
+        || syscall(syscall_abi::TASK_STATE, slot) == syscall_abi::TASK_STATE_ZOMBIE
+}
+
+/// One pass over the mailbox, until it is empty: [`drain_client_messages`]'s
+/// worker.
+#[allow(clippy::too_many_arguments)]
+fn drain_mailbox(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], auth: &Auth, pending: &mut PendingRun, held: &mut held::Held) {
     loop {
         let packed =
             syscall4(syscall_abi::MSG_TRY_RECV, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0);
         if packed >= syscall_abi::FS_ERR_MIN {
             return; // NO_MSG or an error: mailbox drained
         }
-        let sender = packed >> 32;
         let len = ((packed & 0xffff_ffff) as usize).min(buf.len());
         // The OCCUPANT, not the position: a cpu child's slot is recycled the
         // moment it is reaped, and the next task in it (someone's `ping`)
@@ -847,7 +898,7 @@ fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<Tc
             if is_request {
                 handle_client(packed_mac, buf, len, dials, remotes, sessions, auth, pending, held);
             } else {
-                cpu_child_msg(conns[ci].as_mut().unwrap(), sender as u8, &buf[..len]);
+                cpu_child_msg(conns[ci].as_mut().unwrap(), &buf[..len]);
             }
         } else {
             handle_client(packed_mac, buf, len, dials, remotes, sessions, auth, pending, held);
@@ -867,23 +918,17 @@ fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<Tc
 }
 
 /// Route one message from a captured cpu child (cluster Phase 4a) to its
-/// connection: append output bytes to the connection's `prefix` (bounded), or -
-/// on the empty end-of-stream message - `WAIT`-reap the child and clear
-/// `cpu_child`, which releases `pump_send` to stream the accumulated output then
-/// FIN. Output beyond `PREFIX_MAX` is dropped (bounded for now; streaming the
-/// child's output straight through is a later refinement).
-fn cpu_child_msg(c: &mut TcpConn, child: u8, data: &[u8]) {
-    if data.is_empty() {
-        // `child` is the slot (WAIT speaks in slots); the caller matched the
-        // sender by full identity before routing here.
-        let _ = syscall(syscall_abi::WAIT, child as u64); // reap; ignore the status
-        c.cpu_child = CPU_NONE;
-    } else {
-        let space = c.prefix.len().saturating_sub(c.prefix_len);
-        let n = data.len().min(space);
-        c.prefix[c.prefix_len..c.prefix_len + n].copy_from_slice(&data[..n]);
-        c.prefix_len += n;
-    }
+/// connection: append output bytes to the connection's `prefix` (bounded).
+/// Output beyond `PREFIX_MAX` is dropped (bounded for now; streaming the
+/// child's output straight through is a later refinement). An empty message,
+/// the end-of-stream marker every program sends last, appends nothing and
+/// ends nothing: the run ends when the command has ([`run_child_ended`]),
+/// which then releases `pump_send` to stream the accumulated output and FIN.
+fn cpu_child_msg(c: &mut TcpConn, data: &[u8]) {
+    let space = c.prefix.len().saturating_sub(c.prefix_len);
+    let n = data.len().min(space);
+    c.prefix[c.prefix_len..c.prefix_len + n].copy_from_slice(&data[..n]);
+    c.prefix_len += n;
 }
 
 /// The held-key ops (step 4 of docs/roadmap/roadmap-user-keys.md; the rules
@@ -2688,25 +2733,19 @@ fn fsd_generation() -> u64 {
 /// End the child of a `cpu` run whose connection is going away
 /// (`TcpConn`'s `Drop`). `child` is the packed identity captured at the spawn.
 ///
-/// `KILL` takes a slot, and a slot outlives its occupant, so the slot's
-/// identity is read first and nothing is killed unless it is still the
-/// child's: a child that exited and was reaped by someone's `wait N` may have
-/// been replaced by another task. Two syscalls, so not atomic: a child on
-/// another core that exits, is reaped and has its slot spawned into between
-/// the two would lose the newcomer. That needs a foreign `wait` of this very
-/// slot inside one syscall's width, and closing it for good is a kill that
-/// takes an identity, which the kernel does not have.
+/// `KILL_ID` names the task, not its slot: a slot outlives its occupant, and
+/// a child that exited and was reaped by someone's `wait N` may have been
+/// replaced by another task, which a kill of the slot would take. Until
+/// 2026-11-12 this read the slot's identity and then killed the slot, two
+/// calls a reap and a spawn could land between; it is one now, tested and
+/// done under the kernel lock.
 ///
 /// A child that has exited and not been reaped still holds its identity (a
-/// zombie), and the kill reaps it. The kernel's answer is not read: every
+/// zombie), and the call reaps it. The kernel's answer is not read: every
 /// refusal means there is nothing of ours left to end.
 fn kill_run_child(child: u64) {
-    if child == CPU_NONE {
-        return;
-    }
-    let slot = syscall_abi::task_id_slot(child);
-    if syscall(syscall_abi::TASK_IDENTITY, slot) == child {
-        let _ = syscall(syscall_abi::KILL, slot);
+    if child != CPU_NONE {
+        let _ = syscall(syscall_abi::KILL_ID, child);
     }
 }
 
@@ -2728,8 +2767,8 @@ fn kill_run_child(child: u64) {
 /// dispatching machine closes its user's runs, so that was a routine event.
 /// It is a `KILL` and not a `WAIT`: a `WAIT` on a live child would block the
 /// event loop, and a kill reaps at once. A run that ended in the ordinary way
-/// has `cpu_child` back at `CPU_NONE` (`cpu_child_msg`, which `WAIT`s it), so
-/// nothing is killed for it.
+/// has `cpu_child` back at `CPU_NONE` (`drain_client_messages`, which
+/// collects it), so nothing is killed for it.
 ///
 /// What this does not reach: a task the child itself spawned (the kernel has
 /// no kill of a tree), and whatever of the child's is still queued in the

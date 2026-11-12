@@ -11,7 +11,26 @@ here actually works today, see [`architecture.md`](architecture.md) and
 
 **Not yet released.** Changes since v0.25.0, drafted as they land.
 
-**A write the SD driver refuses is "read-only", said at the mount (2026-11-11).**
+**A `cpu` run ends when its command has, and `netd` never waits for it (2026-11-12).**
+On the executing machine a run ended on the command's own empty
+end-of-stream message, at which `netd` called a blocking `WAIT`. Two
+defects sat in that (the review of #437). A command that sent an empty
+message mid-run stopped `netd`'s whole event loop until it exited. And a
+command that never sent one, killed there or faulted, was never collected:
+its caller waited for good, on a connection the idle reap exempts. The end
+of a run is now the command's state, asked once a pass after the mailbox is
+drained: its slot empty, another task's, or a zombie. It is collected by a
+call that cannot block, and the empty message ends nothing. That call is
+new: `KILL_ID` (syscall 80) kills the task a packed identity names and no
+other, test and kill in one call under the kernel lock, and collects one
+that has already exited. `netd`'s kill of a run's command at its
+connection's close uses it too, where it read the slot's identity and then
+killed the slot, two calls a reap and a spawn could land between.
+`make test-run-orphan` gains a round: the command killed by hand on the
+executing machine, the caller's connection open, and the caller sent the
+run's end.
+
+**A write the SD driver refuses is "read-only", said at the mount (2026-11-11, #445).**
 On the Pi, `mount 0 /mnt/boot` gives the card's firmware partition, which
 the SD driver never writes, and `write test hello` there said `device I/O
 error`: the driver's refusal became `BLOCK_ERR_IO` in the kernel's
