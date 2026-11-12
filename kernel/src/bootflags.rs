@@ -87,6 +87,14 @@ const SMP_FAULT: &CStr16 = cstr16!("\\SMPFAULT");
 /// switch: nothing is turned off, and without it the report does not run.
 const SD_DUMP: &CStr16 = cstr16!("\\SDDUMP");
 
+/// `\NETDUMP`: run `netscan.rs`'s report of the Raspberry Pi 4's Ethernet
+/// (what the ACPI tables declare, nine of the controller's registers, and
+/// the PHYs that answer on its MDIO bus). A reading aid for step 2 of
+/// `docs/roadmap/roadmap-pi-net.md`, as `\SDDUMP` was for the SD card:
+/// nothing is turned off, and without it the report does not run. Where no
+/// GENET is declared, on QEMU and Parallels, it touches no register.
+const NET_DUMP: &CStr16 = cstr16!("\\NETDUMP");
+
 /// Which boot flags are set, read once by [`read`].
 #[derive(Clone, Copy, Default)]
 pub struct Flags {
@@ -106,6 +114,8 @@ pub struct Flags {
     pub smp_fault: bool,
     /// [`SD_DUMP`]
     pub sd_dump: bool,
+    /// [`NET_DUMP`]
+    pub net_dump: bool,
 }
 
 /// Reads every flag file at the ESP's root, opening the volume once. If the
@@ -138,5 +148,6 @@ pub fn read() -> Flags {
         walk_fault: present(WALK_FAULT),
         smp_fault: present(SMP_FAULT),
         sd_dump: present(SD_DUMP),
+        net_dump: present(NET_DUMP),
     }
 }

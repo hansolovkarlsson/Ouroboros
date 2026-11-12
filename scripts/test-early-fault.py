@@ -102,6 +102,17 @@ DWELL = 5
 ENDINGS = r"halted in the early fault reporter|while reporting one|Synchronous Exception at|EXCEPTION core=\d+ vector=|EL0 FAULT|system halted"
 
 
+# What a boot that is meant to reach the shell untroubled must not show.
+# The control boot's list here, and test-netdump.py's for both its boots.
+CLEAN_BOOT_MUST_NOT = [
+    ("EARLY EXCEPTION", r"EARLY EXCEPTION"),
+    ("kernel EXCEPTION", r"EXCEPTION core=\d+ vector="),
+    ("the firmware's stack", r"the FIRMWARE'S stack"),
+    ("EL0 fault, kill or restart", r"EL0 FAULT|killed after fault|restarted"),
+    ("firmware's own line", r"Synchronous Exception at"),
+]
+
+
 def boot(esp, until, machine, then=None):
     """Boot the dev-loop machine on the ESP directory `esp` (vvfat) and
     return the serial transcript and the fault-line count from QEMU's trace
@@ -255,13 +266,7 @@ def main():
         ("identity map installed", r"identity map installed, MMU running on our own tables"),
         ("shell", r"shell ready"),
         ("help answered after the dwell", r"^builtins: help"),
-    ], [
-        ("EARLY EXCEPTION", r"EARLY EXCEPTION"),
-        ("kernel EXCEPTION", r"EXCEPTION core=\d+ vector="),
-        ("the firmware's stack", r"the FIRMWARE'S stack"),
-        ("EL0 fault, kill or restart", r"EL0 FAULT|killed after fault|restarted"),
-        ("firmware's own line", r"Synchronous Exception at"),
-    ], aborts, "zero"))
+    ], CLEAN_BOOT_MUST_NOT, aborts, "zero"))
 
     # 3. The reporter's own fault, inside its image walk.
     esp = os.path.join(work, "esp-walk")

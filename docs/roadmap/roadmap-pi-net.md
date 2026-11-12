@@ -234,20 +234,64 @@ Each has a recommendation; none blocks step 2.
 
 2. **Read the board.** One boot under a new flag file, `\NETDUMP`, that
    logs before the exit: what `amlscan::declared` finds for `GENET_HID`,
-   then, only if it found a device, `SYS_REV_CTRL`, `UMAC_CMD`,
-   `UMAC_MAC0` and `UMAC_MAC1`, `EXT_RGMII_OOB_CTRL`, both DMA control
-   registers, the INTRL2_0 mask status, and the PHY's two id registers and
-   its status register over MDIO. The MDIO reads are the scan's only
-   writes (one command word each); everything else is a read. Without the
-   flag nothing here runs, as with `\SDDUMP`.
-   **Check:** the version's major reads 6; the MAC address is the one the
-   board's own firmware setup screen shows, and not zeros; the PHY id is a
-   Broadcom one; the status register's link bit follows the cable, in two
-   boots, cable in and cable out. On QEMU the same flag prints that no
-   GENET is declared and touches no address (the control: `make
-   test-early-fault`'s style of boot, graded on that line). This step
+   then, only if it found exactly one device, `SYS_REV_CTRL`,
+   `SYS_PORT_CTRL`, `UMAC_CMD`, `UMAC_MAC0` and `UMAC_MAC1`,
+   `EXT_RGMII_OOB_CTRL`, both DMA control registers, the INTRL2_0 mask
+   status, and, only when the version reads v5, the id and status of
+   every PHY that answers on MDIO, addresses 0 to 31. The MDIO read
+   commands are the scan's only writes; everything else is a read.
+   Without the flag nothing here runs, as with `\SDDUMP`.
+   **Built 2026-11-12, not yet run on the board.** The scan is the first
+   piece of design 2's crate, in two halves over a `Bus` trait (read,
+   write, delay; a trait where the design said a closure, since there are
+   three operations): `genet::registers`, which reads the version and
+   only on v5 the other eight, handing each value to the caller as it is
+   read, and `genet::phys`, the MDIO scan. `kernel/src/netscan.rs` is the
+   thin half that lends them MMIO and the firmware's stall and logs. Every
+   MDIO address is scanned, not the predicted address 1 alone, so a wrong
+   prediction still finds the PHY.
+   **Checked without the board:** 21 host tests run the scan against a
+   model device that records every read, write and delay: it writes
+   `MDIO_CMD` alone and only read commands; on a version other than v5 it
+   reads the version register and nothing else, and writes nothing; it
+   gives up a start bit that never clears after 20 ms and stops the scan
+   there (also when the bus sticks half way through a PHY); and it keeps
+   the second reading of the status register. Every rule of the crate was
+   taken out in turn, twenty-five mutations over the two passes, and each
+   failed a test. `make test-netdump` boots QEMU with the flag: the scan
+   says no GENET is declared and no register touched, and the boot
+   reaches the shell with a clean trace; with the scan made to read the
+   Pi's address regardless, the boot faulted before the exit and the rig
+   failed. The model is ours (design 2): none of this says what the device
+   answers.
+   **The review of the step, before its first commit,** changed what a
+   board's log can be trusted for. Each register is logged as it is read,
+   the version first, so a later read that faults leaves the earlier
+   values on serial (they were all logged at the end). The MDIO half runs
+   at `TPL_NOTIFY`: the firmware's network stack may poll the PHY from a
+   timer event (predicted), and a command of its own landing between ours
+   and our poll would have been read as our answer. A PHY that answers its
+   identifier's first half and then stops is counted as partial, where it
+   was dropped without a word; addresses that read zero are counted apart
+   from PHYs, so a bus held low does not read as thirty-two of them; and a
+   declared base that is zero or unaligned is refused with a line
+   (`genet::block_usable`). The rig checks that the staged kernel is this
+   tree's, as `test-early-fault.py` does, and shares its list of what a
+   clean boot must not show. **Left for step 5:** `netscan.rs` is the
+   third place that collects the tables, asks `amlscan::declared` and
+   requires exactly one device (`main.rs`'s `emmc2_from_acpi` and
+   `sdscan.rs` are the others). The driver's discovery would be the
+   fourth, so step 5 makes it one helper in `acpi.rs`; this step did not
+   reach into the SD card's proven path to do it.
+   **The check on the board, still owed:** the version's major reads 6;
+   the MAC address is the one the board's own firmware setup screen shows
+   (or the Mac's ARP table from the Pi's own operating system), and not
+   zeros; the PHY id is a Broadcom one; the status register's link bit
+   follows the cable, in two boots, cable in and cable out. This step
    settles the predictions under "What is known" and whether the firmware
-   leaves DMA running (design 4).
+   leaves DMA running (design 4). `touch NETDUMP` at the card's boot
+   partition root, boot with serial captured, and the lines start
+   `Ouroboros kernel: net:` (`testing-pi4.md`, the boot flag table).
 
 3. **The NIC enum.** `nic.rs` with the virtio arm alone, `syscall.rs` and
    `init_net()` moved onto it. No behaviour changes.
@@ -258,7 +302,9 @@ Each has a recommendation; none blocks step 2.
    `make-targets.md` is grepped for `virtio_net` and `NET_` for any other
    rig this owes.
 
-4. **The `genet` crate and its model, on the host.** The register map as
+4. **The `genet` crate and its model, on the host.** Begun in step 2
+   (the scan, MDIO reads, the version and the MAC address). The rest: the
+   register map as
    constants, the command words, the MAC address packing, the descriptor
    words, the index arithmetic (a 16-bit counter over a 256-entry ring),
    the bring-up sequence, the PHY's link and speed read, one transmit, one
@@ -270,7 +316,10 @@ Each has a recommendation; none blocks step 2.
    refused, and a busy MDIO that never clears ending in an error and not a
    hang. Every bound is mutated once.
 
-5. **The board: bring-up and link.** The kernel's `genet.rs`, the device
+5. **The board: bring-up and link.** One helper in `acpi.rs` for "the one
+   device of this `_HID` declared present", used by this driver, the scan
+   and the SD card's two callers (step 2's note). The kernel's `genet.rs`,
+   the device
    quiet at the exit, reset, the MAC address kept, the PHY read, its
    buffers' range mapped non-cacheable (design 5), `intid` `None` (design
    7). The boot log gains one line: the version, the MAC address, the

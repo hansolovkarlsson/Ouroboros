@@ -25,6 +25,7 @@ mod loader;
 mod lock;
 mod madt;
 mod mmu;
+mod netscan;
 mod pci;
 mod power;
 mod sdhci;
@@ -623,6 +624,12 @@ extern "C" fn kernel_main() -> ! {
     // not a cost every boot pays.
     if flags.sd_dump {
         unsafe { sdscan::report(dtb, rsdp) };
+    }
+    // What the Pi 4's Ethernet says of itself (netscan.rs, step 2 of
+    // docs/roadmap/roadmap-pi-net.md), only under `\NETDUMP`.
+    // SAFETY: `rsdp` is the firmware's, found above.
+    if flags.net_dump {
+        unsafe { netscan::report(rsdp) };
     }
 
     // SAFETY: no boot-services protocol references (console, allocator, or
