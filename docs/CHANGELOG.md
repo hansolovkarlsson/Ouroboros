@@ -34,7 +34,8 @@ and requires the command gone from node A. The review of #449 added three
 things: data sent again is acknowledged again on both sides, so one lost ACK
 does not bring the failure back; the time `netd` spends deaf in a
 synchronous client request is not counted as a caller's silence, since a
-probe's answer swallowed there had a live caller's run ended; and a run
+probe's answer swallowed there would end a live caller's run (by reading;
+no rig shows it); and a run
 keeps `netd`'s loop on its own timer. Left as it is: a dispatching `netd`
 gives a run up after thirty seconds without output, and a run's output
 comes only at its end; it then closes with a FIN, and the command is ended

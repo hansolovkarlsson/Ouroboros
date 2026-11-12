@@ -2319,8 +2319,7 @@ test-run-orphan: image-ext2
 
 # A `cpu` run's command ends when its caller goes silent, and not before
 # (scripts/test-run-silent.py): a host caller that holds its connection open
-# and says nothing for 45 s keeps its command, and for 45 s more with netd
-# kept in blocking pings; on copies of the two-node ext2 pair node
+# and says nothing for 45 s keeps its command; on copies of the two-node ext2 pair node
 # B's `cpu` must still hold its run 20 s in, node A's keepalive probes and
 # node B's answers must be in the capture, and once B's QEMU is killed
 # outright (no FIN, no RST) A must end the command within 45 s more. Minutes,

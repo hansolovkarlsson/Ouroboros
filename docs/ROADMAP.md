@@ -3862,7 +3862,9 @@ would otherwise silently shrink into looking like nothing was ever found.
       failure back; the time `netd` spends in a synchronous client request,
       whose wait drops every frame but its own reply, is given back to a
       run's clock (`credit_deaf`), since a probe's answer swallowed there
-      had a live caller's run reaped; and a run's connection keeps the
+      would have a live caller's run reaped (by reading: a rig round built
+      to show it passed with the rule taken out, so the rule is graded by
+      nothing); and a run's connection keeps the
       serve loop on its timer, where the probes rode the supervisor's
       health ping), and every child of a `netd` the supervisor restarts, whose
       table goes without a `Drop` (**the second FIXED 2026-11-12**: the

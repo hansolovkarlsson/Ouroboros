@@ -844,7 +844,9 @@ fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<Tc
 /// waits read frames off the NIC and drop every one that is not their own
 /// reply) can swallow the answer to a keepalive probe, and a user keeping
 /// `netd` in such requests for thirty seconds would have a live caller's run
-/// reaped and its command killed (the review of #449). So the ticks a
+/// reaped and its command killed (the review of #449, by reading: a rig
+/// round of back-to-back pings did not bring it about, and passed with this
+/// taken out, so nothing grades it). So the ticks a
 /// request took are given back to every run's `last_rx`, the clock
 /// `probe_run` and `reap_idle` both read: a run is ended for the silence of
 /// its caller while `netd` was listening, and for no other.

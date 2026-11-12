@@ -16,11 +16,14 @@ Two parts, since the two kinds of caller answer by different code.
 `cpu recv` through QEMU's user network and holds the connection open, doing
 nothing. That caller is alive (QEMU's own TCP answers for it), so after
 forty-five seconds, past the reap's thirty, the command must still be in the
-guest's `ps`. Then forty-five seconds more with the guest's shell pinging an
-address nothing answers at, one ping after another: each keeps `netd` in a
-wait that reads frames off the NIC and drops all but its own reply, a probe's
-answer among them, and time `netd` could not hear must not count as the
-caller's silence (`credit_deaf`), so the command must still be there.
+guest's `ps`.
+
+What this does not grade: `credit_deaf`, the rule that time `netd` spends in
+a synchronous client request is not a caller's silence. A round that kept the
+guest's shell pinging a dead address for forty-five seconds was tried on
+2026-11-12 and passed with the rule taken out, the shell's typing leaving
+`netd` passes enough to hear a probe's answer, so it could not fail and was
+removed. Nor a lost ACK of the request, which no link here loses.
 
 **A guest caller**, the two-node ext2 pair on a socket link: node B's shell
 runs `cpu 10.0.2.10:564 recv` against node A. The probes are answered by
@@ -187,19 +190,6 @@ def host_caller():
               f"host caller: after {QUIET} s of a live caller's silence the command still runs: slots {still}, want {running}")
         kills = re.findall(KILLED, g.transcript())
         check(kills == [], f"host caller: nothing was killed: {kills}")
-        # netd kept deaf: back-to-back pings of an address with no host.
-        pings = 0
-        deadline = time.time() + QUIET
-        while time.time() < deadline:
-            g.type_line("ping 10.0.2.99")
-            if not g.wait_for(r"ping[^\r\n]*\r\n(?:[^#]*)# ", timeout=20):
-                break
-            pings += 1
-        still = ps(g)
-        kills = re.findall(KILLED, g.transcript())
-        check(pings >= 10 and still == running and kills == [],
-              f"host caller: after {QUIET} s more with netd kept in {pings} pings of a dead address the command still runs: "
-              f"slots {still}, killed {kills}")
     finally:
         if s is not None:
             s.close()
@@ -283,7 +273,7 @@ def guest_caller():
 def main():
     host_caller()
     guest_caller()
-    want = 5 + 13
+    want = 4 + 13
     if checks != want and not failed:
         print(f"[FAIL] {checks} checks ran, want {want}", flush=True)
         return 1
