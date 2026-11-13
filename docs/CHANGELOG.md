@@ -11,7 +11,7 @@ here actually works today, see [`architecture.md`](architecture.md) and
 
 **Not yet released.** Changes since v0.25.0, drafted as they land.
 
-**The network device is an enum, `nic.rs`, with virtio-net its one arm (2026-11-13).**
+**The network device is an enum, `nic.rs`, with virtio-net its one arm (2026-11-13, #454).**
 Step 3 of `docs/roadmap/roadmap-pi-net.md`, and no change in behaviour. The
 `NET_*` syscalls, the tick's wake check and the receive interrupt reach the
 device through `nic::Nic`, as the disks are reached through
