@@ -430,6 +430,7 @@ kernel/              every file annotated in full in `docs/source-map.md`; each 
                      under \NETDUMP, before the exit, and touches no register where none is declared
   src/bootdisk.rs    the boot partition: the HardDrive node of the image's own device path, read before the exit (one-disk step 1),
                      and is_boot_disk, which makes the disk booted from the block device (step 3); the matcher itself is parttable's
+  src/nic.rs         Nic enum (Virtio alone today; the Pi's GENET is the arm to come) - what the NET_* syscalls sit on
   src/virtio_net.rs  virtio-net: rx/tx queues, the 12-byte header, IRQ-driven receive - the DMA-owning half of the net stack
   src/xhci.rs        from-scratch xHCI: rings, multi-device port scan, HID interrupt endpoint, storage endpoint reset
 

@@ -321,6 +321,23 @@ Each has a recommendation; none blocks step 2.
 
 3. **The NIC enum.** `nic.rs` with the virtio arm alone, `syscall.rs` and
    `init_net()` moved onto it. No behaviour changes.
+   **Built 2026-11-13.** `kernel/src/nic.rs` holds `enum Nic { Virtio }`
+   and answers `mac`, `max_frame`, `intid`, `ack_interrupt`, `send_frame`,
+   `has_frame` and `poll_frame`; `syscall.rs`'s cell holds a `Nic`, and
+   `init_net()` installs `Nic::Virtio`. `syscall.rs` and `exceptions.rs`
+   no longer name `virtio_net` in code, so there is no path to the device
+   around the enum. One thing moved: the frame bound `NET_SEND` and
+   `NET_RECV` check is the installed device's (`max_frame`) where it was
+   virtio's constant by name, so the device is looked up before the bound
+   is checked. Both refusals answer `NET_ERROR`, and the order cannot be
+   seen from outside. The module doc states what an arm owes its callers,
+   which step 5's GENET arm has to keep: `has_frame` is a read with no
+   side effect, and an INTID reported is one that means receive and that
+   `ack_interrupt` clears (design 7 is why GENET's is `None` until step 9).
+   **Checked:** `make test` and the nine rigs below, each exit 0 on the
+   committed code. No mutation was run: every rig's traffic goes through
+   the enum, since nothing else reaches the driver. `make-targets.md`
+   names no other rig for `virtio_net` or `NET_`.
    **Check:** every network rig on QEMU passes as before (`make
    test-async-rmount`, `test-run-callback`, `test-run-orphan`,
    `test-run-silent`, `test-cred-client`, `test-held-keys`,
