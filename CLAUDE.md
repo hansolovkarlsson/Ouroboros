@@ -216,6 +216,7 @@ make test-parallels           # scripted real-hardware round trip via prlctl
 make test-early-fault         # the early fault reporter on QEMU
 make run-el2                  # `run` with the firmware handing off at EL2
 make test-el1-drop            # the EL1 drop: test-early-fault's three boots handed off at EL2
+make test-netdump             # the Pi 4 Ethernet scan under \NETDUMP touches no register where no GENET is declared
 make test-async-rmount        # six driven QEMU boots against host-run 9P peers
 make test-call-interrupt      # an interrupted call's late answer goes nowhere
 make test-held-keys           # six driven QEMU boots of the held user keys
@@ -304,7 +305,7 @@ add llvm-tools` for `llvm-objcopy` (the Makefile's `OBJCOPY` comment says why).
 
 The kernel and userland programs have no unit test suite; the **pure crates**
 (`accounts`, `regex`, `ed25519`, `clusterkeys`, `ninep-abi`, `keyseq`,
-`parttable`, `amlscan`, `heldkeys`) do, and `make test` runs them with the host-side checks. Such a
+`parttable`, `amlscan`, `heldkeys`, `genet`) do, and `make test` runs them with the host-side checks. Such a
 crate is a workspace member but not a default-member, so until something
 depends on it `cargo build`, `make build` and `make esp` stay green while it
 is broken: run `make test` before pushing anything that touches one.
@@ -424,6 +425,9 @@ kernel/              every file annotated in full in `docs/source-map.md`; each 
   src/bootid.rs      the boot identity: a persisted per-boot counter + EFI_RNG boot entropy, before ExitBootServices (BOOT_ID)
   src/sdscan.rs      what the firmware says of the SD card's controller (SD-card arc steps 0, 0b): devicetree, ACPI _HID, SdIsArasan,
                      and the declared EMMC2's registers, read only; runs only under \SDDUMP, which also prints the tables in hex
+  src/netscan.rs     what the Pi 4's Ethernet says of itself (Pi net arc step 2): the GENET the ACPI tables declare and, with exactly
+                     one, the genet crate's scan of its registers (the version, the firmware's MAC address, the PHYs on MDIO); runs only
+                     under \NETDUMP, before the exit, and touches no register where none is declared
   src/bootdisk.rs    the boot partition: the HardDrive node of the image's own device path, read before the exit (one-disk step 1),
                      and is_boot_disk, which makes the disk booted from the block device (step 3); the matcher itself is parttable's
   src/virtio_net.rs  virtio-net: rx/tx queues, the 12-byte header, IRQ-driven receive - the DMA-owning half of the net stack
@@ -479,6 +483,9 @@ parttable/           partition tables, read: the MBR and GPT parsing (both CRCs,
 amlscan/             the devices an ACPI table declares present by _HID (virtio-mmio's "LNRO0005", the Pi's EMMC2 "BRCME88C" and Ethernet
                      "BCM6E4E"), their _CRS registers and interrupt, by a bounded walk of the AML that reads three method shapes exactly; the kernel probes no
                      other virtio-mmio address. Host-tested in make test, on the Pi's own tables too
+genet/               the Pi 4's Ethernet, Broadcom GENET v5: the logic that needs no hardware, over a Bus (read, write, delay) the caller
+                     lends, host-tested against a model of the device, since no QEMU machine has one. Today the read-only scan
+                     (roadmap-pi-net.md step 2); the driver is step 4. The model is ours: only the board is a foreign observer
 heldkeys/            netd's held user keys: the table, whose key signs for a parked request, and when a run sent under one ends; liveness
                      is passed in, so the rules that turn on a login dead and not yet reaped run on the host. netd is the one caller
 keyseq/              tells a key's escape sequence (ESC [ A) from ordinary input: the ONE filter every keyboard reader uses
@@ -497,8 +504,8 @@ scripts/             test-parallels.sh (real-hardware smoke test), drive-qemu.py
                      FOREIGN OBSERVER for both directions of the export)
 ```
 
-Seventy-nine-crate workspace (`cargo metadata`'s count, 2026-11-10). `kernel` and the shared libs (`ulib`,
-`syscall-abi`, `ninep-abi`, `accounts`, `regex`, `ed25519`, `clusterkeys`, `heldkeys`, `keyseq`, `parttable`, `amlscan`, `nsresolve`) sit at the repo root; **every userland
+Eighty-crate workspace (`cargo metadata`'s count, 2026-11-12). `kernel` and the shared libs (`ulib`,
+`syscall-abi`, `ninep-abi`, `accounts`, `regex`, `ed25519`, `clusterkeys`, `heldkeys`, `keyseq`, `parttable`, `amlscan`, `genet`, `nsresolve`) sit at the repo root; **every userland
 program lives under `programs/`, grouped by role** (`programs/shell`,
 `programs/servers/{fsd,cond,netd,accountd}`, `programs/demos/{hello,pong}`,
 `programs/fileutils/*`, `programs/textutils/*`, `programs/netutils/*`,

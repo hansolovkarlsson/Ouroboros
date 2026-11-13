@@ -212,6 +212,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "genet"
+version = "0.1.0"
+
+[[package]]
 name = "grep"
 version = "0.1.0"
 dependencies = [
@@ -376,6 +380,7 @@ version = "0.25.0"
 dependencies = [
  "amlscan",
  "fdt",
+ "genet",
  "keyseq",
  "log",
  "parttable",
