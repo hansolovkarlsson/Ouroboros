@@ -6,7 +6,8 @@
 //! and this is its step 5.
 //!
 //! **Step 5 is bring-up and link, and nothing more.** The device is made
-//! quiet, reset and set up, its PHY set up and its link read and logged,
+//! quiet ([`quiet`], for every declared GENET, used or not), reset and set
+//! up ([`init`]), its PHY set up and its link read and logged,
 //! and it is installed so `NET_MAC` answers. The MAC's transmitter and
 //! receiver are **left off**: [`Device::send_frame`] refuses and no frame
 //! arrives. Sending is step 6 and receiving step 7, each its own trip to
@@ -160,11 +161,69 @@ pub(crate) unsafe fn discover(rsdp: Option<*const u8>) -> Option<Declared> {
     Some(Declared { base: c.base })
 }
 
-/// The longest the boot waits for a link the PHY's reset dropped, and how
-/// often it asks. Autonegotiation of a gigabit link takes two to three
-/// seconds.
+/// The longest the boot waits for a link, and how often it asks. The PHY's
+/// reset drops the link, and autonegotiation of a gigabit one takes two
+/// to three seconds. A board with no cable waits the whole of it: nothing
+/// read before the reset says a cable is absent (a link bit that is low
+/// may be a link still coming up), so the wait is not skipped on a guess.
 const LINK_WAIT_MS: u64 = 5000;
 const LINK_POLL_MS: u64 = 100;
+
+/// The declared device, made quiet: [`quiet`]'s answer, and what [`init`]
+/// takes, so the device cannot be set up without having been stopped.
+pub(crate) struct Quieted {
+    bus: Mmio,
+    sys_rev: u32,
+}
+
+/// Makes the declared device quiet, whatever becomes of it afterwards
+/// (the plan's design 4): its interrupts masked, the MAC's transmitter and
+/// receiver off, both DMAs off and seen to be. A firmware that left it
+/// receiving would otherwise go on writing frames into memory that is no
+/// longer the firmware's. `main.rs` calls this for every declared GENET,
+/// also when another NIC holds the cell.
+///
+/// `None`, each with its line, when that could not be done: the block is
+/// not mapped as a device (nothing is touched, and **the device is left
+/// as the firmware left it**), the version is not v5 (nothing is
+/// written), or a DMA was told to stop and did not say it had.
+///
+/// # Safety
+/// After `mmu::install_identity_map`, once, on the boot core, with nothing
+/// else driving the device (the firmware's driver stopped with boot
+/// services).
+pub(crate) unsafe fn quiet(declared: Declared) -> Option<Quieted> {
+    let base = declared.base;
+    // Both ends of the block, by the MMU's own walk: its 1GB block may be
+    // one RAM's mapping took (`main.rs`, the console's check).
+    let last = base + u64::from(genet::BLOCK_LEN) - 4096;
+    if !mmu::walks_as_device(base) || !mmu::walks_as_device(last) {
+        console::println!(
+            "Ouroboros kernel: genet: WARNING: {base:#x} is not mapped as a device: the Ethernet is not touched, and is left as the firmware left it"
+        );
+        return None;
+    }
+    let mut bus = Mmio { base: base as usize };
+    let sys_rev = genet::Bus::read(&mut bus, genet::reg::SYS_REV_CTRL);
+    match genet::mac::quiet(&mut bus) {
+        None => {
+            let (major, minor) = genet::version(sys_rev);
+            console::println!(
+                "Ouroboros kernel: genet: version major {major} minor {minor} ({sys_rev:#010x}) is not GENET v5: nothing was written, the Ethernet is not brought up"
+            );
+            None
+        }
+        Some(stopped) if !stopped.both() => {
+            console::println!(
+                "Ouroboros kernel: genet: WARNING: the device was told to stop and did not say it had (transmit DMA stopped {}, receive DMA stopped {}): the Ethernet is not brought up",
+                stopped.tdma,
+                stopped.rdma
+            );
+            None
+        }
+        Some(_) => Some(Quieted { bus, sys_rev }),
+    }
+}
 
 /// The device, brought up.
 pub(crate) struct Device {
@@ -172,53 +231,33 @@ pub(crate) struct Device {
     genet: Genet,
 }
 
-/// Brings the declared device up: quiet first, then the crate's reset and
-/// set-up, the PHY found on MDIO and set up, the link read. One line says
-/// what it is and one what its link is; each way it can stop short says
-/// why. `None` when the device cannot be used, which leaves it quiet.
+/// Brings a quieted device up: the crate's reset and set-up, the PHY found
+/// on MDIO and set up, the link read. One line says what it is and one
+/// what its link is; each way it can stop short says why. `None` when the
+/// device cannot be used; it was made quiet before this, and a set-up that
+/// stops part way leaves the MAC off.
+///
+/// `dma_noncoherent` is what the firmware says of DMA. Where it is not
+/// coherent the receive area must walk non-cacheable on every page, and a
+/// device whose buffers do not is not set up: the receive DMA would be
+/// pointed at memory the CPU reads through a cache the device does not
+/// see.
 ///
 /// # Safety
-/// After `mmu::install_identity_map`, once, on the boot core, with nothing
-/// else driving the device (the firmware's driver stopped with boot
-/// services).
-pub(crate) unsafe fn init(declared: Declared) -> Option<Device> {
-    let base = declared.base;
-    // Both ends of the block, by the MMU's own walk: its 1GB block may be
-    // one RAM's mapping took (`main.rs`, the console's check).
-    let last = base + u64::from(genet::BLOCK_LEN) - 4096;
-    if !mmu::walks_as_device(base) || !mmu::walks_as_device(last) {
-        console::println!("Ouroboros kernel: genet: {base:#x} is not mapped as a device: the Ethernet is not brought up");
+/// As [`quiet`], which made `quieted`.
+pub(crate) unsafe fn init(quieted: Quieted, dma_noncoherent: bool) -> Option<Device> {
+    let Quieted { mut bus, sys_rev } = quieted;
+    let base = bus.base;
+    let (area, size) = dma_region();
+    if dma_noncoherent && !(0..size / 4096).all(|p| mmu::walks_as_noncacheable(area + p * 4096)) {
+        console::println!(
+            "Ouroboros kernel: genet: WARNING: the firmware says DMA is not coherent and the receive area does not walk non-cacheable on every page: the Ethernet is not brought up"
+        );
         return None;
     }
-    let mut bus = Mmio { base: base as usize };
+    let (major, minor) = genet::version(sys_rev);
 
-    // Quiet before anything else (the plan's design 4): whatever the
-    // firmware's driver left running stops writing memory here.
-    match genet::mac::quiet(&mut bus) {
-        None => {
-            let sys_rev = genet::Bus::read(&mut bus, genet::reg::SYS_REV_CTRL);
-            let (major, minor) = genet::version(sys_rev);
-            console::println!(
-                "Ouroboros kernel: genet: version major {major} minor {minor} ({sys_rev:#010x}) is not GENET v5: nothing was written, the Ethernet is not brought up"
-            );
-            return None;
-        }
-        Some(stopped) if !stopped.both() => {
-            console::println!(
-                "Ouroboros kernel: genet: the device was told to stop and did not say it had (transmit DMA stopped {}, receive DMA stopped {}): the Ethernet is not brought up",
-                stopped.tdma,
-                stopped.rdma
-            );
-            return None;
-        }
-        Some(_) => {}
-    }
-
-    // Read before the reset, for the MDIO scan's version gate and the log.
-    let registers = genet::registers(&mut bus, &mut |_, _, _| {});
-    let (major, minor) = genet::version(registers.sys_rev);
-
-    let mut device = match Genet::init(&mut bus, dma_region().0) {
+    let mut device = match Genet::init(&mut bus, area) {
         Ok(genet) => Device { bus, genet },
         Err(InitError::NoMac(m)) => {
             console::println!(
@@ -237,7 +276,8 @@ pub(crate) unsafe fn init(declared: Declared) -> Option<Device> {
         "Ouroboros kernel: genet: GENET v5 (version major {major} minor {minor}) @ {base:#x}, MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, set up on ring 16, polled",
         m[0], m[1], m[2], m[3], m[4], m[5]
     );
-    device.bring_up_phy(&registers);
+    // The MDIO scan's version gate reads the version alone.
+    device.bring_up_phy(&genet::Registers { sys_rev, ..genet::Registers::default() });
     console::println!("Ouroboros kernel: genet: the MAC's transmitter and receiver are left off: nothing is sent or received yet (step 5)");
     Some(device)
 }
@@ -264,10 +304,6 @@ impl Device {
                 return;
             }
         };
-        // The link as the firmware's era left it, before the reset below
-        // drops it: a link down now is most likely no cable, and is not
-        // waited for.
-        let before = phy::link_resolved(&mut self.bus, addr, id);
         match phy::setup(&mut self.bus, addr, id) {
             Ok(Some(d)) => console::println!(
                 "Ouroboros kernel: genet: PHY at MDIO address {addr}, id {id:#010x}: set up and reset; after the reset its receive clock skew is {} and its transmit clock delay {} (shadows {:#06x}, {:#06x}): {}",
@@ -285,26 +321,25 @@ impl Device {
                 return;
             }
         }
-        let waited = !matches!(before, Ok(Link::Down));
+        // Asked until the link is up or the time is: a read that fails,
+        // or says down or negotiating, is asked again. Only the last
+        // answer is reported.
+        let deadline = timer::deadline_us(LINK_WAIT_MS * 1000);
         let mut link = phy::link_resolved(&mut self.bus, addr, id);
-        if waited {
-            let deadline = timer::deadline_us(LINK_WAIT_MS * 1000);
-            while !matches!(link, Ok(Link::Up { .. }) | Ok(Link::Unresolved) | Err(_)) && timer::now_ticks() < deadline {
-                timer::delay_us(LINK_POLL_MS * 1000);
-                link = phy::link_resolved(&mut self.bus, addr, id);
-            }
+        while !matches!(link, Ok(Link::Up { .. })) && timer::now_ticks() < deadline {
+            timer::delay_us(LINK_POLL_MS * 1000);
+            link = phy::link_resolved(&mut self.bus, addr, id);
         }
-        let how = if waited { "waited for up to 5 s" } else { "not waited for: it was down before the PHY's reset" };
         match link {
             Ok(Link::Up { speed, full }) => console::println!(
                 "Ouroboros kernel: genet: link up, {} Mb/s, {} duplex",
                 speed.mbps(),
                 if full { "full" } else { "half" }
             ),
-            Ok(Link::Down) => console::println!("Ouroboros kernel: genet: link down ({how})"),
-            Ok(Link::Negotiating) => console::println!("Ouroboros kernel: genet: link still negotiating ({how})"),
-            Ok(Link::Unresolved) => console::println!("Ouroboros kernel: genet: link up at a speed the PHY does not name"),
-            Err(e) => console::println!("Ouroboros kernel: genet: the link did not read ({e:?})"),
+            Ok(Link::Down) => console::println!("Ouroboros kernel: genet: link down (waited {LINK_WAIT_MS} ms)"),
+            Ok(Link::Negotiating) => console::println!("Ouroboros kernel: genet: link still negotiating (waited {LINK_WAIT_MS} ms)"),
+            Ok(Link::Unresolved) => console::println!("Ouroboros kernel: genet: link up at a speed the PHY does not name (waited {LINK_WAIT_MS} ms)"),
+            Err(e) => console::println!("Ouroboros kernel: genet: the link did not read ({e:?}, waited {LINK_WAIT_MS} ms)"),
         }
     }
 
@@ -313,12 +348,14 @@ impl Device {
         self.genet.mac()
     }
 
-    /// Whether a received frame waits: one register read, nothing written,
-    /// no wait, as the tick's caller needs. Always false while the MAC is
-    /// off (step 5).
+    /// Whether a received frame waits: at most one register read, nothing
+    /// written, no wait, as the tick's caller needs. **False while the MAC
+    /// is not started, without asking the device**: `poll_frame` takes
+    /// nothing in step 5, and a "yes" that nothing can consume would wake
+    /// the network server on every tick for good.
     pub(crate) fn has_frame(&self) -> bool {
         let mut bus = self.bus;
-        self.genet.has_frame(&mut bus)
+        self.genet.started() && self.genet.has_frame(&mut bus)
     }
 
     /// Refuses: the MAC is not started in step 5, and step 6 is where a

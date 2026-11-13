@@ -154,7 +154,8 @@
 //! index 2, `0x44`), is mapped for exactly the ranges
 //! `install_identity_map` is given in `uncached`, and of those only the
 //! ones inside RAM: `main.rs` passes the xHCI/USB DMA pool
-//! (`xhci::dma_region`) only when the firmware's ACPI declares DMA
+//! (`xhci::dma_region`) and, since 2026-11-13, the Pi's Ethernet's receive
+//! buffers (`genetnic::dma_region`) only when the firmware's ACPI declares DMA
 //! non-coherent (`_CCA 0`, `acpi::dma_noncoherent`) - under a hypervisor
 //! that emulates the device, a guest-side non-cacheable mapping could
 //! disagree with the host's cacheable one, so coherent platforms keep the
@@ -350,8 +351,10 @@ static L1_TABLES: [Table; MAX_EL0_REGIONS] =
 /// BAR, GICD, GICR, and the discovered serial console (added 2026-09-28,
 /// when the Pi 4's devicetree console turned out to sit at 0xfe201000, far
 /// above the fixed low-1GB device block; it was covered only by the GIC's
-/// 1GB block, by coincidence).
-pub(crate) const MAX_EXTRA_DEVICES: usize = 5;
+/// 1GB block, by coincidence). Seven since 2026-11-13, for the SD host
+/// controller and the Pi's Ethernet: with five, both were mapped on the Pi
+/// by the same coincidence, the console's block holding them.
+pub(crate) const MAX_EXTRA_DEVICES: usize = 7;
 
 /// [`install_identity_map`]'s inputs, kept around after its first call so
 /// a later runtime caller (`rebuild_with_el0_regions`, for
@@ -410,7 +413,8 @@ static BUILT_REGIONS: SyncCell<[(u64, u64); MAX_EL0_REGIONS]> = SyncCell::new([(
 // `exceptions.rs`'s module doc comment). Cheap to size generously: each
 // slot is one 4KB table. One per `extra_devices` entry, so the count
 // follows `MAX_EXTRA_DEVICES` (five since the console joined the list,
-// 2026-09-28) rather than being bumped by hand beside it.
+// 2026-09-28, seven since the SD controller and the Ethernet did,
+// 2026-11-13) rather than being bumped by hand beside it.
 const MAX_EXTRA_L1_TABLES: usize = MAX_EXTRA_DEVICES;
 static EXTRA_L1_TABLES: [Table; MAX_EXTRA_L1_TABLES] =
     [const { Table(SyncCell::new([0; ENTRIES_PER_TABLE])) }; MAX_EXTRA_L1_TABLES];
@@ -429,8 +433,9 @@ static EL0_L3_TABLES: [Table; MAX_EL0_REGIONS] =
     [const { Table(SyncCell::new([0; ENTRIES_PER_TABLE])) }; MAX_EL0_REGIONS];
 
 /// The most non-cacheable ranges [`install_identity_map`] takes
-/// (`uncached`): today the xHCI/USB DMA pool, where the firmware declares
-/// DMA non-coherent, with room to spare.
+/// (`uncached`): today the xHCI/USB DMA pool and the Pi's Ethernet's
+/// receive buffers, where the firmware declares DMA non-coherent, with
+/// room to spare.
 const MAX_UNCACHED: usize = 4;
 /// Every range an [`NcPlan`] can hold: exactly the explicit ones. Nothing
 /// is made non-cacheable implicitly - an automatic "every device region
