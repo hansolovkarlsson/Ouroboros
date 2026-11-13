@@ -273,6 +273,19 @@ pub struct Drops {
     pub flagged: u32,
 }
 
+/// Whether [`Genet::start`] turns the MAC's receiver on with its
+/// transmitter. A choice every caller makes, so that a receiver is never
+/// on because nobody said otherwise: once it is on, the receive DMA
+/// writes frames into the caller's memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Receiver {
+    /// The transmitter alone. No frame arrives, the receive DMA writes
+    /// nothing, and [`Genet::has_frame`] says no. The plan's step 6.
+    Off,
+    /// Both, as U-Boot's `bcmgenet_gmac_eth_start` ends.
+    On,
+}
+
 /// The device, set up. Holds what the registers do not: the address and
 /// the two indexes this side advances. Where the receive buffers are is the
 /// caller's to remember: a frame is named by its buffer's index.
@@ -285,6 +298,8 @@ pub struct Genet {
     /// The transmit producer index: frames handed over, 16 bits.
     tx_prod: u16,
     started: bool,
+    /// Whether a `start` has turned the MAC's receiver on.
+    receiving: bool,
     /// Whether `rx_next` has returned a frame not yet released.
     rx_held: bool,
     drops: Drops,
@@ -517,7 +532,7 @@ impl Genet {
         bus.write(reg::TDMA_CTRL, DMA_RING16_EN | DMA_EN);
         set(bus, reg::RDMA_CTRL, DMA_RINGS_0_15_EN, DMA_RING16_EN | DMA_EN);
 
-        Ok(Genet { mac: address, rx_cons, tx_prod, started: false, rx_held: false, drops: Drops::default() })
+        Ok(Genet { mac: address, rx_cons, tx_prod, started: false, receiving: false, rx_held: false, drops: Drops::default() })
     }
 
     /// The station address read before the reset and written back after.
@@ -525,9 +540,15 @@ impl Genet {
         self.mac
     }
 
-    /// Whether [`start`](Self::start) has turned the MAC on.
+    /// Whether [`start`](Self::start) has turned the MAC's transmitter
+    /// on.
     pub fn started(&self) -> bool {
         self.started
+    }
+
+    /// Whether a [`start`](Self::start) has turned the MAC's receiver on.
+    pub fn receiving(&self) -> bool {
+        self.receiving
     }
 
     /// Received frames dropped since [`init`](Self::init), by cause.
@@ -535,20 +556,35 @@ impl Genet {
         self.drops
     }
 
-    /// Tells the MAC the link's speed and turns its transmitter and
-    /// receiver on: U-Boot's `bcmgenet_adjust_link` for the board's
-    /// `rgmii-rxid`, then its last step. Run it once the PHY reports a
-    /// link, and again when a later link comes up at another speed: on a
-    /// MAC already on, the speed changes with the enables held (U-Boot's
-    /// own write of the speed alone would turn a running MAC off for one
-    /// write). The first time the writes are U-Boot's.
-    pub fn start<B: Bus>(&mut self, bus: &mut B, speed: Speed) {
+    /// Tells the MAC the link's speed and turns its transmitter on, and
+    /// its receiver too when `receiver` says so: U-Boot's
+    /// `bcmgenet_adjust_link` for the board's `rgmii-rxid`, then its last
+    /// step. Run it once the PHY reports a link, and again when a later
+    /// link comes up at another speed: on a MAC already on, the speed
+    /// changes with the enables held (U-Boot's own write of the speed
+    /// alone would turn a running MAC off for one write). The first time,
+    /// with [`Receiver::On`], the writes are U-Boot's.
+    ///
+    /// **`ID_MODE_DIS` is set, as U-Boot sets it:** the MAC adds no delay
+    /// to the transmit clock, so the PHY must, and on the Pi 4 it does
+    /// after `phy::setup` (`phy.rs`'s module doc; read on the board,
+    /// 2026-11-13).
+    ///
+    /// [`Receiver::Off`] turns no receiver on and none off: one an
+    /// earlier start turned on stays on, and [`stop`](Self::stop) is the
+    /// way to turn it off.
+    pub fn start<B: Bus>(&mut self, bus: &mut B, speed: Speed, receiver: Receiver) {
         set(bus, reg::EXT_RGMII_OOB_CTRL, OOB_DISABLE, RGMII_LINK | RGMII_MODE_EN);
         set(bus, reg::EXT_RGMII_OOB_CTRL, 0, ID_MODE_DIS);
         let enables = bus.read(reg::UMAC_CMD) & (CMD_TX_EN | CMD_RX_EN);
         bus.write(reg::UMAC_CMD, ((speed as u32) << CMD_SPEED_SHIFT) | enables);
-        set(bus, reg::UMAC_CMD, 0, CMD_TX_EN | CMD_RX_EN);
+        let on = match receiver {
+            Receiver::Off => CMD_TX_EN,
+            Receiver::On => CMD_TX_EN | CMD_RX_EN,
+        };
+        set(bus, reg::UMAC_CMD, 0, on);
         self.started = true;
+        self.receiving |= receiver == Receiver::On;
     }
 
     /// Makes the device quiet, as [`quiet`] does, **and gives the device
@@ -563,11 +599,12 @@ impl Genet {
 
     /// Whether a received frame waits: at most one register read, nothing
     /// written, no wait. The kernel calls this from its tick. **False
-    /// until [`start`](Self::start), without asking the device:** the
-    /// receiver is off, so no frame is this driver's to take, and a "yes"
-    /// from an index the firmware's era left would be one nothing ends.
+    /// until a [`start`](Self::start) with [`Receiver::On`], without
+    /// asking the device:** the receiver is off, so no frame is this
+    /// driver's to take, and a "yes" from an index the firmware's era
+    /// left would be one nothing ends.
     pub fn has_frame<B: Bus>(&self, bus: &mut B) -> bool {
-        self.started && (bus.read(reg::RDMA_PROD_INDEX) & DMA_INDEX_MASK) as u16 != self.rx_cons
+        self.receiving && (bus.read(reg::RDMA_PROD_INDEX) & DMA_INDEX_MASK) as u16 != self.rx_cons
     }
 
     /// Looks at the next received frame. A usable one is returned and

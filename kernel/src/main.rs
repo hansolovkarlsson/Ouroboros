@@ -791,11 +791,11 @@ extern "C" fn kernel_main() -> ! {
         // to memory for the display engine (Risk 7) - correct on bare
         // metal and under a hypervisor alike, and a scroll reads cached
         // memory rather than uncached.
-        // The GENET's receive buffers by the same rule (genetnic.rs): its
-        // driver does no cache maintenance either. Both ranges or neither,
+        // The GENET's receive buffers and its transmit buffer by the same
+        // rule (genetnic.rs): its driver does no cache maintenance either. All three ranges or none,
         // whichever device is there, so the map does not depend on what
         // was found.
-        let uncached = [xhci::dma_region(), genetnic::dma_region()];
+        let uncached = [xhci::dma_region(), genetnic::dma_region(), genetnic::tx_region()];
         let uncached_count = if dma_noncoherent { uncached.len() } else { 0 };
         mmu::install_identity_map(
             memory_map,

@@ -428,7 +428,7 @@ impl Bus for Dev {
 
 fn up(d: &mut Dev) -> Genet {
     let mut g = Genet::init(d, RX_BASE).expect("the board sets up");
-    g.start(d, Speed::S1000);
+    g.start(d, Speed::S1000, Receiver::On);
     assert!(d.violations.is_empty(), "{:?}", d.violations);
     d.ops.clear();
     d.reads.clear();
@@ -728,20 +728,66 @@ fn start_tells_the_mac_the_speed_then_turns_it_on() {
         let mut d = board();
         let mut g = Genet::init(&mut d, RX_BASE).unwrap();
         d.ops.clear();
-        g.start(&mut d, speed);
+        g.start(&mut d, speed, Receiver::On);
         // bcmgenet_adjust_link: OOB_DISABLE (0x20) off, RGMII_LINK and
         // RGMII_MODE_EN on, then ID_MODE_DIS; the speed; the enables.
         assert_eq!(d.ops, [W(0x8c, 0x50), W(0x8c, 0x0001_0050), W(0x808, word), W(0x808, word | 3)]);
         assert!(!d.ops.contains(&D(0)));
-        assert!(g.started() && d.rx_running() && d.tx_running());
+        assert!(g.started() && g.receiving() && d.rx_running() && d.tx_running());
     }
+}
+
+#[test]
+fn start_with_the_receiver_off_turns_on_the_transmitter_alone() {
+    for (speed, word) in [(Speed::S10, 0x0), (Speed::S100, 0x4), (Speed::S1000, 0x8)] {
+        let mut d = board();
+        let mut g = Genet::init(&mut d, RX_BASE).unwrap();
+        d.ops.clear();
+        g.start(&mut d, speed, Receiver::Off);
+        // The same writes but the last, which has bit 0 alone.
+        assert_eq!(d.ops, [W(0x8c, 0x50), W(0x8c, 0x0001_0050), W(0x808, word), W(0x808, word | 1)]);
+        assert!(g.started() && !g.receiving() && d.tx_running() && !d.rx_running());
+    }
+}
+
+#[test]
+fn with_the_receiver_off_a_frame_is_sent_and_none_is_looked_for() {
+    let mut d = board();
+    let mut g = Genet::init(&mut d, RX_BASE).unwrap();
+    g.start(&mut d, Speed::S1000, Receiver::Off);
+    assert_eq!(g.tx_send(&mut d, TX_ADDR, 60), Ok(()));
+    assert_eq!(d.sent.len(), 1);
+    // An index the firmware's era left ahead of ours is not a frame, and
+    // the device is not asked.
+    d.rx_prod = 3;
+    d.ops.clear();
+    d.reads.clear();
+    assert!(!g.has_frame(&mut d));
+    assert_eq!(g.rx_next(&mut d), Rx::None);
+    assert!(d.reads.is_empty() && d.ops.is_empty());
+}
+
+#[test]
+fn the_receiver_comes_on_at_a_later_start_and_is_not_turned_off_by_one() {
+    let mut d = board();
+    let mut g = Genet::init(&mut d, RX_BASE).unwrap();
+    g.start(&mut d, Speed::S1000, Receiver::Off);
+    g.start(&mut d, Speed::S1000, Receiver::On);
+    assert!(g.receiving() && d.rx_running() && d.tx_running());
+    // The transmitter was never off on the way.
+    let cmds: Vec<u32> = d.writes().iter().filter(|w| w.0 == UMAC_CMD && w.1 & 0xa000 == 0).map(|w| w.1).collect();
+    assert_eq!(&cmds[cmds.len() - 4..], [0x8, 0x9, 0x9, 0xb]);
+    // A start that asks for no receiver leaves a running one running.
+    g.start(&mut d, Speed::S100, Receiver::Off);
+    assert!(g.receiving() && d.rx_running());
+    assert_eq!(d.reg(UMAC_CMD), 0x7);
 }
 
 #[test]
 fn a_second_start_changes_the_speed_and_leaves_the_mac_on() {
     let mut d = board();
     let mut g = up(&mut d);
-    g.start(&mut d, Speed::S100);
+    g.start(&mut d, Speed::S100, Receiver::On);
     assert_eq!(d.reg(UMAC_CMD), 0x7);
     assert_eq!(d.reg(OOB), 0x0001_0050);
     // The MAC was never off on the way: every write to it had both enables.
@@ -1251,7 +1297,12 @@ fn an_mdio_write_is_u_boots_command_in_two_writes() {
 #[test]
 fn setup_is_u_boots_clock_delays_then_its_reset() {
     let mut d = bcm();
-    let delays = setup(&mut d, 1, BCM).unwrap().expect("a BCM54210E").delays().expect("read back");
+    let set_up = setup(&mut d, 1, BCM).unwrap().expect("a BCM54210E");
+    // What the PHY held before any write: the two reads the write-backs
+    // are made from, so the log below has no command for them.
+    assert_eq!(set_up.found, Delays { misc: 0x0077, clk: 0x0210 });
+    assert!(!set_up.found.rx_skew() && set_up.found.tx_delay());
+    let delays = set_up.delays().expect("read back");
     assert_eq!(
         d.mdio_log,
         [
@@ -1308,6 +1359,11 @@ fn a_reset_that_wipes_the_delays_is_seen_in_what_setup_returns() {
     let delays = setup(&mut d, 1, BCM).unwrap().unwrap().delays().unwrap();
     assert_eq!(delays, Delays { misc: 0x0007, clk: 0x0200 });
     assert!(!delays.rx_skew() && delays.tx_delay() && !delays.as_written());
+    // The board's own reading, 2026-11-13: both on. Not as written, and
+    // the state the MAC's ID_MODE_DIS needs.
+    let board_read = Delays { misc: 0x71e7, clk: 0x0200 };
+    assert!(board_read.as_uboot_leaves() && !board_read.as_written());
+    assert!(!Delays { misc: 0x0100, clk: 0 }.as_uboot_leaves() && !Delays { misc: 0, clk: 0x0200 }.as_uboot_leaves());
     // The writes themselves were U-Boot's, as in the test above.
     assert!(d.mdio_log.contains(&(true, 0x18, 0x8177)) && d.mdio_log.contains(&(true, 0x1c, 0x8c10)));
     // Each half alone is not "as written".
@@ -1363,9 +1419,11 @@ fn a_read_back_that_gets_no_answer_is_not_a_failed_setup() {
     // read-back failed, where an all-ones value would have said "on".
     let mut d = bcm();
     d.aux_reads_ones_after_reset = true;
-    let read_back = setup(&mut d, 1, BCM).unwrap().unwrap();
-    assert_eq!(read_back, ReadBack::Failed(MdioError::NoAnswer));
-    assert_eq!(read_back.delays(), None);
+    let set_up = setup(&mut d, 1, BCM).unwrap().unwrap();
+    assert_eq!(set_up.after, ReadBack::Failed(MdioError::NoAnswer));
+    assert_eq!(set_up.delays(), None);
+    // What was found before the writes was read, and is still said.
+    assert_eq!(set_up.found, Delays { misc: 0x0077, clk: 0x0210 });
     assert!(d.mdio_log.contains(&(true, 0x18, 0x8177)) && d.mdio_log.contains(&(true, 0x1c, 0x8c10)));
     assert_eq!(d.resets, 1);
 }

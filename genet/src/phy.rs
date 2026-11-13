@@ -21,11 +21,18 @@
 //! - [`setup`] is `bcm54210e_config` for the board's `rgmii-rxid`: the
 //!   PHY's receive clock skew on and its transmit clock delay off
 //!   (`bcm54xx_config_clock_delay`), then a reset (`phy_reset`), **in that
-//!   order, which is U-Boot's**; Linux resets first. Whether the reset
-//!   keeps the two delay settings is not known here, so `setup` reads
-//!   both back after it and returns them ([`ReadBack`], [`Delays`]): the first board
-//!   run says which it is, and a set-up the PHY did not take is seen and
-//!   not assumed.
+//!   order, which is U-Boot's**; Linux resets first. `setup` reads both
+//!   shadows back after the reset and returns them ([`ReadBack`],
+//!   [`Delays`]), with what it found before it wrote ([`SetUp`]).
+//!   **The board's answer (2026-11-13, three boots): after the reset the
+//!   receive clock skew is on and the transmit clock delay is on**, not
+//!   off as written. That is the state U-Boot's MAC setting needs:
+//!   `Genet::start` sets `ID_MODE_DIS` as U-Boot does, so the MAC adds no
+//!   delay and the PHY's is the only one ([`Delays::as_uboot_leaves`]).
+//!   **Do not write the delay off again after the reset**: with
+//!   `ID_MODE_DIS` set that is no delay at all. The other pairing is
+//!   Linux's whole (the reset first, the delay off, `ID_MODE_DIS` clear).
+//!   The plan's step 4b has the working-out.
 //! - [`link_resolved`] reads the speed the PHY settled on from its
 //!   auxiliary status register (`bcm54xx_parse_status`), which is right
 //!   on the poor cable where the advertisements are not.
@@ -226,6 +233,25 @@ pub struct Delays {
     pub clk: u16,
 }
 
+/// What [`setup`] did to a PHY it takes: the two delay shadows as it
+/// found them, before any write, and as they read after the reset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetUp {
+    /// The shadows as the last owner of the PHY left them (on the Pi, the
+    /// UEFI firmware's driver). These are the reads `setup` makes to
+    /// write the shadows back, so they cost no MDIO command.
+    pub found: Delays,
+    /// The shadows after the reset.
+    pub after: ReadBack,
+}
+
+impl SetUp {
+    /// The shadows after the reset, when they were read.
+    pub fn delays(&self) -> Option<Delays> {
+        self.after.delays()
+    }
+}
+
 /// What [`setup`]'s read-back of the two delay shadows came to. The
 /// set-up itself was done either way: the read-back only reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -261,6 +287,13 @@ impl Delays {
     /// fact the board run is asked for.
     pub fn as_written(&self) -> bool {
         self.rx_skew() && !self.tx_delay()
+    }
+    /// The receive clock skew on and the transmit clock delay on: what
+    /// the Pi 4's PHY read after this set-up on 2026-11-13, and the state
+    /// `Genet::start`'s `ID_MODE_DIS` needs, since with it the MAC delays
+    /// nothing and the PHY's transmit delay is the only one.
+    pub fn as_uboot_leaves(&self) -> bool {
+        self.rx_skew() && self.tx_delay()
     }
 }
 
@@ -303,7 +336,9 @@ fn read_clk<B: Bus>(bus: &mut B, phy: u8) -> Result<u16, MdioError> {
 /// 3. the PHY reset, and the reset bit polled until it reads clear. A
 ///    read the PHY does not answer, or that reads all ones, is a PHY
 ///    still resetting and is polled past;
-/// 4. both shadows read back, and returned: what the PHY holds now. A
+/// 4. both shadows read back, and returned beside the values steps 1 and
+///    2 read before writing: what the PHY holds now, and what it held
+///    when it was handed over. A
 ///    read-back that gets no answer is said to have failed and is not a
 ///    value (the board's log is read for these two, and all ones would say
 ///    "both on"), **and it is not a failure of the set-up**, which was
@@ -313,7 +348,7 @@ fn read_clk<B: Bus>(bus: &mut B, phy: u8) -> Result<u16, MdioError> {
 /// of reset costs half a second of waits plus 500 reads: about 0.5 s on a
 /// bus that answers promptly, and about 10.5 s at the bound, on a bus
 /// whose every read takes the whole 20 ms a command is allowed.
-pub fn setup<B: Bus>(bus: &mut B, phy: u8, id: u32) -> Result<Option<ReadBack>, SetupError> {
+pub fn setup<B: Bus>(bus: &mut B, phy: u8, id: u32) -> Result<Option<SetUp>, SetupError> {
     if !is_bcm54210e(id) {
         return Ok(None);
     }
@@ -343,10 +378,11 @@ pub fn setup<B: Bus>(bus: &mut B, phy: u8, id: u32) -> Result<Option<ReadBack>, 
         return Err(SetupError::ResetStuck);
     }
     let read_back = |bus: &mut B| Ok(Delays { misc: read_misc(bus, phy)?, clk: read_clk(bus, phy)? });
-    Ok(Some(match read_back(bus) {
+    let after = match read_back(bus) {
         Ok(delays) => ReadBack::Read(delays),
         Err(e) => ReadBack::Failed(e),
-    }))
+    };
+    Ok(Some(SetUp { found: Delays { misc, clk }, after }))
 }
 
 /// Reads the link of the PHY at `phy`: the status register twice, and for
