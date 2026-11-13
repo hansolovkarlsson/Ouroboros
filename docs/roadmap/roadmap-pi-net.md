@@ -25,8 +25,10 @@ cluster's own proof between them: `mount -r` of one from the other and a
 
 ## What is known
 
-Each line says where it was read. Nothing here has been read off the board's
-registers yet; step 2 does that.
+Each line says where it was read. The board's registers were first read on
+2026-11-13, by step 2's scan and step 5's bring-up in the same three boots;
+what they said is the block "From the board's registers" below, and it
+outranks every other line here where the two disagree.
 
 **From the board's own ACPI tables** (`amlscan/testdata/pi4-dsdt.aml`,
 dumped off the board on 2026-11-05, read on 2026-11-12):
@@ -130,6 +132,54 @@ the priority queues this plan does not use; the firmware leaves the board's
 MAC address in `UMAC_MAC0`/`UMAC_MAC1` for the operating system to read
 (Linux reads it there under ACPI); the firmware's own driver is idle unless
 it network-booted.
+**What the board said of these on 2026-11-13:** the PHY's address and the
+MAC address were right; "idle unless it network-booted" was **wrong**; the
+two interrupts' roles are still unread, since the driver is polled. The
+block below has the values.
+
+**From the board's registers** (a Pi 4, three boots on 2026-11-13 of build
+`e9cd5de57bfc`, debug, from an SD card with `\NETDUMP`: two with the cable
+in, then one with it out; serial in `screenlog.0`, which is not in the
+tree, so the values are copied here):
+
+- **One GENET is declared present**, at `0xfd580000`, `0x10000` bytes,
+  INTID 189 (unreadable 0, absent 0, status unknown 0, dropped 0).
+- **It is v5.** `SYS_REV_CTRL` reads `0x06000000`: major 6, minor 0.
+- **The firmware leaves the board's MAC address in the registers.**
+  `UMAC_MAC0` `0xd83add85`, `UMAC_MAC1` `0x00002422`:
+  `d8:3a:dd:85:24:22`, the same in all three boots, and the address
+  the firmware's setup screen shows (compared by Hans, 2026-11-13).
+- **The firmware leaves the device running, on a boot from the card.**
+  Before the exit `UMAC_CMD` reads `0x0000001b` with the cable in and
+  `0x00000013` with it out (transmit and receive enabled in both), and
+  both DMA control registers read `0x00020001` (on) in all three boots. So
+  the prediction that its driver is idle unless it network-booted was
+  wrong, and the code that stops the device (`halt`) runs against a live
+  device on every boot.
+- **The other registers before the exit:** `SYS_PORT_CTRL` `0x00000003`;
+  `EXT_RGMII_OOB_CTRL` `0x00f00050` with the cable in and `0x00f00000`
+  with it out (so the firmware has RGMII mode and the link bit set when
+  there is a link, and `ID_MODE_DIS`, bit 16, clear either way); the
+  INTRL2_0 mask status `0x07fedfff`.
+- **One PHY, at MDIO address 1, id `0x600d84a2`.** The other 31 addresses
+  were flagged no answer; none read all ones or zero, none answered in
+  part. The driver takes this id for the one U-Boot's BCM54210E set-up
+  matches. Nothing on the board names the part.
+- **The PHY's link follows the cable.** Status `0x796d`, link up,
+  autonegotiation done, in both cable-in boots; `0x7949`, link down,
+  autonegotiation not done, with the cable out.
+- **After the driver's set-up and reset the PHY's delays read: receive
+  clock skew on, transmit clock delay on** (shadows `0x71e7` and
+  `0x0200`), the same in all three boots. The set-up wrote the transmit
+  clock delay off, so the line ends `NOT as written`. The read-back alone
+  does not say whether the reset put the delay back or the write never
+  took: the value before the reset is read by `setup` but not logged.
+  **What this means for a frame is not worked out, and step 6 does not
+  start before it is.**
+- **The link the driver reads:** up, 1000 Mb/s, full duplex, with the
+  cable in; down after the whole 5000 ms wait with it out.
+- **The receive area walks as non-cacheable** in the running tables, 128
+  of 128 pages, at `0x378f4000`.
 
 **From this tree:**
 
@@ -315,7 +365,8 @@ Each has a recommendation; none blocks step 2.
    kernel lends the scan refuses any other
    (`genet::scan_write_allowed`); everything else is a read.
    Without the flag nothing here runs, as with `\SDDUMP`.
-   **Built 2026-11-12, not yet run on the board.** The scan is the first
+   **Built 2026-11-12; run on the board 2026-11-13, and it passed** (the
+   result is at the end of this step). The scan is the first
    piece of design 2's crate, in two halves over a `Bus` trait (read,
    write, delay; a trait where the design said a closure, since there are
    three operations): `genet::registers`, which reads the version and
@@ -375,7 +426,7 @@ Each has a recommendation; none blocks step 2.
    requires that no device was dropped; `emmc2_from_acpi` and
    `sdscan.rs` take the one device whatever the counts beside it. The
    helper has to choose one rule.
-   **The check on the board, still owed:** the version's major reads 6;
+   **The check on the board:** the version's major reads 6;
    the MAC address is the one the board's own firmware setup screen shows
    (or the Mac's ARP table from the Pi's own operating system), and not
    zeros; the PHY id is a Broadcom one; the status register's link bit
@@ -385,6 +436,18 @@ Each has a recommendation; none blocks step 2.
    kernel (design 4). `touch NETDUMP` at the card's boot
    partition root, boot with serial captured, and the lines start
    `Ouroboros kernel: net:` (`testing-pi4.md`, the boot flag table).
+   **Run 2026-11-13, by Hans: passed.** Three boots of build
+   `e9cd5de57bfc`, two with the cable in and one with it out. Version
+   major 6; MAC address `d8:3a:dd:85:24:22`, not zeros; one PHY, at
+   address 1 as predicted, id `0x600d84a2`; the link bit up with the cable
+   (status `0x796d`, twice) and down without it (`0x7949`). Every value is
+   under "What is known", "From the board's registers". The MAC address
+   is the one the firmware's setup screen shows, compared by Hans the
+   same day, so the check is whole. **The firmware has both DMAs and the MAC's
+   transmitter and receiver on before the exit**, on a boot from the card.
+   The card's kernel was `main`, which holds step 5 too, so these boots
+   were also step 5's run; the scan's lines come before the exit and
+   step 5's code runs after it.
 
 3. **The NIC enum.** `nic.rs` with the virtio arm alone, `syscall.rs` and
    `init_net()` moved onto it. No behaviour changes.
@@ -648,6 +711,15 @@ Each has a recommendation; none blocks step 2.
    (a wrong one is frames with bad checksums, or none), whether the reset
    keeps them (`setup`'s answer), and whether the PHY is this one
    (step 2's scan reads its identifier).
+   **The board's answers, 2026-11-13.** The PHY's id is `0x600d84a2`,
+   which `setup` takes as this one. After the reset the receive clock skew
+   reads on and the transmit clock delay reads **on**, where `setup` wrote
+   it off (shadows `0x71e7`, `0x0200`; `NOT as written`, in three boots of
+   three). So what U-Boot's order leaves on this PHY is not what its
+   delay function writes, at least for the transmit side. Whether these
+   are the right delays is still open, and only a frame on the wire
+   answers it (step 6's `tcpdump`); what the reading means for the MAC's
+   side of the delay is to be worked out before step 6 is written.
 
 5. **The board: bring-up and link.** One helper in `acpi.rs` for "the one
    device of this `_HID` declared present", used by this driver, the scan
@@ -666,7 +738,8 @@ Each has a recommendation; none blocks step 2.
    A sustained boot shows no fault, with the tick calling `has_frame`
    throughout. One variable: nothing is sent yet.
 
-   **Built 2026-11-13 (#457), not yet run on the board.**
+   **Built 2026-11-13 (#457); run on the board the same day, as #460 left
+   it** (the result is at the end of this step).
    `kernel/src/genetnic.rs` is the kernel's half (named so because a
    module called `genet` would clash with the crate). Before the exit,
    `discover` takes the one GENET the tables declare, through the helper
@@ -886,6 +959,40 @@ Each has a recommendation; none blocks step 2.
    stop and has not yet said it had` is a note and not a refusal; `its
    delays did not read back` leaves the PHY's question unanswered for
    that boot, and the link is still read.
+
+   **Run on the board 2026-11-13, by Hans: the check passed where it
+   could be read.** The same three boots as step 2's (build
+   `e9cd5de57bfc`, which is `main` after #460). In each, after the exit:
+   - `genet: receive area 0x378f4000, 0x80000 bytes: walks as
+     non-cacheable memory (128 of 128 pages non-cacheable)`, the line
+     whose control on QEMU says cacheable.
+   - `genet: GENET v5 (version major 6 minor 0) @ 0xfd580000, MAC
+     d8:3a:dd:85:24:22, set up on ring 16, polled`: step 2's values.
+   - The PHY's line, ending `NOT as written` (step 4b has the reading).
+   - `link up, 1000 Mb/s, full duplex` in both cable-in boots; `link down
+     (waited 5000 ms)` with the cable out, and that boot went on to a
+     login.
+   - `NIC installed for the network server`, and `netd` no longer prints
+     `no NIC this boot`. With the cable in, `ping 192.168.0.1` said
+     `unreachable (no ARP reply)`: for want of an answer, not for want of
+     a NIC, as the check asks. (That ping could not have been answered
+     with the MAC on either: `netd`'s address is still SLIRP's, step 8.)
+   - No `EXCEPTION` line in any of the three boots, each run to a login
+     and a `shutdown`. None was left running long, so "a sustained boot
+     shows no fault" is not yet shown.
+   **The stop ran against a live device and raised no line.** The firmware
+   had both DMAs and the MAC on (step 2), and none of the boots printed
+   the transmit DMA's note or a refusal. That is read from the absence of
+   a line: the driver prints nothing when a DMA says it stopped, so the
+   log does not show the status it read or how long the stop took.
+   **The SD path changed by #457 works on the board:** `sd: ACPI declares
+   EMMC2 @ 0xfe340000`, the card brought up as the boot disk, its ext2
+   root mounted, in all three boots. `acpi::declared` and
+   `Transports::one` gave the SD card's discovery the answer its own
+   copy did.
+   **Left open by the run:** the transmit clock delay (step 4b, and
+   before step 6);
+   `LINK_WAIT_MS`, whose 5 s the cable-out boot paid in full.
 
 6. **The board: transmit.** `netd` sends what it sends now. With the
    address file in place (step 8 may come first if that is simpler), a

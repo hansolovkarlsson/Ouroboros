@@ -906,12 +906,16 @@ not yet checked on this tree are marked (predicted).
       2026-11-12, is [`roadmap-pi-net.md`](roadmap/roadmap-pi-net.md)**; its
       step 1 (the NIC read from the board's saved ACPI tables on the host)
       is built, and step 2's read-only scan under `\NETDUMP` is built and
-      waits for its run on the board. Steps 3, 4 and 4b are built too
-      (2026-11-13): the NIC enum in the kernel, and on the host the
-      driver's logic and the PHY's set-up, in the `genet` crate. Step 5,
-      the kernel's half (`genetnic.rs`: the device brought up and its
-      link read, the MAC left off), is built too and waits for its run on
-      the board, after step 2's. From there on only the board checks it. What it had to settle first, and what was read:
+      was run on the board on 2026-11-13: it passed. Steps 3, 4 and 4b
+      are built too (2026-11-13): the NIC enum in the kernel, and on the
+      host the driver's logic and the PHY's set-up, in the `genet` crate.
+      Step 5, the kernel's half (`genetnic.rs`: the device brought up and
+      its link read, the MAC left off), is built and was run on the board
+      in the same three boots: the device comes up, its link follows the
+      cable, and the SD card still mounts. The runs left one question
+      before step 6: the PHY's transmit clock delay reads on after the
+      reset, where the set-up wrote it off (the plan's "From the board's
+      registers"). From there on only the board checks it. What it had to settle first, and what was read:
       - **Which NIC: decided by Hans on 2026-11-12, the on-board GENET
         first.** It is Broadcom GENET v5 with a BCM54213PE PHY over MDIO
         (the PHY (predicted)), plain MMIO, discovered from the firmware's
