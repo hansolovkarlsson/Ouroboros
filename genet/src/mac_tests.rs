@@ -60,6 +60,7 @@ const MAC0: usize = 0x80c;
 const MAC1: usize = 0x810;
 const OOB: usize = 0x8c;
 const RBUF: usize = 0x300;
+const TBUF: usize = 0x600;
 const MDIO: usize = 0xe14;
 const RDMA_PROD: usize = 0x3008;
 const RDMA_CONS: usize = 0x300c;
@@ -114,6 +115,7 @@ fn left_running() -> Dev {
     d.regs.insert(RDMA_CTL, DMA_ON | 0x2);
     d.regs.insert(TDMA_CTL, DMA_ON | 0x2);
     d.regs.insert(RBUF, 0x11);
+    d.regs.insert(TBUF, 0x11);
     d.regs.insert(0x08, 0x5);
     d
 }
@@ -265,7 +267,7 @@ fn init_is_u_boots_sequence_write_for_write() {
         // bcmgenet_umac_reset.
         W(0x08, 2), D(10), W(0x08, 0), D(10), W(0x08, 0), D(10),
         W(0x808, 0), W(0x808, 0xa000), D(2), W(0x808, 0),
-        W(0xd80, 7), W(0xd80, 0), W(0x814, 1536), W(0x300, 2), W(0x3b4, 1),
+        W(0xd80, 7), W(0xd80, 0), W(0x814, 1536), W(0x300, 2), W(0x600, 0), W(0x3b4, 1),
         // bcmgenet_gmac_write_hwaddr.
         W(0x80c, 0xdca6_3201), W(0x810, 0x0000_0203),
         // bcmgenet_disable_dma.
@@ -356,6 +358,8 @@ fn a_device_left_running_ends_in_the_same_state() {
     // The status block is off and the 2-byte pad on; a bit this driver
     // does not know is kept.
     assert_eq!(d.reg(RBUF), 0x12);
+    // The transmit status block is off too, its other bit kept.
+    assert_eq!(d.reg(TBUF), 0x10);
     // Ring 16 alone in both directions: the other ring's enable is gone.
     assert_eq!((d.reg(RDMA_CTL), d.reg(TDMA_CTL)), (0x0002_0001, 0x0002_0001));
     // The MAC is off until start.
@@ -363,7 +367,7 @@ fn a_device_left_running_ends_in_the_same_state() {
     // Every register the fresh board ends with, this one ends with too,
     // but the one with the kept bit.
     for (offset, value) in &fresh.regs {
-        if *offset != RBUF {
+        if *offset != RBUF && *offset != TBUF {
             assert_eq!(d.reg(*offset), *value, "register {offset:#x}");
         }
     }
@@ -565,7 +569,8 @@ fn releasing_a_frame_makes_room_in_a_full_ring() {
     assert!(d.deliver(64));
     assert!(!d.deliver(64));
     let mut taken = 0;
-    while let Rx::Frame { .. } = g.rx_next(&mut d) {
+    for _ in 0..1000 {
+        let Rx::Frame { .. } = g.rx_next(&mut d) else { break };
         g.rx_release(&mut d);
         taken += 1;
     }
@@ -620,13 +625,14 @@ fn the_transmit_counter_wraps_at_65536_and_the_ring_at_256() {
 fn a_frame_too_short_or_too_long_is_refused_with_nothing_written() {
     let mut d = board();
     let mut g = up(&mut d);
-    for len in [0, 59, 1533, 2048, usize::MAX] {
+    for len in [0, 13, 1533, 2048, usize::MAX] {
         assert_eq!(g.tx_send(&mut d, TX_ADDR, len), Err(TxError::BadLength(len)));
     }
     assert!(d.ops.is_empty() && d.reads.is_empty());
-    assert_eq!(g.tx_send(&mut d, TX_ADDR, 60), Ok(()));
+    // A bare header is the floor; the device pads a frame under 60.
+    assert_eq!(g.tx_send(&mut d, TX_ADDR, 14), Ok(()));
     assert_eq!(g.tx_send(&mut d, TX_ADDR, 1532), Ok(()));
-    assert_eq!(d.sent[1].1 >> 16, 1532);
+    assert_eq!((d.sent[0].1 >> 16, d.sent[1].1 >> 16), (14, 1532));
 }
 
 #[test]
@@ -672,6 +678,20 @@ fn a_frame_the_device_never_takes_blocks_the_next_send_until_it_does() {
     assert_eq!(g.tx_send(&mut d, TX_ADDR, 100), Ok(()));
     assert_eq!(d.writes().last(), Some(&(TDMA_PROD, 2)));
     assert_eq!(d.sent, [(TX_ADDR, 0x0064_7fc0)]);
+}
+
+#[test]
+fn a_frame_not_taken_across_the_wrap_is_not_seen_as_taken() {
+    // The producer wraps to 0 and the consumer stays at 0xffff: "consumer
+    // at or past the producer", U-Boot's test, would call that done.
+    let mut d = board();
+    d.tx_cons = 0xffff;
+    d.tx_target = 0xffff;
+    let mut g = up(&mut d);
+    d.tx_dead = true;
+    assert_eq!(g.tx_send(&mut d, TX_ADDR, 60), Err(TxError::Timeout));
+    assert_eq!(g.tx_send(&mut d, TX_ADDR, 60), Err(TxError::Busy));
+    assert_eq!(d.writes().iter().filter(|w| w.0 == TDMA_PROD).count(), 1);
 }
 
 // ---- the link ----

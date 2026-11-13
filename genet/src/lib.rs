@@ -76,6 +76,10 @@ pub mod reg {
     pub const UMAC_MAC0: usize = 0x0800 + 0x00c;
     /// `UMAC_MAC1`, `GENET_UMAC_OFF + 0x010` (U-Boot): its last two.
     pub const UMAC_MAC1: usize = 0x0800 + 0x010;
+    /// `TBUF_CTRL` (Linux): at 0x00 of the transmit buffer block, which on
+    /// v5 is at 0x0600 (`tbuf_offset` in `bcmgenet.c`'s `GENET_V5`
+    /// parameters, line 3811). U-Boot never names it.
+    pub const TBUF_CTRL: usize = 0x0600;
     /// `UMAC_MAX_FRAME_LEN`, `GENET_UMAC_OFF + 0x014` (U-Boot).
     pub const UMAC_MAX_FRAME_LEN: usize = 0x0800 + 0x014;
     /// `UMAC_TX_FLUSH`, `GENET_UMAC_OFF + 0x334` (U-Boot).

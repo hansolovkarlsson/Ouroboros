@@ -101,6 +101,8 @@ const CITED: &[(&str, u64, u64, Src, u32)] = &[
     ("RX_BUF_LENGTH", RX_BUF_LEN as u64, 2048, U, 180),
     ("RX_BUF_OFFSET", RX_PAD as u64, 2, U, 182),
     ("RBUF_64B_EN", RBUF_64B_EN as u64, 1 << 0, L, 191),
+    ("TBUF_CTRL", (reg::TBUF_CTRL - 0x600) as u64, 0x00, L, 222),
+    ("TBUF_64B_EN", TBUF_64B_EN as u64, 1 << 0, L, 223),
     ("INTRL2_CPU_CLEAR", (reg::INTRL2_0_CLEAR - 0x200) as u64, 0x08, L, 240),
     ("INTRL2_CPU_MASK_STATUS", (reg::INTRL2_0_MASK_STATUS - 0x200) as u64, 0x0c, L, 241),
     ("INTRL2_CPU_MASK_SET", (reg::INTRL2_0_MASK_SET - 0x200) as u64, 0x10, L, 242),

@@ -13,9 +13,11 @@
 //!   `bcmgenet_intr_disable` does. U-Boot never touches them. The kernel
 //!   polls this device (the plan's design 7), and a firmware that left one
 //!   unmasked must not be able to raise it.
-//! - `RBUF_64B_EN` is cleared where U-Boot only sets the bit beside it. If
-//!   the firmware's driver had set it, every received frame would carry a
-//!   64-byte status block this code does not skip.
+//! - `RBUF_64B_EN` is cleared where U-Boot only sets the bit beside it, and
+//!   `TBUF_64B_EN`, which U-Boot never touches, is cleared too. Linux sets
+//!   both. Had the firmware's driver done as Linux does, every received
+//!   frame would carry a 64-byte status block this code does not skip, and
+//!   the first 64 bytes of every frame sent would be taken for one.
 //! - The receive DMA's enables for rings 0 to 15 are cleared where U-Boot
 //!   only sets ring 16's. This driver sets up ring 16 alone.
 //! - A producer index is taken as its low 16 bits (Linux's
@@ -62,10 +64,12 @@ pub const RX_MAX_FRAME: usize = RX_BUF_LEN - RX_PAD;
 /// 6 of Broadcom tag, 4 of checksum and 8 of pad. Written to
 /// `UMAC_MAX_FRAME_LEN`.
 pub const MAX_FRAME_LEN: u32 = 1500 + 14 + 4 + 6 + 4 + 8;
-/// The shortest frame a send takes: Ethernet's minimum less the checksum
-/// the device appends. The device does not pad, so the caller does (Linux's
-/// `bcmgenet_xmit` pads to `ETH_ZLEN`, 60).
-pub const TX_MIN_FRAME: usize = 60;
+/// The shortest frame a send takes: an Ethernet header, this crate's own
+/// floor. A frame shorter than Ethernet's 60 is the device's to pad:
+/// Linux's `bcmgenet_xmit` says software padding of runt packets would
+/// only be needed without `DMA_TX_APPEND_CRC` (`bcmgenet.c` line 2132),
+/// and U-Boot pads nothing either.
+pub const TX_MIN_FRAME: usize = 14;
 /// The longest frame a send takes: [`MAX_FRAME_LEN`] less the checksum.
 pub const TX_MAX_FRAME: usize = MAX_FRAME_LEN as usize - 4;
 
@@ -84,6 +88,8 @@ pub const CMD_SPEED_SHIFT: u32 = 2;
 pub const MIB_RESET_ALL: u32 = 0b111;
 /// `RBUF_64B_EN` (Linux) and `RBUF_ALIGN_2B` (U-Boot), in `RBUF_CTRL`.
 pub const RBUF_64B_EN: u32 = 1 << 0;
+/// `TBUF_64B_EN` (Linux), in `TBUF_CTRL`.
+pub const TBUF_64B_EN: u32 = 1 << 0;
 pub const RBUF_ALIGN_2B: u32 = 1 << 1;
 /// `RGMII_LINK`, `OOB_DISABLE`, `RGMII_MODE_EN`, `ID_MODE_DIS` (U-Boot), in
 /// `EXT_RGMII_OOB_CTRL`.
@@ -310,6 +316,7 @@ impl Genet {
         bus.write(reg::UMAC_MIB_CTRL, 0);
         bus.write(reg::UMAC_MAX_FRAME_LEN, MAX_FRAME_LEN);
         set(bus, reg::RBUF_CTRL, RBUF_64B_EN, RBUF_ALIGN_2B);
+        set(bus, reg::TBUF_CTRL, TBUF_64B_EN, 0);
         bus.write(reg::RBUF_TBUF_SIZE_CTRL, 1);
 
         // bcmgenet_gmac_write_hwaddr.
@@ -434,8 +441,7 @@ impl Genet {
 
     /// Sends the `len` bytes at `addr` (the address as the device sees it)
     /// as one frame, the device appending the checksum, and waits for the
-    /// device to take them, at most [`TX_POLLS`] polls. The caller has
-    /// padded the frame to [`TX_MIN_FRAME`]. The bytes must stay as they
+    /// device to take them, at most [`TX_POLLS`] polls. The bytes must stay as they
     /// are until this returns `Ok`, or until a later call no longer
     /// returns [`TxError::Busy`].
     pub fn tx_send<B: Bus>(&mut self, bus: &mut B, addr: u64, len: usize) -> Result<(), TxError> {
