@@ -11,7 +11,7 @@ here actually works today, see [`architecture.md`](architecture.md) and
 
 **Not yet released.** Changes since v0.25.0, drafted as they land.
 
-**The kernel brings the Pi's Ethernet up and reads its link; nothing is sent yet (2026-11-13).**
+**The kernel brings the Pi's Ethernet up and reads its link; nothing is sent yet (2026-11-13, #457).**
 Step 5 of `docs/roadmap/roadmap-pi-net.md`, built and not yet run on a
 board. `kernel/src/genetnic.rs` takes the one GENET the ACPI tables
 declare, makes it quiet, resets and sets it up through the `genet` crate,

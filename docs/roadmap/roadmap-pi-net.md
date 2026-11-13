@@ -666,7 +666,7 @@ Each has a recommendation; none blocks step 2.
    A sustained boot shows no fault, with the tick calling `has_frame`
    throughout. One variable: nothing is sent yet.
 
-   **Built 2026-11-13, not yet run on the board.**
+   **Built 2026-11-13 (#457), not yet run on the board.**
    `kernel/src/genetnic.rs` is the kernel's half (named so because a
    module called `genet` would clash with the crate). Before the exit,
    `discover` takes the one GENET the tables declare, through the helper
