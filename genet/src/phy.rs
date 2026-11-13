@@ -23,7 +23,7 @@
 //!   (`bcm54xx_config_clock_delay`), then a reset (`phy_reset`), **in that
 //!   order, which is U-Boot's**; Linux resets first. Whether the reset
 //!   keeps the two delay settings is not known here, so `setup` reads
-//!   both back after it and returns them ([`Delays`]): the first board
+//!   both back after it and returns them ([`ReadBack`], [`Delays`]): the first board
 //!   run says which it is, and a set-up the PHY did not take is seen and
 //!   not assumed.
 //! - [`link_resolved`] reads the speed the PHY settled on from its
@@ -51,7 +51,7 @@
 //! to come back, and [`link_resolved`] says `Negotiating` or `Down` until
 //! it has.
 
-use crate::{mdio_read, mdio_write, Bus, MdioError, BMSR_ANEG_DONE, BMSR_LINK, PHY_BMSR};
+use crate::{mdio_read, mdio_read_driven, mdio_write, Bus, MdioError, BMSR_ANEG_DONE, BMSR_LINK, PHY_BMSR};
 
 /// `MII_ADVERTISE`: what this end advertises.
 pub const PHY_ADVERTISE: u8 = 4;
@@ -119,13 +119,9 @@ enum Status {
 /// reading can be an old drop).
 fn status<B: Bus>(bus: &mut B, phy: u8) -> Result<Status, MdioError> {
     mdio_read(bus, phy, PHY_BMSR)?;
-    let bmsr = mdio_read(bus, phy, PHY_BMSR)?;
-    // All ones is a bus nobody drives (no PHY, or one held in reset), with
-    // every bit of "link up at gigabit" set. The scan counts it apart for
-    // the same reason.
-    if bmsr == 0xffff {
-        return Err(MdioError::NoAnswer);
-    }
+    // All ones is a bus nobody drives, with every bit of "link up at
+    // gigabit" set (`mdio_read_driven`).
+    let bmsr = mdio_read_driven(bus, phy, PHY_BMSR)?;
     Ok(if bmsr & BMSR_LINK == 0 {
         Status::Settled(Link::Down)
     } else if bmsr & BMSR_ANEG_DONE == 0 {
@@ -230,6 +226,27 @@ pub struct Delays {
     pub clk: u16,
 }
 
+/// What [`setup`]'s read-back of the two delay shadows came to. The
+/// set-up itself was done either way: the read-back only reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadBack {
+    /// Both shadows, as the PHY holds them after its reset.
+    Read(Delays),
+    /// A shadow did not read (no answer, or the bus stuck). The PHY was
+    /// set up and reset; what it holds is not known.
+    Failed(MdioError),
+}
+
+impl ReadBack {
+    /// The shadows, when they were read.
+    pub fn delays(&self) -> Option<Delays> {
+        match self {
+            ReadBack::Read(d) => Some(*d),
+            ReadBack::Failed(_) => None,
+        }
+    }
+}
+
 impl Delays {
     /// The receive clock skew is on, as `setup` wrote it.
     pub fn rx_skew(&self) -> bool {
@@ -257,15 +274,11 @@ impl From<MdioError> for SetupError {
 /// reads it (U-Boot's `bcm54xx_auxctl_read`: the shadow's number in bits
 /// 14:12 chooses what the next read returns).
 ///
-/// All ones is a bus nobody drives, as for the status register, and is
-/// [`MdioError::NoAnswer`]: taken as the shadow's value it would read as
-/// every setting on.
+/// All ones is [`MdioError::NoAnswer`] (`mdio_read_driven`): taken as the
+/// shadow's value it would read as every setting on.
 fn read_misc<B: Bus>(bus: &mut B, phy: u8) -> Result<u16, MdioError> {
     mdio_write(bus, phy, BCM_AUXCNTL, (BCM_AUXCNTL_MISC << 12) | BCM_AUXCNTL_MISC)?;
-    match mdio_read(bus, phy, BCM_AUXCNTL)? {
-        0xffff => Err(MdioError::NoAnswer),
-        misc => Ok(misc),
-    }
+    mdio_read_driven(bus, phy, BCM_AUXCNTL)
 }
 
 /// Selects the clock control shadow and reads its ten bits of data
@@ -274,10 +287,7 @@ fn read_misc<B: Bus>(bus: &mut B, phy: u8) -> Result<u16, MdioError> {
 /// here too.
 fn read_clk<B: Bus>(bus: &mut B, phy: u8) -> Result<u16, MdioError> {
     mdio_write(bus, phy, BCM_SHD, BCM_SHD_CLK_CTL << BCM_SHD_SEL_SHIFT)?;
-    match mdio_read(bus, phy, BCM_SHD)? {
-        0xffff => Err(MdioError::NoAnswer),
-        raw => Ok(raw & BCM_SHD_DATA_MASK),
-    }
+    Ok(mdio_read_driven(bus, phy, BCM_SHD)? & BCM_SHD_DATA_MASK)
 }
 
 /// Sets up the PHY at `phy` for the board's `rgmii-rxid`, when `id` says
@@ -294,15 +304,16 @@ fn read_clk<B: Bus>(bus: &mut B, phy: u8) -> Result<u16, MdioError> {
 ///    read the PHY does not answer, or that reads all ones, is a PHY
 ///    still resetting and is polled past;
 /// 4. both shadows read back, and returned: what the PHY holds now. A
-///    read-back that gets no answer is an error and not a value: the
-///    board's log is read for these two, and all ones would say "both
-///    on".
+///    read-back that gets no answer is said to have failed and is not a
+///    value (the board's log is read for these two, and all ones would say
+///    "both on"), **and it is not a failure of the set-up**, which was
+///    done by then: the caller goes on to the link.
 ///
 /// Eleven MDIO commands and the reset's polls. A PHY that never comes out
 /// of reset costs half a second of waits plus 500 reads: about 0.5 s on a
 /// bus that answers promptly, and about 10.5 s at the bound, on a bus
 /// whose every read takes the whole 20 ms a command is allowed.
-pub fn setup<B: Bus>(bus: &mut B, phy: u8, id: u32) -> Result<Option<Delays>, SetupError> {
+pub fn setup<B: Bus>(bus: &mut B, phy: u8, id: u32) -> Result<Option<ReadBack>, SetupError> {
     if !is_bcm54210e(id) {
         return Ok(None);
     }
@@ -331,7 +342,11 @@ pub fn setup<B: Bus>(bus: &mut B, phy: u8, id: u32) -> Result<Option<Delays>, Se
     if !out_of_reset {
         return Err(SetupError::ResetStuck);
     }
-    Ok(Some(Delays { misc: read_misc(bus, phy)?, clk: read_clk(bus, phy)? }))
+    let read_back = |bus: &mut B| Ok(Delays { misc: read_misc(bus, phy)?, clk: read_clk(bus, phy)? });
+    Ok(Some(match read_back(bus) {
+        Ok(delays) => ReadBack::Read(delays),
+        Err(e) => ReadBack::Failed(e),
+    }))
 }
 
 /// Reads the link of the PHY at `phy`: the status register twice, and for
@@ -348,12 +363,9 @@ pub fn link_resolved<B: Bus>(bus: &mut B, phy: u8, id: u32) -> Result<Link, Mdio
     if let Status::Settled(link) = status(bus, phy)? {
         return Ok(link);
     }
-    let aux = mdio_read(bus, phy, BCM_AUXSTATUS)?;
-    // The PHY stopped driving the bus between the two registers: all ones
-    // would read as mode 7, a gigabit link.
-    if aux == 0xffff {
-        return Err(MdioError::NoAnswer);
-    }
+    // A PHY that stopped driving the bus between the two registers reads
+    // all ones, which would be mode 7, a gigabit link.
+    let aux = mdio_read_driven(bus, phy, BCM_AUXSTATUS)?;
     let mode = (aux & BCM_AUXSTATUS_LINKMODE_MASK) >> BCM_AUXSTATUS_LINKMODE_SHIFT;
     // U-Boot's table. Its default is "10 half"; here a mode the table
     // does not have is said to be unresolved.

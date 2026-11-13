@@ -835,8 +835,57 @@ Each has a recommendation; none blocks step 2.
    test that the MAC is not reset under it); each exit 0 on the fixes:
    `test-netdump`, `test-early-fault`, `test-el1-drop`, `test-sd`,
    `test-smp`, `test-usb-hub`, `test-no-identity`, `test-run-callback`.
-   Bring-up takes about 14 ms more: the device is stopped once by
-   `quiet` and again, already stopped, at the head of `init`.
+   Bring-up took about 14 ms more by this: the device stopped once by
+   `quiet` and again, already stopped, at the head of `init`. The next
+   round removed the cost.
+
+   **And a review of that** (#459, read after it merged). Ten more, two
+   of which bore on the board run and both of which the round before had
+   put there:
+   - *A transmit DMA that was only slow was called stuck.* `halt` took
+     its answer after 5 ms of polls, before the 10 ms wait it is given to
+     drain, never asked again, and then turned the transmitter off, which
+     by the helper's own account can keep it from ever stopping. It is
+     asked again after the wait.
+   - *The all-ones guard on the read-back had made a look into a
+     failure.* One unanswered read after the PHY's reset returned the
+     set-up as failed, and the boot never read the link, of a PHY that
+     had been set up. `setup` returns a `ReadBack` now: the delays, or
+     that they did not read, and the caller goes on to the link.
+   - **Which DMA is fatal changed.** Until here either DMA not saying it
+     stopped ended the bring-up. Linux warns of either and goes on. Now
+     the **receive** DMA ends it, at the stop and before any reset,
+     because it is the one that writes memory; the **transmit** DMA,
+     which only reads, is noted, asked once more after the MAC's reset
+     and the flush, and ends the set-up only then. That second question
+     was, before this, a guard no test could fail: nothing in the model
+     could make a DMA stopped at the first say otherwise at the second.
+   - `halt` leaves a MAC held in software reset alone, as Linux's
+     `umac_enable_set` does, and stopping a device that is already
+     stopped waits for nothing, so `init` stopping it again after
+     `quiet` costs no time (the 14 ms above is gone).
+   - The link's wait ended for good on one busy read and said "not
+     waited for" after waiting; it takes three running, and says that.
+     A device region left out of the list was said on a console that a
+     framebuffer-only machine does not have yet; it is said again once
+     every console is up. "All ones is a bus nobody drives" was written
+     out in five places and is one function, `mdio_read_driven`. The
+     source map still described `amlscan::virtio_mmio`, removed in the
+     pull request under review.
+   **The model has two rules of ours for the transmit DMA now**, that it
+   cannot stop with a frame queued once the transmitter is off, and that
+   a flush releases one that has not stopped. Both exist so a test can
+   tell two orders, or two policies, apart. Neither is a device's.
+   **Checked:** `make test` 440 tests; 137 mutations, each failed by a
+   test (one alive after the pass, "either DMA on earns the drain's
+   wait" weakened to "both", got a test; one did not compile and was
+   rewritten); each exit 0: `test-netdump`, `test-early-fault`,
+   `test-el1-drop`, `test-sd`, `test-smp`, `test-usb-hub`,
+   `test-no-identity`, `test-run-callback`.
+   **On the board, new lines to know:** `the transmit DMA was told to
+   stop and has not yet said it had` is a note and not a refusal; `its
+   delays did not read back` leaves the PHY's question unanswered for
+   that boot, and the link is still read.
 
 6. **The board: transmit.** `netd` sends what it sends now. With the
    address file in place (step 8 may come first if that is simpler), a

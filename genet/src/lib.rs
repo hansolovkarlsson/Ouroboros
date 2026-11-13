@@ -260,6 +260,19 @@ pub fn mdio_read<B: Bus>(bus: &mut B, phy: u8, reg: u8) -> Result<u16, MdioError
     if v & MDIO_READ_FAIL != 0 { Err(MdioError::NoAnswer) } else { Ok(v as u16) }
 }
 
+/// [`mdio_read`], for a register a PHY that is there never reads as all
+/// ones: 0xffff is a bus nobody drives (no PHY, one held in reset, one that
+/// stopped answering) and is [`MdioError::NoAnswer`], where taken as a
+/// value it would have every bit of whatever is asked set. The one place
+/// that rule is written; a caller for whom all ones can be a real value
+/// (the scan's counts, the reset's poll) uses [`mdio_read`].
+pub fn mdio_read_driven<B: Bus>(bus: &mut B, phy: u8, reg: u8) -> Result<u16, MdioError> {
+    match mdio_read(bus, phy, reg)? {
+        0xffff => Err(MdioError::NoAnswer),
+        value => Ok(value),
+    }
+}
+
 /// Writes `value` to register `reg` of the PHY at `phy` (U-Boot's
 /// `bcmgenet_mdio_write`): the command with the value in its low half, in
 /// the same two writes and with the same bounded poll as a read. The
