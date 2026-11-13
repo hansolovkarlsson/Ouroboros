@@ -172,8 +172,15 @@ tree, so the values are copied here):
   clock skew on, transmit clock delay on** (shadows `0x71e7` and
   `0x0200`), the same in all three boots. The set-up wrote the transmit
   clock delay off, so the line ends `NOT as written`. The read-back alone
-  does not say whether the reset put the delay back or the write never
-  took: the value before the reset is read by `setup` but not logged.
+  did not say whether the reset put the delay back or the write never
+  took; the next bullet does.
+- **The firmware leaves the PHY with its receive clock skew on and its
+  transmit clock delay off** (shadows `0x73e7`, `0x0000`), read before
+  any write of ours, on a fourth boot the same day (build
+  `fff04bf2e4a9`, step 6's). With its MAC's `ID_MODE_DIS` clear, that is
+  Linux's pairing. **And the reset is what turns the delay on:** it was
+  off when found, the set-up wrote it off, and after the reset it read on
+  (`0x71e7`, `0x0200`, as in the three boots before).
   **What this means for a frame was worked out the same day** (step 4b,
   "The transmit clock delay, worked out"): it is the state U-Boot's
   pairing needs, and step 6 goes ahead on it.
@@ -748,12 +755,23 @@ Each has a recommendation; none blocks step 2.
    Linux's whole:** reset first, the delay off after it, `ID_MODE_DIS`
    clear (which is also how the firmware had the MAC before the exit,
    `EXT_RGMII_OOB_CTRL` `0x00f00050`).
-   **Not known from this:** whether the reset put the delay back or the
-   write never took (the first is the likelier, and only then is "U-Boot
-   ends where this driver does" sure, since U-Boot starts from another
-   boot chain's PHY), and what the firmware left in the PHY. `setup`
-   reads both shadows before it writes them; step 6 logs those values,
-   at no cost in MDIO commands.
+   **Not known from this, when it was written:** whether the reset put
+   the delay back or the write never took, and what the firmware left in
+   the PHY. `setup` reads both shadows before it writes them, and step 6
+   logs those values, at no cost in MDIO commands.
+   **Both answered by step 6's first boot (2026-11-13, build
+   `fff04bf2e4a9`).** The line `found with its receive clock skew on and
+   its transmit clock delay off (shadows 0x73e7, 0x0000)` is what the
+   firmware left: with its MAC delaying (`ID_MODE_DIS` clear), Linux's
+   pairing. The delay was off when found, was written off, and read on
+   after the reset, so **the reset restores it**; the write took or did
+   not, and it makes no difference. That makes "U-Boot ends where this
+   driver does" sure whatever U-Boot's boot chain leaves in the PHY: its
+   reset comes last too. So both pairings are seen on this board, the
+   firmware in Linux's and this driver in U-Boot's. Which of them puts a
+   good frame on the wire is still step 6's to show; the firmware's
+   network boot working would speak for Linux's, and U-Boot's for the
+   other, and neither has been watched here.
 
 5. **The board: bring-up and link.** One helper in `acpi.rs` for "the one
    device of this `_HID` declared present", used by this driver, the scan
@@ -1098,6 +1116,22 @@ Each has a recommendation; none blocks step 2.
       a switch, says little, which is why the direct cable.
    The serial log's two PHY lines are the other reading this boot is
    for: `found with ...` is what the firmware left in the PHY.
+
+   **First run on the board, 2026-11-13, by Hans (build
+   `fff04bf2e4a9`): the kernel's half passed, the wire is not yet
+   seen.** The transmit buffer walks non-cacheable; the link came up at
+   1000 Mb/s full duplex; `the MAC's transmitter is on at 1000 Mb/s`;
+   and at `ping 192.168.0.1`, `first frame sent: 42 bytes, taken by the
+   device`, with no timeout and no busy refusal after it. So
+   `send_frame` ran, and the transmit DMA consumed a descriptor. The PHY's
+   two lines are in step 4b.
+   **`tcpdump` showed nothing, and that says nothing:** the Mac was on
+   wireless, behind the router. A frame with a bad checksum is dropped
+   by the router's switch, and a good ARP request for an address outside
+   the router's subnet may not be passed to the wireless side. The check
+   is still owed, over a direct cable to a USB Ethernet adapter on the
+   Mac, with the adapter's interface in the `tcpdump` and `netstat`
+   commands above.
 
 7. **The board: receive, polled.** The ARP reply and the echo reply come
    back through `NET_RECV`.
