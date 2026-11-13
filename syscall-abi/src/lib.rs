@@ -786,8 +786,17 @@ pub const HEAP_INFO_IMAGE_MAX: u64 = 4;
 /// exist to deny.
 pub const DELEGATE: u64 = 41;
 
+/// The longest frame [`NET_SEND`] takes and the longest buffer [`NET_RECV`]
+/// takes: either call answers [`NET_ERROR`] for a longer one, whatever the
+/// device. A fixed number of the ABI and not a property of the NIC, so the
+/// network server's buffers need not know which driver is below (the
+/// kernel's `nic.rs` holds every driver to it). The value is the one the
+/// first driver had, virtio-net's 2048-byte buffer less its 12-byte header.
+pub const NET_MAX_FRAME: u64 = 2036;
+
 /// `(frame ptr, frame len)` -> `0` on success, or an error sentinel.
-/// Transmits one raw Ethernet frame through the kernel's virtio-net driver.
+/// Transmits one raw Ethernet frame through the kernel's network driver
+/// (`nic.rs`). A frame longer than [`NET_MAX_FRAME`] is refused.
 /// **Gated to [`NET_TASK`]** (the network server) alone - the DMA-owning
 /// NIC driver stays in the kernel (no IOMMU), reached only by the one task
 /// that owns the protocol stack, exactly like `BLOCK_*` -> [`FSD_TASK`].
@@ -795,7 +804,10 @@ pub const NET_SEND: u64 = 42;
 
 /// `(buf ptr, buf len)` -> the received frame's length (its bytes copied
 /// into `buf`, truncated to `buf len`), `NET_NO_FRAME` if none is waiting,
-/// or an error sentinel. Non-blocking poll of the virtio-net receive ring.
+/// or an error sentinel. Non-blocking poll of the network driver's receive
+/// side. **The length returned is the frame's own, which can be more than
+/// `buf len`:** the caller must not index its buffer by it unclamped. A
+/// `buf len` over [`NET_MAX_FRAME`] is refused.
 /// Gated to [`NET_TASK`] like [`NET_SEND`].
 pub const NET_RECV: u64 = 43;
 

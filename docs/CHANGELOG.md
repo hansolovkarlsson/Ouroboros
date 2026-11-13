@@ -17,8 +17,8 @@ Step 3 of `docs/roadmap/roadmap-pi-net.md`, and no change in behaviour. The
 device through `nic::Nic`, as the disks are reached through
 `block::BlockDevice`, so the Pi's GENET driver can arrive as a second arm
 with `netd` and the syscalls unchanged. The frame bound the syscalls check
-is the installed device's own. The file's module doc states what an arm owes
-its callers.
+has a name in the ABI, `NET_MAX_FRAME`, and is the same for every device.
+The file's module doc states what an arm owes its callers.
 
 **A read-only scan of the Pi 4's Ethernet, under `\NETDUMP` (2026-11-12, #452).**
 Step 2 of `docs/roadmap/roadmap-pi-net.md`, built and not yet run on a

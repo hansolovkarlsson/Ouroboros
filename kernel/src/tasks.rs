@@ -3434,11 +3434,13 @@ pub unsafe fn on_tick(frame: *mut Context) {
 /// degrades to at worst one tick of delay, never a lost frame (`on_tick`'s
 /// wake-check still evaluates `NetInput`'s `net_has_frame()` condition).
 ///
-/// A NIC interrupt means a frame is in the receive ring - transmit
-/// completions are suppressed at the device (`virtio_net::init` sets the TX
-/// ring's NO_INTERRUPT flag), so the shared per-device line only ever fires
-/// for receive - so this wakes the `NetInput` waiter unconditionally rather
-/// than re-polling. If no task is blocked on `NetInput` (the server is
+/// A NIC interrupt means a frame was received, and nothing else: that is
+/// what an arm of `nic::Nic` promises by reporting an INTID (`nic.rs`'s
+/// module doc), and an arm that cannot promise it reports none. So this
+/// wakes the `NetInput` waiter unconditionally rather than re-polling.
+/// (virtio-net keeps the promise by suppressing transmit completions at the
+/// device: `virtio_net::init` sets the TX ring's NO_INTERRUPT flag, so the
+/// one line only ever fires for receive.) If no task is blocked on `NetInput` (the server is
 /// already running, or none exists), it does nothing and resumes the
 /// interrupted task; the frame stays queued for the server's own next poll.
 ///
