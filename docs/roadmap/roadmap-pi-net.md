@@ -254,14 +254,17 @@ Each has a recommendation; none blocks step 2.
 
 - **D7. The PHY's set-up** (new on 2026-11-13, from the sources read for
   step 4; it replaces what D3 assumed, that nothing need be written to the
-  PHY). U-Boot writes the PHY's RGMII clock delays and resets it; the
+  PHY). U-Boot writes the PHY's RGMII clock delays and resets it, and
+  reads the speed the PHY settled on from a Broadcom status register; the
   `genet` crate as step 4 built it writes nothing to the PHY and reads the
-  link from the standard registers. What state the PHY is in when the
+  link from the standard registers, which give the best speed both ends
+  advertise and so the wrong one when the PHY has dropped to a lower. What state the PHY is in when the
   kernel gets it is not known: the firmware may have set it up, or not.
   The choices: (a) write nothing, and learn from the board; (b) do what
-  U-Boot's `bcm54210e_config` does, as a step 4b in the crate (an MDIO
-  write, the two shadow registers, host-tested like the rest), before the
-  board is tried. Recommended: (b). U-Boot is the one working driver for
+  U-Boot's `bcm54210e_config` and `bcm54xx_parse_status` do, as a step 4b
+  in the crate (an MDIO write, the two shadow registers, the resolved
+  speed, all only for a PHY whose identifier is this one's, host-tested
+  like the rest), before the board is tried. Recommended: (b). U-Boot is the one working driver for
   this exact board that this plan follows everywhere else, and its MAC
   setting (`ID_MODE_DIS`) is paired with its PHY setting; taking one
   without the other is a combination nobody runs. A wrong delay shows as
@@ -464,7 +467,8 @@ Each has a recommendation; none blocks step 2.
    (U-Boot's comparison never ends at the 65536th frame), for at most
    100 ms; and a send is refused while an earlier frame is still with the
    device, because every send shares one buffer.
-   **Checked:** 36 new host tests (34 of the driver, 2 of the citations) against a model device that is typed
+   **Checked** (the figures are the first commit's; the review's are
+   below): 36 new host tests (34 of the driver, 2 of the citations) against a model device that is typed
    from the sources as numbers, not from the crate's constants: `init`'s
    writes and delays equal U-Boot's sequence, all 821 of them; a device
    left running ends in the state a fresh one does, with no ring set up
@@ -487,13 +491,65 @@ Each has a recommendation; none blocks step 2.
    device does what the sources say is the board's to answer.
    **Not built, on purpose:** any write to the PHY (D7), and the duplex
    told to the MAC (U-Boot does not either).
+   **The review of #455** found no wrong offset, and ten things in what
+   the crate promises. Acted on:
+   - *Turning a DMA off was not waited for.* `quiet` said "after this the
+     device writes to no memory" and only cleared the enable bits, as
+     U-Boot does. Linux polls each DMA's status register until it says
+     disabled, and gives the MAC and the DMAs time to finish a frame.
+     The crate does that now (`DMA_STATUS`, 5 ms of polls a DMA, 2 ms
+     after the MAC's enables, 10 ms between the DMAs); `quiet` answers
+     whether each stopped, and `init` sets up no ring of a DMA that did
+     not (`InitError::DmaStuck`). The model's DMA winds down over a
+     number of status reads, so a ring written too early is a violation
+     a test sees.
+   - *A status of all ones read as a gigabit link.* A bus nobody drives
+     has every bit of "up, negotiated, 1000 full" set. `link` answers
+     `NoAnswer` for it, as the scan already counted it apart.
+   - *A release too many moved the consumer past the device.*
+     `rx_release` acts only on a frame `rx_next` returned and that has
+     not been released, and says whether it did.
+   - *A frame of 1 to 13 bytes, or of up to 2046, could be returned.*
+     The crate drops a frame under 14 bytes or over the 1536 it told the
+     device.
+   - *A second `start` turned the MAC off for one write.* The speed is
+     now written with the enables held.
+   - *Nothing could ask whether the transmit buffer was free.*
+     `tx_idle` is public, and `tx_send`'s doc says to ask it before the
+     copy. `Genet::stop` exists, so a device made quiet no longer says it
+     is started.
+   - Two models of the MDIO bus: the driver's gained the busy polls and
+     the unflagged all-ones answer the scan's has. They are still two.
+   **After the review:** 43 host tests of the driver and the link where
+   there were 34 (`make test`: 419 tests), `init` 822 writes and delays,
+   110 cited constants, and 81 mutations, each failed by a test. That
+   pass left two alive at first, both on the bound "no longer than its
+   buffer", which the new bound of 1536 had made unable to fail; it was
+   removed, and there is one bound.
+   Not acted on:
+   - *The speed read is the best both ends advertise, not the one the PHY
+     settled on.* A Broadcom PHY on a poor cable drops to 100 and goes on
+     advertising 1000; the MAC would be set to 1000 and nothing would
+     pass. U-Boot reads the resolved speed from a Broadcom register for
+     this reason. It is one read, and it is Broadcom-specific, so it is
+     part of D7 and of step 4b. `phy.rs` says so.
+   - *`tx_send` waits for the device to take the frame, under the kernel
+     lock.* Kept: it is the bound virtio-net's send has, and on the board
+     a send that reports its own failure is worth more than the time.
+     Returning at once and letting the next send wait is the change to
+     make if step 6 measures the wait to matter.
    **For step 5, found here:**
-   - The crate can return a received frame of up to 2046 bytes and the
-     ABI's bound is 2036 (`NET_MAX_FRAME`). The device is told a maximum
-     frame of 1536, so a longer one should arrive flagged and be dropped,
-     and the kernel's arm must still not rest on that: it drops a frame
-     over the ABI's bound.
+   - A received frame is 14 to 1536 bytes (the review made the crate hold
+     that itself), inside the ABI's 2036 and inside `netd`'s 1600-byte
+     buffers, so step 7's clamp in `netd` is owed for virtio-net's sake
+     and not for this device's.
    - A send takes 14 to 1532 bytes. `netd`'s largest frame is 1514.
+   - The kernel's one transmit buffer may be written only when
+     `Genet::tx_idle` says so. After a send that timed out, the frame is
+     still the device's.
+   - `quiet` answers whether each DMA said it stopped. Only when both did
+     may the kernel take memory the firmware owned; the line it logs
+     otherwise is step 5's to word.
    - The receive area is one static of 524,288 bytes, in the kernel's
      image on every machine, the ones with no GENET too. Its range is the
      second `uncached` entry of design 5.

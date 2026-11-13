@@ -19,7 +19,8 @@ from the PHY. None of it touches memory or hardware; it runs over the `Bus`
 the scan uses, against a model of the device. Nothing in the kernel calls
 it yet (step 5). It departs from U-Boot where U-Boot trusts what a
 firmware may have left or the device may say, and each departure has a
-test. Every constant is cited to its line in U-Boot `v2024.10` or Linux
+test. A DMA turned off is polled until it says it stopped, as Linux does,
+and no ring is set up under one that has not. Every constant is cited to its line in U-Boot `v2024.10` or Linux
 `v6.6`. Reading those sources again found that U-Boot also configures the
 PHY's clock delays, which the plan had not known: decision D7.
 
