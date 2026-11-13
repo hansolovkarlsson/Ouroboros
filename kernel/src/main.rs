@@ -26,6 +26,7 @@ mod lock;
 mod madt;
 mod mmu;
 mod netscan;
+mod nic;
 mod pci;
 mod power;
 mod sdhci;
@@ -1055,7 +1056,7 @@ extern "C" fn kernel_main() -> ! {
             // too. A secondary enables its own.
             gic::enable_interrupt(smp::KICK_SGI);
             // IRQ-driven NIC receive: enable the NIC's receive interrupt at
-            // the GIC (an SPI - see virtio_net::intid / the GIC backends'
+            // the GIC (an SPI - see nic::Nic::intid / the GIC backends'
             // SPI paths) and tell the IRQ handler which INTID it is, so a
             // delivered frame wakes the network server immediately rather
             // than at the next tick's poll. Only when a NIC was actually
@@ -1645,7 +1646,7 @@ fn install_boot_disk(held: Option<Held>) -> syscall::UsbInstall {
     outcome
 }
 
-/// Brings up the virtio-net driver and hands it to the `NET` cell for the
+/// Brings up the virtio-net driver and hands it, as a `nic::Nic`, to the `NET` cell for the
 /// network server (`netd`) to reach through the gated `NET_SEND`/`NET_RECV`
 /// syscalls - the DMA-owning driver stays in EL1 (no IOMMU), the protocol
 /// stack lives in userland (`netd`), the `BLOCK_*` -> fsd pattern. (Stage 1
@@ -1679,7 +1680,7 @@ fn init_net(declared: &virtio_mmio::Transports) {
     // DMA-owning driver, the BLOCK_* -> fsd pattern. The protocol stack
     // (ARP/IP/ICMP) and any actual traffic now live in userland; this
     // function no longer sends anything itself.
-    syscall::install_net_device(device);
+    syscall::install_net_device(nic::Nic::Virtio(device));
     console::println!("Ouroboros kernel: NIC installed for the network server");
 }
 

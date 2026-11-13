@@ -767,8 +767,8 @@ fn irq_locked(frame: *mut Context, acked: gic::Acked) {
         // SAFETY: `frame` is this IRQ's live trap frame.
         unsafe { crate::smp::on_kick(frame) };
     } else if boot_core && intid == NET_INTID.load(Ordering::Relaxed) {
-        // A NIC receive frame arrived (TX completions are suppressed at the
-        // device, so this INTID always means receive - see virtio_net.rs).
+        // A NIC receive frame arrived (the INTID a NIC reports always means
+        // receive - nic.rs's module doc; virtio_net.rs for how its arm keeps it).
         // Ack the device so it can raise the next one, then wake the network
         // server (blocked in NET_WAIT) and switch to it now - the latency
         // win over the tick-poll, which stays as a fallback (see

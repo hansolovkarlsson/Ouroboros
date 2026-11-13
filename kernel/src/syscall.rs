@@ -81,12 +81,12 @@ pub fn block_device_installed() -> bool {
     unsafe { (*BLOCK.get()).is_some() }
 }
 
-/// The virtio-net device the `NET_*` syscalls operate on - the kernel's
+/// The network device (`nic.rs`) the `NET_*` syscalls operate on - the kernel's
 /// entire remaining role in networking since the protocol stack moved to
 /// userland (the netd server): hold the NIC, send/receive raw frames on
 /// request, for exactly one authorized task (netd), the `BLOCK_*` -> fsd
 /// pattern. `None` whenever no NIC was discovered this boot.
-static NET: SyncCell<Option<crate::virtio_net::Device>> = SyncCell::new(None);
+static NET: SyncCell<Option<crate::nic::Nic>> = SyncCell::new(None);
 
 /// The virtio-rng device the `RANDOM` syscall draws from. `None` whenever the
 /// machine has no entropy device - the ordinary case on every platform except a
@@ -107,7 +107,7 @@ pub fn install_rng_device(device: crate::virtio_rng::Device) {
 }
 
 /// Installs the NIC the `NET_*` syscalls serve (from `main.rs::init_net`).
-pub fn install_net_device(device: crate::virtio_net::Device) {
+pub fn install_net_device(device: crate::nic::Nic) {
     unsafe { *NET.get() = Some(device) };
 }
 
@@ -124,8 +124,9 @@ fn net_access_allowed() -> bool {
 /// only ever reached from the kernel's own wake-check, not a syscall.
 pub(crate) fn net_has_frame() -> bool {
     match unsafe { &*NET.get() } {
-        // SAFETY: single-core, non-reentrant; has_frame only reads the used
-        // ring index (see virtio_net::has_frame).
+        // SAFETY: under the kernel lock (lock.rs), as every caller is;
+        // has_frame is a read with no side effect on every arm (nic.rs's
+        // module doc).
         Some(device) => unsafe { device.has_frame() },
         None => false,
     }
@@ -145,7 +146,8 @@ pub(crate) fn net_intid() -> Option<u32> {
 /// kernel's IRQ handler, never a syscall.
 pub(crate) fn net_ack_interrupt() {
     if let Some(device) = unsafe { &*NET.get() } {
-        // SAFETY: single-core IRQ context; device installed (init ran).
+        // SAFETY: the IRQ path, under the kernel lock (lock.rs); a device
+        // in the cell is one init_net initialized.
         unsafe { device.ack_interrupt() };
     }
 }
@@ -2055,13 +2057,13 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
         }
         syscall_abi::NET_SEND => {
             // arg0 = frame ptr, arg1 = frame len (a raw Ethernet frame; the
-            // driver prepends the virtio-net header itself). Validated with
+            // driver adds whatever header its device wants). Validated with
             // in_caller_region, not valid_user_range - a frame exceeds the
             // 512-byte MAX_USER_LEN cap.
             if !net_access_allowed()
                 || arg0 == 0
                 || arg1 == 0
-                || arg1 > crate::virtio_net::MAX_FRAME as u64
+                || arg1 > syscall_abi::NET_MAX_FRAME
                 || !in_caller_region(arg0, arg1)
             {
                 return syscall_abi::NET_ERROR;
@@ -2069,7 +2071,8 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
             let Some(device) = (unsafe { &mut *NET.get() }) else {
                 return syscall_abi::NET_ERROR;
             };
-            // SAFETY: bounds sanity-checked above, same trust model as BLOCK_*.
+            // SAFETY: bounds sanity-checked above, same trust model as BLOCK_*;
+            // the length is within NET_MAX_FRAME, as Nic::send_frame asks.
             let frame = unsafe { core::slice::from_raw_parts(arg0 as *const u8, arg1 as usize) };
             let timeout = crate::timer::frequency_hz() / 1000 * 100; // ~100ms
             match unsafe { device.send_frame(frame, timeout) } {
@@ -2102,7 +2105,7 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
             if !net_access_allowed()
                 || arg0 == 0
                 || arg1 == 0
-                || arg1 > crate::virtio_net::MAX_FRAME as u64
+                || arg1 > syscall_abi::NET_MAX_FRAME
                 || !in_caller_region(arg0, arg1)
             {
                 return syscall_abi::NET_ERROR;
@@ -2110,7 +2113,8 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
             let Some(device) = (unsafe { &mut *NET.get() }) else {
                 return syscall_abi::NET_ERROR;
             };
-            // SAFETY: same as NET_SEND.
+            // SAFETY: same as NET_SEND; the buffer is within NET_MAX_FRAME,
+            // which Nic::poll_frame's arms rely on.
             let buf = unsafe { core::slice::from_raw_parts_mut(arg0 as *mut u8, arg1 as usize) };
             match unsafe { device.poll_frame(buf) } {
                 Some(len) => len as u64,

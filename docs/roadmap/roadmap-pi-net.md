@@ -321,6 +321,43 @@ Each has a recommendation; none blocks step 2.
 
 3. **The NIC enum.** `nic.rs` with the virtio arm alone, `syscall.rs` and
    `init_net()` moved onto it. No behaviour changes.
+   **Built 2026-11-13 (#454).** `kernel/src/nic.rs` holds
+   `enum Nic { Virtio }` and answers `mac`, `intid`, `ack_interrupt`,
+   `send_frame`, `has_frame` and `poll_frame`; `syscall.rs`'s cell holds a
+   `Nic`, and `init_net()` moves the device it brought up into
+   `Nic::Virtio`. The module doc states what an arm owes its callers,
+   which step 5's GENET arm has to keep: `has_frame` is a read with no
+   side effect, and an INTID reported is one that means receive and that
+   `ack_interrupt` clears (design 7 is why GENET's is `None` until step 9).
+   **Checked:** `make test` and the nine rigs below, each exit 0 on the
+   first commit. No mutation was run. `make-targets.md` names no other rig
+   for `virtio_net` or `NET_`.
+   **The review of #454** found no fault in what runs today and four
+   things the GENET arm would have walked into. The first commit made the
+   frame bound of `NET_SEND` and `NET_RECV` the installed device's own. An
+   arm with a bound below `netd`'s 1600-byte buffers would then have had
+   every receive refused, read by `netd` as "no frame", with no line. The
+   bound is now a number of the ABI, `syscall_abi::NET_MAX_FRAME` (2036,
+   the value it always had), the same for every device; `nic.rs` asserts
+   that virtio-net's buffers hold it, and says that a driver relies on it
+   (virtio-net's `poll_frame` indexes its buffer by the caller's length,
+   which nothing had stated). `on_net_irq`'s doc in `tasks.rs` gave a
+   virtio detail as its reason for waking without a second look at the
+   device; it now names the promise an arm makes by reporting an INTID.
+   Two safety comments in `syscall.rs` still argued from a single core,
+   and `nic::Error`'s doc claimed log lines nothing prints. This record
+   had said nothing reaches the driver around the enum "since `syscall.rs`
+   no longer names `virtio_net`", which does not follow: the reason is
+   that `init_net()` moves the one `Device` into the enum and the
+   driver's rings are private to its module. No rig sends a frame or a
+   buffer over the bound, so that refusal is still a check nothing fails.
+   **Found there, not fixed here (it is `netd`'s, and older than this
+   step):** `NET_RECV` returns the frame's own length, and `netd` indexes
+   its 1600-byte buffer by it (`recv` then `&t.frame[..n]`,
+   `programs/servers/netd/src/main.rs`). A frame of 1601 to 2036 bytes
+   would panic `netd`. SLIRP sends none; a LAN can. Step 7 owes the clamp
+   (a frame longer than the buffer dropped, not cut), before the board
+   receives from a network. The ABI's doc for `NET_RECV` says so now.
    **Check:** every network rig on QEMU passes as before (`make
    test-async-rmount`, `test-run-callback`, `test-run-orphan`,
    `test-run-silent`, `test-cred-client`, `test-held-keys`,
