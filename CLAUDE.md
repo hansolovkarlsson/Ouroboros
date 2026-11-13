@@ -216,7 +216,7 @@ make test-parallels           # scripted real-hardware round trip via prlctl
 make test-early-fault         # the early fault reporter on QEMU
 make run-el2                  # `run` with the firmware handing off at EL2
 make test-el1-drop            # the EL1 drop: test-early-fault's three boots handed off at EL2
-make test-netdump             # the Pi 4 Ethernet scan under \NETDUMP touches no register where no GENET is declared
+make test-netdump             # the Pi 4 Ethernet scan under \NETDUMP, and the driver's own half, touch no register where no GENET is declared
 make test-async-rmount        # six driven QEMU boots against host-run 9P peers
 make test-call-interrupt      # an interrupted call's late answer goes nowhere
 make test-held-keys           # six driven QEMU boots of the held user keys
@@ -430,7 +430,10 @@ kernel/              every file annotated in full in `docs/source-map.md`; each 
                      under \NETDUMP, before the exit, and touches no register where none is declared
   src/bootdisk.rs    the boot partition: the HardDrive node of the image's own device path, read before the exit (one-disk step 1),
                      and is_boot_disk, which makes the disk booted from the block device (step 3); the matcher itself is parttable's
-  src/nic.rs         Nic enum (Virtio alone today; the Pi's GENET is the arm to come) - what the NET_* syscalls sit on
+  src/nic.rs         Nic enum (Virtio | Genet) - what the NET_* syscalls sit on
+  src/genetnic.rs    the Pi 4's Ethernet, the kernel's half (Pi net arc step 5): the one GENET the ACPI tables declare, made quiet, set up
+                     through the genet crate, its PHY set up and its link logged; the MAC left off until steps 6 and 7. Its receive
+                     buffers are a 512 KB static mapped non-cacheable where the firmware says DMA is not coherent
   src/virtio_net.rs  virtio-net: rx/tx queues, the 12-byte header, IRQ-driven receive - the DMA-owning half of the net stack
   src/xhci.rs        from-scratch xHCI: rings, multi-device port scan, HID interrupt endpoint, storage endpoint reset
 

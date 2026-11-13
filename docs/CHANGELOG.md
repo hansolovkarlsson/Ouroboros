@@ -11,6 +11,22 @@ here actually works today, see [`architecture.md`](architecture.md) and
 
 **Not yet released.** Changes since v0.25.0, drafted as they land.
 
+**The kernel brings the Pi's Ethernet up and reads its link; nothing is sent yet (2026-11-13, #457).**
+Step 5 of `docs/roadmap/roadmap-pi-net.md`, built and not yet run on a
+board. `kernel/src/genetnic.rs` takes the one GENET the ACPI tables
+declare, makes it quiet, resets and sets it up through the `genet` crate,
+sets up its PHY and logs the link, and installs it as the second arm of
+`nic::Nic`, polled, so `NET_MAC` answers. The MAC's transmitter and
+receiver stay off: sending is step 6 and receiving step 7. Its receive
+buffers are a half-megabyte static mapped non-cacheable where the firmware
+says DMA is not coherent, and a line on every boot says how they really
+walk. `acpi::declared` and `amlscan::Transports::one` are now the one way a
+device is found by its `_HID`, for the SD card's EMMC2 as well, and the
+kernel's list of mapped devices grew from five to seven so the SD
+controller and the Ethernet each have a slot of their own. On QEMU and
+Parallels no GENET is declared and no register is touched, which
+`make test-netdump` holds.
+
 **The Pi's PHY is set up as U-Boot sets it up, and its real speed is read (2026-11-13, #456).**
 Step 4b of `docs/roadmap/roadmap-pi-net.md`, Hans's answer to decision D7.
 For the board's Broadcom BCM54210E and no other PHY, `genet::phy::setup`

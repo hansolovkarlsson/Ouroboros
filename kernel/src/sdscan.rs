@@ -182,7 +182,15 @@ unsafe fn report_controller(tables: &[&[u8]]) {
         found.absent,
         found.status_unknown
     );
-    let [c] = found.as_slice() else { return };
+    let Some(c) = found.one() else {
+        if !found.is_empty() {
+            log::info!(
+                "Ouroboros kernel: sd: not exactly one EMMC2 declared ({} more past the list's room): no register read",
+                found.dropped
+            );
+        }
+        return;
+    };
     log::info!(
         "Ouroboros kernel: sd: EMMC2 registers {:#x}, {:#x} bytes, INTID {:?}",
         c.base,

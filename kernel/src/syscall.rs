@@ -106,7 +106,14 @@ pub fn install_rng_device(device: crate::virtio_rng::Device) {
     unsafe { *RNG.get() = Some(device) };
 }
 
-/// Installs the NIC the `NET_*` syscalls serve (from `main.rs::init_net`).
+/// Whether a NIC is installed: `main.rs` asks before it brings up a second
+/// kind of one.
+pub fn net_device_installed() -> bool {
+    unsafe { (*NET.get()).is_some() }
+}
+
+/// Installs the NIC the `NET_*` syscalls serve: `main.rs`'s `init_net` for
+/// virtio-net, or its GENET step after it (`genetnic.rs`).
 pub fn install_net_device(device: crate::nic::Nic) {
     unsafe { *NET.get() = Some(device) };
 }
@@ -147,7 +154,7 @@ pub(crate) fn net_intid() -> Option<u32> {
 pub(crate) fn net_ack_interrupt() {
     if let Some(device) = unsafe { &*NET.get() } {
         // SAFETY: the IRQ path, under the kernel lock (lock.rs); a device
-        // in the cell is one init_net initialized.
+        // in the cell is one `main.rs` initialized before installing it.
         unsafe { device.ack_interrupt() };
     }
 }

@@ -18,6 +18,7 @@ mod fbconsole;
 mod fbdev;
 mod font;
 mod framebuffer;
+mod genetnic;
 mod gic;
 mod gicv2;
 mod gicv3;
@@ -617,6 +618,13 @@ extern "C" fn kernel_main() -> ! {
         None => unsafe { emmc2_from_acpi(rsdp) },
     };
 
+    // The Pi 4's Ethernet, when the ACPI tables declare exactly one GENET
+    // (genetnic.rs, step 5 of docs/roadmap/roadmap-pi-net.md): found here
+    // and brought up after the exit, where `init_net` is. Silent where none
+    // is declared, and no register is touched here.
+    // SAFETY: `rsdp` is the firmware's, found above.
+    let genet_declared = unsafe { genetnic::discover(rsdp) };
+
     // What the firmware says of the SD card's controller (sdscan.rs, step 0
     // of docs/roadmap/roadmap-sd-card.md): read only, no register touched.
     // After the xHCI step so its lines stay next to that step's.
@@ -711,10 +719,10 @@ extern "C" fn kernel_main() -> ! {
     console::println!("Ouroboros kernel: running at EL{} after the exit", el2::current_el());
 
     // SAFETY: called after exit_boot_services, with the memory map that
-    // call returned. Up to five regions (`mmu::MAX_EXTRA_DEVICES`) from six
-    // candidates: the console, framebuffer, xHCI BAR, GICD and GICR, and
-    // last the SD host controller, which is mapped only when a slot is left
-    // (`init_sd` then asks the walker, and says so when it is not), all discovered
+    // call returned. Up to seven regions (`mmu::MAX_EXTRA_DEVICES`), which
+    // is every candidate there is: the console, framebuffer, xHCI BAR, GICD
+    // and GICR, the SD host controller and the Pi's Ethernet (`init_sd` and
+    // `genetnic::quiet` still ask the walker before their first access), all discovered
     // addresses (madt.rs for the GIC), none assumed to live in the fixed
     // low-1GB device block. `mmu.rs`'s `MAX_EXTRA_L1_TABLES` is sized to
     // match, so each can have its own L1 table past 512GB.
@@ -751,12 +759,23 @@ extern "C" fn kernel_main() -> ! {
         extra_devices[extra_device_count] = (secondary_base, secondary_size);
         extra_device_count += 1;
     }
-    // The SD host controller, when there is room: QEMU's PCI window is in
-    // the low 1GB device block, mapped whatever this says, and `init_sd`
-    // asks the walker before the first access in any case.
+    // The SD host controller. It has had a slot of its own since
+    // 2026-11-13, when the list grew to hold every candidate; before that
+    // it was mapped on the Pi only because the console's 1GB block held it.
+    // The bound is kept, and `init_sd` asks the walker before the first
+    // access in any case.
     if let Some(ctl) = &sd_controller {
         if extra_device_count < mmu::MAX_EXTRA_DEVICES {
             extra_devices[extra_device_count] = (ctl.base, 0x1000);
+            extra_device_count += 1;
+        }
+    }
+    // The Ethernet's registers, a slot of their own as the SD controller's
+    // have, and `genetnic::quiet` asks the walker before its first access
+    // either way.
+    if let Some(d) = &genet_declared {
+        if extra_device_count < mmu::MAX_EXTRA_DEVICES {
+            extra_devices[extra_device_count] = (d.base, u64::from(genet::BLOCK_LEN));
             extra_device_count += 1;
         }
     }
@@ -784,8 +803,12 @@ extern "C" fn kernel_main() -> ! {
         // to memory for the display engine (Risk 7) - correct on bare
         // metal and under a hypervisor alike, and a scroll reads cached
         // memory rather than uncached.
-        let uncached = [xhci::dma_region()];
-        let uncached_count = usize::from(dma_noncoherent);
+        // The GENET's receive buffers by the same rule (genetnic.rs): its
+        // driver does no cache maintenance either. Both ranges or neither,
+        // whichever device is there, so the map does not depend on what
+        // was found.
+        let uncached = [xhci::dma_region(), genetnic::dma_region()];
+        let uncached_count = if dma_noncoherent { uncached.len() } else { 0 };
         mmu::install_identity_map(
             memory_map,
             el0_regions,
@@ -943,6 +966,26 @@ extern "C" fn kernel_main() -> ! {
         init_entropy(&virtio);
         held
     };
+
+    // The Pi 4's Ethernet (genetnic.rs), when the tables declared one and
+    // no virtio NIC took the cell. Its receive area's mapping is logged
+    // first, on every boot: non-cacheable where the firmware says DMA is
+    // not coherent (the Pi), cacheable everywhere else (the control).
+    genetnic::report_rx_area();
+    // A declared GENET is made quiet whether or not it is then used: one
+    // the firmware left receiving would go on writing into memory that is
+    // no longer the firmware's.
+    // SAFETY: the identity map is installed, this runs once on the boot
+    // core, and the firmware's driver stopped with boot services.
+    if let Some(quieted) = genet_declared.and_then(|declared| unsafe { genetnic::quiet(declared) }) {
+        if syscall::net_device_installed() {
+            console::println!("Ouroboros kernel: genet: a NIC is already installed: the GENET is made quiet and not set up");
+        // SAFETY: as above; `quieted` is that call's.
+        } else if let Some(device) = unsafe { genetnic::init(quieted, dma_noncoherent) } {
+            syscall::install_net_device(nic::Nic::Genet(device));
+            console::println!("Ouroboros kernel: NIC installed for the network server");
+        }
+    }
 
     // Third disk path, the SD-card arc, read before the second: an SD card
     // on a controller found before the exit (QEMU's on PCI, the Pi's EMMC2
@@ -1345,24 +1388,24 @@ struct SdController {
 /// # Safety
 /// `rsdp` as `acpi::find_rsdp` returns it.
 unsafe fn emmc2_from_acpi(rsdp: Option<*const u8>) -> Option<SdController> {
-    let mut tables: [&[u8]; amlscan::MAX_TABLES] = [&[]; amlscan::MAX_TABLES];
-    let count = match unsafe { acpi::aml_table_slices(rsdp, &mut tables) } {
-        Ok(count) => count,
+    let found = match unsafe { acpi::declared(rsdp, amlscan::EMMC2_HID) } {
+        Ok(found) => found,
         Err(e) => {
             log::info!("Ouroboros kernel: sd: ACPI tables not read ({e:?}): no EMMC2 is taken");
             return None;
         }
     };
-    let mut found = amlscan::Transports::new();
-    amlscan::declared(&tables[..count], amlscan::EMMC2_HID, &mut found);
     let left_out = found.unreadable + found.absent + found.status_unknown + found.dropped;
-    match found.as_slice() {
-        [] if left_out == 0 => None,
-        [c] if c.size >= 0x100 => {
+    // `Transports::one` is the rule for "exactly one", shared with the
+    // GENET's discovery: one kept and none dropped. Until 2026-11-13 this
+    // took one kept whatever was dropped beside it.
+    match found.one() {
+        None if found.is_empty() && left_out == 0 => None,
+        Some(c) if c.size >= 0x100 => {
             log::info!("Ouroboros kernel: sd: ACPI declares EMMC2 @ {:#x}, {:#x} bytes, INTID {:?}", c.base, c.size, c.intid);
             Some(SdController { base: c.base, source: "ACPI" })
         }
-        [c] => {
+        Some(c) => {
             log::info!(
                 "Ouroboros kernel: sd: ACPI's EMMC2 @ {:#x} not taken: its {:#x} bytes are fewer than SDHCI's 0x100 registers",
                 c.base,
@@ -1370,10 +1413,10 @@ unsafe fn emmc2_from_acpi(rsdp: Option<*const u8>) -> Option<SdController> {
             );
             None
         }
-        list => {
+        None => {
             log::info!(
                 "Ouroboros kernel: sd: ACPI's EMMC2 declarations not taken: {} present, {} unreadable, {} absent, {} of unknown status, {} past the list's room",
-                list.len(),
+                found.as_slice().len(),
                 found.unreadable,
                 found.absent,
                 found.status_unknown,
