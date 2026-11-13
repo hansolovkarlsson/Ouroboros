@@ -252,7 +252,8 @@ Each has a recommendation; none blocks step 2.
   the kernel as `sdhci.rs` was. Recommended: the crate. Without it nothing
   but the board can fail a check on the driver's logic.
 
-- **D7. The PHY's set-up** (new on 2026-11-13, from the sources read for
+- **D7. The PHY's set-up: settled by Hans on 2026-11-13, (b), do what
+  U-Boot does.** Step 4b built it. The entry as it was put (new on 2026-11-13, from the sources read for
   step 4; it replaces what D3 assumed, that nothing need be written to the
   PHY). U-Boot writes the PHY's RGMII clock delays and resets it, and
   reads the speed the PHY settled on from a Broadcom status register; the
@@ -272,7 +273,7 @@ Each has a recommendation; none blocks step 2.
   tell from five other faults. With (b), `ID_MODE_DIS` stays as U-Boot has
   it; if the board then disagrees, Linux's pairing is the one other thing
   to try. **Does not block step 5's bring-up**, which sends nothing; it
-  should be settled before step 6.
+  should be settled before step 6.)
 
 ## Steps, each with its check
 
@@ -555,6 +556,57 @@ Each has a recommendation; none blocks step 2.
      second `uncached` entry of design 5.
    - `tx_send` waits up to 100 ms under the kernel lock, the bound
      virtio-net's send already has.
+
+4b. **The Pi's PHY, as U-Boot sets it up** (decision D7).
+   **Built 2026-11-13, on the host.** In `genet::phy`, for a PHY whose
+   identifier is U-Boot's BCM54210E (`0x600d84a0` under the mask
+   `0xfffffff0`) and for no other:
+   - `setup`: U-Boot's `bcm54xx_config_clock_delay` for `rgmii-rxid` (the
+     receive clock skew on, in the auxiliary control register's
+     miscellaneous shadow; the transmit clock delay off, in shadow 3 of
+     register 0x1c), then its `phy_reset`, the reset bit polled for at
+     most half a second of waits.
+   - `link_resolved`: the status register twice, as `link`, then the
+     speed and duplex the PHY settled on, from its auxiliary status
+     register (U-Boot's `bcm54xx_parse_status`). For any other PHY it is
+     `link`.
+   - `genet::mdio_write`, U-Boot's `bcmgenet_mdio_write`, which the
+     set-up needed.
+   **The order is U-Boot's, delays first and then the reset, on
+   purpose.** Linux resets first and sets the delays after. Whether the
+   reset keeps the delay settings is not known here. In U-Boot's order
+   the PHY ends as it does under U-Boot whichever is true, and that is
+   the one state known to work with the MAC's `ID_MODE_DIS`, which
+   step 4 took from the same driver.
+   **Left out of U-Boot's set-up:** `genphy_config_aneg`, which it runs
+   before the reset and the reset undoes by clause 22 (control and
+   advertisement registers back to their defaults, autonegotiation on),
+   and the LED register.
+   **What it means for step 5:** the order there is `Genet::init`, the
+   PHY found by `phys` (its address and identifier), `phy::setup`, then
+   `phy::link_resolved` and, on a link, `Genet::start`. The reset drops
+   the link: it takes seconds to come back, so the first read after
+   `setup` says down or negotiating, and D3's "again whenever a send
+   finds the link down" is how the link is then found. A PHY that never
+   leaves reset costs about 0.5 s; the bound, on a bus whose every read
+   takes its whole 20 ms, is about 10.5 s.
+   **Checked:** 11 new host tests. The model's PHY has the two Broadcom
+   windows as U-Boot's `broadcom.c` uses them, and a reset bit that stays
+   set for a number of reads. The set-up's MDIO commands equal U-Boot's,
+   one for one (eight on a PHY whose reset clears at once); the skew is
+   set and the delay cleared whatever was in the shadows, other bits
+   kept; another PHY's identifier writes nothing; the reset clear on the
+   500th read is taken and one later is `ResetStuck`; a bus that sticks
+   ends the set-up at its first command; the resolved link by each value
+   of the mode field, with the advertisements saying otherwise. 28
+   mutations of the new code, each failed by a test. One was alive
+   after the first pass (the shadow's read-back not cut to its ten bits
+   of data, which changes nothing while the PHY echoes the selector it
+   was given) and got a test with a PHY that does not. 126 constants are
+   cited now, the Broadcom ones to `broadcom.c`'s lines.
+   **Still only the board's to say:** whether these are the right delays
+   (a wrong one is frames with bad checksums, or none), and whether the
+   PHY is this one (step 2's scan reads its identifier).
 
 5. **The board: bring-up and link.** One helper in `acpi.rs` for "the one
    device of this `_HID` declared present", used by this driver, the scan

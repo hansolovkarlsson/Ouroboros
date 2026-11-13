@@ -11,6 +11,14 @@ here actually works today, see [`architecture.md`](architecture.md) and
 
 **Not yet released.** Changes since v0.25.0, drafted as they land.
 
+**The Pi's PHY is set up as U-Boot sets it up, and its real speed is read (2026-11-13).**
+Step 4b of `docs/roadmap/roadmap-pi-net.md`, Hans's answer to decision D7.
+For the board's Broadcom BCM54210E and no other PHY, `genet::phy::setup`
+writes the RGMII clock delays U-Boot's driver writes and resets the PHY,
+and `link_resolved` reads the speed the PHY settled on, where the
+advertisements name only the best both ends could do. On the host, like
+the rest of the crate; the kernel calls none of it yet.
+
 **The Pi's Ethernet driver exists on the host: reset, the rings, a frame each way, the link (2026-11-13, #455).**
 Step 4 of `docs/roadmap/roadmap-pi-net.md`. The `genet` crate gains
 `mac.rs` and `phy.rs`: the device made quiet, reset and set up as U-Boot's
