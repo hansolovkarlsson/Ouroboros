@@ -228,8 +228,8 @@ pub enum TxError {
 /// Why a received frame was dropped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RxDrop {
-    /// Its length is more than its buffer, or more than
-    /// [`RX_MAX_FRAME`].
+    /// It is longer than [`RX_MAX_FRAME`], which is well inside its
+    /// buffer.
     Oversize,
     /// It is shorter than [`MIN_FRAME`].
     Runt,
@@ -505,7 +505,7 @@ impl Genet {
         let buffer = usize::from(self.rx_cons) % DESCS;
         let len_stat = bus.read(reg::RX_DESCS + buffer * reg::DESC_SIZE + reg::DESC_LENGTH_STATUS);
         let length = ((len_stat >> DMA_BUFLENGTH_SHIFT) & DMA_BUFLENGTH_MASK) as usize;
-        let drop = if length > RX_BUF_LEN {
+        let drop = if length > RX_PAD + RX_MAX_FRAME {
             self.drops.oversize = self.drops.oversize.saturating_add(1);
             RxDrop::Oversize
         } else if len_stat & DMA_EOP == 0 || len_stat & DMA_SOP == 0 {
@@ -517,9 +517,6 @@ impl Genet {
         } else if length < RX_PAD + MIN_FRAME {
             self.drops.runt = self.drops.runt.saturating_add(1);
             RxDrop::Runt
-        } else if length > RX_PAD + RX_MAX_FRAME {
-            self.drops.oversize = self.drops.oversize.saturating_add(1);
-            RxDrop::Oversize
         } else {
             self.rx_held = true;
             return Rx::Frame { buffer, offset: RX_PAD, len: length - RX_PAD };
