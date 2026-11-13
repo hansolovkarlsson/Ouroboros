@@ -11,6 +11,18 @@ here actually works today, see [`architecture.md`](architecture.md) and
 
 **Not yet released.** Changes since v0.25.0, drafted as they land.
 
+**The Pi's Ethernet driver exists on the host: reset, the rings, a frame each way, the link (2026-11-13).**
+Step 4 of `docs/roadmap/roadmap-pi-net.md`. The `genet` crate gains
+`mac.rs` and `phy.rs`: the device made quiet, reset and set up as U-Boot's
+driver does it, one frame sent, one received, and the link's speed read
+from the PHY. None of it touches memory or hardware; it runs over the `Bus`
+the scan uses, against a model of the device. Nothing in the kernel calls
+it yet (step 5). It departs from U-Boot where U-Boot trusts what a
+firmware may have left or the device may say, and each departure has a
+test. Every constant is cited to its line in U-Boot `v2024.10` or Linux
+`v6.6`. Reading those sources again found that U-Boot also configures the
+PHY's clock delays, which the plan had not known: decision D7.
+
 **The network device is an enum, `nic.rs`, with virtio-net its one arm (2026-11-13, #454).**
 Step 3 of `docs/roadmap/roadmap-pi-net.md`, and no change in behaviour. The
 `NET_*` syscalls, the tick's wake check and the receive interrupt reach the
