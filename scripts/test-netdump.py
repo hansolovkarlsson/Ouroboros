@@ -22,9 +22,18 @@ ESP, each graded from the serial console and from QEMU's own trace:
 2. Without it, the control: no line of the scan appears at all, so the
    flag is what runs it, and the boot is the ordinary one.
 
+Since the plan's step 5 the kernel also has the driver's own half
+(kernel/src/genetnic.rs), and both boots hold the same for it: with no
+GENET declared it says one thing on every boot and nothing else. The one
+line is how its receive buffers walk in the running tables, which on QEMU,
+where nothing declares non-coherent DMA, must be cacheable on all 128
+pages. That is the control for the line that must say non-cacheable on the
+Pi. No other `genet:` line may appear: the device is not looked for past
+the tables, and no register of it is touched.
+
 What the scan reads from a real GENET (the registers, the MDIO bus, the
 bounds on both) is the `genet` crate's and is tested on the host against a
-model (`make test`). What a real GENET answers, only a board shows: step 2's
+model (`make test`), as the driver's logic is. What a real GENET answers, only a board shows: step 2's
 card round trip.
 
 The boots and the grading are test-early-fault.py's, imported, so the two
@@ -48,6 +57,12 @@ _spec.loader.exec_module(early)
 # netscan.rs is refused here without this list hearing of it.
 SCAN_LINE = r"Ouroboros kernel: net: "
 BEYOND_THE_DECLARATION = SCAN_LINE + r"(?!GENET declared present: |not exactly one GENET declared: no register touched)"
+# The driver's lines, and of those any but the one a machine with no GENET
+# prints: how its receive area walks. Named by what is allowed, as above.
+DRIVER_LINE = r"Ouroboros kernel: genet: "
+BEYOND_THE_AREA = DRIVER_LINE + r"(?!receive area )"
+AREA_CACHEABLE = r"genet: receive area 0x[0-9a-f]+, 0x80000 bytes: walks as cacheable memory \(0 of 128 pages non-cacheable\)"
+NO_DRIVER = [("the receive area walks cacheable, all 128 pages", AREA_CACHEABLE)]
 FAULTS = early.CLEAN_BOOT_MUST_NOT
 
 
@@ -81,7 +96,8 @@ def main():
         ("boot services exited", r"exiting boot services"),
         ("shell", r"shell ready"),
         ("help answered after the dwell", r"^builtins: help"),
-    ], [("a scan line beyond the declaration", BEYOND_THE_DECLARATION)] + FAULTS, aborts, "zero", order=[
+        *NO_DRIVER,
+    ], [("a scan line beyond the declaration", BEYOND_THE_DECLARATION), ("a driver line beyond the receive area", BEYOND_THE_AREA)] + FAULTS, aborts, "zero", order=[
         ("the scan's lines before the exit", r"no register touched", r"exiting boot services"),
     ]))
 
@@ -94,7 +110,8 @@ def main():
         *identity,
         ("shell", r"shell ready"),
         ("help answered after the dwell", r"^builtins: help"),
-    ], [("any line of the scan", SCAN_LINE), ("the flag", r"NETDUMP")] + FAULTS, aborts, "zero"))
+        *NO_DRIVER,
+    ], [("any line of the scan", SCAN_LINE), ("the flag", r"NETDUMP"), ("a driver line beyond the receive area", BEYOND_THE_AREA)] + FAULTS, aborts, "zero"))
 
     passed = all(results)
     if args.keep or not passed:
