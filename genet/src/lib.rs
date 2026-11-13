@@ -179,6 +179,8 @@ pub const MDIO_START_BUSY: u32 = 1 << 29;
 pub const MDIO_READ_FAIL: u32 = 1 << 28;
 /// `MDIO_RD` (U-Boot): the read operation.
 pub const MDIO_RD: u32 = 2 << 26;
+/// `MDIO_WR` (U-Boot): the write operation.
+pub const MDIO_WR: u32 = 1 << 26;
 /// `MDIO_PMD_SHIFT` (U-Boot): the PHY's address, five bits.
 pub const MDIO_PMD_SHIFT: u32 = 21;
 /// `MDIO_REG_SHIFT` (U-Boot): the register, five bits.
@@ -238,13 +240,33 @@ pub fn mdio_read_command(phy: u8, reg: u8) -> Option<u32> {
 /// else written.
 pub fn mdio_read<B: Bus>(bus: &mut B, phy: u8, reg: u8) -> Result<u16, MdioError> {
     let command = mdio_read_command(phy, reg).ok_or(MdioError::BadAddress)?;
+    let v = mdio_run(bus, command)?;
+    if v & MDIO_READ_FAIL != 0 { Err(MdioError::NoAnswer) } else { Ok(v as u16) }
+}
+
+/// Writes `value` to register `reg` of the PHY at `phy` (U-Boot's
+/// `bcmgenet_mdio_write`): the command with the value in its low half, in
+/// the same two writes and with the same bounded poll as a read. The
+/// controller does not say whether a PHY took a write, so `Ok` means the
+/// command finished, not that anything heard it.
+pub fn mdio_write<B: Bus>(bus: &mut B, phy: u8, reg: u8, value: u16) -> Result<(), MdioError> {
+    if phy >= 32 || reg >= 32 {
+        return Err(MdioError::BadAddress);
+    }
+    let command = MDIO_WR | (u32::from(phy) << MDIO_PMD_SHIFT) | (u32::from(reg) << MDIO_REG_SHIFT) | u32::from(value);
+    mdio_run(bus, command).map(|_| ())
+}
+
+/// One MDIO command: written, then written with the start bit, then the
+/// start bit polled until it clears. The register as it then reads.
+fn mdio_run<B: Bus>(bus: &mut B, command: u32) -> Result<u32, MdioError> {
     bus.write(reg::MDIO_CMD, command);
     bus.write(reg::MDIO_CMD, command | MDIO_START_BUSY);
     for _ in 0..MDIO_POLLS {
         bus.delay_us(MDIO_POLL_US);
         let v = bus.read(reg::MDIO_CMD);
         if v & MDIO_START_BUSY == 0 {
-            return if v & MDIO_READ_FAIL != 0 { Err(MdioError::NoAnswer) } else { Ok(v as u16) };
+            return Ok(v);
         }
     }
     Err(MdioError::Busy)

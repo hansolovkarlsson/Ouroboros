@@ -1,24 +1,40 @@
-//! The PHY's link and its speed, read over MDIO from the registers IEEE
-//! 802.3 clause 22 gives every PHY. Reads alone: this file writes nothing
-//! to the PHY, so whatever configured it (its reset, its straps, the
-//! firmware) still stands. Whether that is enough on the board is open
-//! (`docs/roadmap/roadmap-pi-net.md`, decision D7): U-Boot's driver for
-//! this PHY also writes its RGMII clock delays, and this file does not.
+//! The PHY: its set-up, its link and its speed, over MDIO. Two layers.
 //!
-//! The rule for the speed is U-Boot's `genphy_parse_link`
-//! (`drivers/net/phy/phy.c`): what both ends advertise, gigabit first.
+//! **Any PHY**, by the registers IEEE 802.3 clause 22 gives every one:
+//! [`link`], reads alone. The rule for the speed is U-Boot's
+//! `genphy_parse_link` (`drivers/net/phy/phy.c`): what both ends
+//! advertise, gigabit first. **That is the best speed the two ends could
+//! agree on, not the speed the PHY settled on.** A Broadcom PHY that
+//! cannot hold gigabit on the cable it has (two pairs, or a bad one) drops
+//! to 100 on its own and goes on advertising 1000; [`link`] would report
+//! 1000, the MAC would be set to it, and no frame would pass in either
+//! direction, with no error anywhere.
 //!
-//! **That is the best speed the two ends could agree on, not the speed the
-//! PHY settled on.** A Broadcom PHY that cannot hold gigabit on the cable
-//! it has (two pairs, or a bad one) drops to 100 on its own and goes on
-//! advertising 1000. This file would then report 1000, the MAC would be
-//! set to it, and no frame would pass in either direction, with no error
-//! anywhere. U-Boot's driver for the Pi's PHY reads the speed the PHY
-//! resolved from a Broadcom status register (`bcm54xx_parse_status`,
-//! register 0x19) for that reason. Reading it belongs with the rest of
-//! the Broadcom-specific set-up, decision D7.
+//! **The Pi 4's PHY, a Broadcom BCM54210E** (the plan's decision D7,
+//! settled 2026-11-13: do what U-Boot does), from U-Boot's
+//! `drivers/net/phy/broadcom.c` at `v2024.10`, and only for a PHY whose
+//! identifier is that driver's ([`is_bcm54210e`]):
+//!
+//! - [`setup`] is `bcm54210e_config` for the board's `rgmii-rxid`: the
+//!   PHY's receive clock skew on and its transmit clock delay off
+//!   (`bcm54xx_config_clock_delay`), then a reset (`phy_reset`), **in that
+//!   order, which is U-Boot's**. Whether the reset keeps the two delay
+//!   settings is not known here. In U-Boot's order the PHY ends as it
+//!   does under U-Boot either way, and that is the one state known to
+//!   work with the MAC setting `mac.rs` takes from the same driver.
+//! - [`link_resolved`] reads the speed the PHY settled on from its
+//!   auxiliary status register (`bcm54xx_parse_status`), which is right
+//!   on the poor cable where the advertisements are not.
+//!
+//! **Left out of U-Boot's set-up, on purpose:** `genphy_config_aneg`,
+//! which U-Boot runs before the reset and the reset undoes (clause 22: a
+//! reset returns the control and advertisement registers to their
+//! defaults, autonegotiation on); and the LED register, which carries no
+//! data. After the reset the PHY negotiates afresh: a link takes seconds
+//! to come back, and [`link_resolved`] says `Negotiating` or `Down` until
+//! it has.
 
-use crate::{mdio_read, Bus, MdioError, BMSR_ANEG_DONE, BMSR_LINK, PHY_BMSR};
+use crate::{mdio_read, mdio_write, Bus, MdioError, BMSR_ANEG_DONE, BMSR_LINK, PHY_BMSR};
 
 /// `MII_ADVERTISE`: what this end advertises.
 pub const PHY_ADVERTISE: u8 = 4;
@@ -74,13 +90,10 @@ pub enum Link {
     Unresolved,
 }
 
-/// Reads the link of the PHY at `phy`: the status register twice (its link
-/// bit latches low, so the first reading can be an old drop), and for a
-/// negotiated link the advertisement registers of both ends. At most six
-/// MDIO reads, each bounded as [`mdio_read`] is, and no write but those
-/// read commands. A status that reads all ones is no PHY's answer and is
-/// [`MdioError::NoAnswer`].
-pub fn link<B: Bus>(bus: &mut B, phy: u8) -> Result<Link, MdioError> {
+/// The status register read twice (its link bit latches low, so the first
+/// reading can be an old drop): `Err` with what the link is when it is not
+/// a negotiated one, `Ok` with the status when it is.
+fn negotiated<B: Bus>(bus: &mut B, phy: u8) -> Result<Result<u16, Link>, MdioError> {
     mdio_read(bus, phy, PHY_BMSR)?;
     let bmsr = mdio_read(bus, phy, PHY_BMSR)?;
     // All ones is a bus nobody drives (no PHY, or one held in reset), with
@@ -89,12 +102,25 @@ pub fn link<B: Bus>(bus: &mut B, phy: u8) -> Result<Link, MdioError> {
     if bmsr == 0xffff {
         return Err(MdioError::NoAnswer);
     }
-    if bmsr & BMSR_LINK == 0 {
-        return Ok(Link::Down);
-    }
-    if bmsr & BMSR_ANEG_DONE == 0 {
-        return Ok(Link::Negotiating);
-    }
+    Ok(if bmsr & BMSR_LINK == 0 {
+        Err(Link::Down)
+    } else if bmsr & BMSR_ANEG_DONE == 0 {
+        Err(Link::Negotiating)
+    } else {
+        Ok(bmsr)
+    })
+}
+
+/// Reads the link of the PHY at `phy`: the status register twice, and for
+/// a negotiated link the advertisement registers of both ends. At most six
+/// MDIO reads, each bounded as [`mdio_read`] is, and no write but those
+/// read commands. A status that reads all ones is no PHY's answer and is
+/// [`MdioError::NoAnswer`].
+pub fn link<B: Bus>(bus: &mut B, phy: u8) -> Result<Link, MdioError> {
+    let bmsr = match negotiated(bus, phy)? {
+        Ok(bmsr) => bmsr,
+        Err(link) => return Ok(link),
+    };
     if bmsr & BMSR_ESTATEN != 0 {
         // The partner's two bits against this end's, moved up to match.
         let both = mdio_read(bus, phy, PHY_STAT1000)? & (mdio_read(bus, phy, PHY_CTRL1000)? << 2);
@@ -109,5 +135,132 @@ pub fn link<B: Bus>(bus: &mut B, phy: u8) -> Result<Link, MdioError> {
         Link::Up { speed: Speed::S10, full: both & LPA_10FULL != 0 }
     } else {
         Link::Unresolved
+    })
+}
+
+/// U-Boot's identifier and mask for its BCM54210E driver (`broadcom.c`,
+/// `U_BOOT_PHY_DRIVER(bcm54210e)`): the low four bits are the revision.
+pub const BCM54210E_ID: u32 = 0x600d_84a0;
+pub const BCM54210E_ID_MASK: u32 = 0xffff_fff0;
+
+/// Whether a PHY's identifier (register 2 high, register 3 low, as
+/// [`crate::Phy::id`] has it) is the BCM54210E's.
+pub fn is_bcm54210e(id: u32) -> bool {
+    id & BCM54210E_ID_MASK == BCM54210E_ID
+}
+
+/// `MII_BMCR`, the control register, and `BMCR_RESET` in it.
+pub const PHY_BMCR: u8 = 0;
+pub const BMCR_RESET: u16 = 0x8000;
+/// `MIIM_BCM54xx_AUXCNTL`: the auxiliary control register, a window on
+/// eight shadow registers chosen by its low three bits.
+pub const BCM_AUXCNTL: u8 = 0x18;
+/// `MIIM_BCM_AUXCNTL_SHDWSEL_MISC`: the miscellaneous shadow, 7.
+pub const BCM_AUXCNTL_MISC: u16 = 0x0007;
+/// `MIIM_BCM_AUXCNTL_SHDWSEL_MISC_RGMII_SKEW_EN`: the receive clock skew.
+pub const BCM_AUXCNTL_MISC_RGMII_SKEW_EN: u16 = 0x0100;
+/// `MIIM_BCM_AUXCNTL_MISC_WREN`: a write to the miscellaneous shadow
+/// takes effect only with this set.
+pub const BCM_AUXCNTL_MISC_WREN: u16 = 0x8000;
+/// `MIIM_BCM54xx_AUXSTATUS` and its link mode field, bits 10 to 8.
+pub const BCM_AUXSTATUS: u8 = 0x19;
+pub const BCM_AUXSTATUS_LINKMODE_SHIFT: u16 = 8;
+pub const BCM_AUXSTATUS_LINKMODE_MASK: u16 = 0x0700;
+/// `MIIM_BCM54XX_SHD`: a window on 32 more shadow registers. The shadow's
+/// number is in bits 14 to 10, its ten bits of data in bits 9 to 0, and
+/// bit 15 (`MIIM_BCM54XX_SHD_WRITE`) makes the access a write.
+pub const BCM_SHD: u8 = 0x1c;
+pub const BCM_SHD_WRITE: u16 = 0x8000;
+pub const BCM_SHD_SEL_SHIFT: u16 = 10;
+pub const BCM_SHD_DATA_MASK: u16 = 0x03ff;
+/// `BCM54810_SHD_CLK_CTL` and `_GTXCLK_EN`: the clock control shadow, 3,
+/// and the transmit clock delay in it.
+pub const BCM_SHD_CLK_CTL: u16 = 0x03;
+pub const BCM_SHD_CLK_CTL_GTXCLK_EN: u16 = 1 << 9;
+
+/// The most polls of the control register a reset gets, each after a
+/// millisecond: U-Boot's `phy_reset`, the half second clause 22 allows.
+pub const RESET_POLLS: u32 = 500;
+pub const RESET_POLL_US: u32 = 1000;
+
+/// How [`setup`] ended without setting the PHY up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetupError {
+    /// An MDIO command failed; the PHY may be part set up.
+    Mdio(MdioError),
+    /// The reset bit never cleared within [`RESET_POLLS`].
+    ResetStuck,
+}
+
+impl From<MdioError> for SetupError {
+    fn from(e: MdioError) -> Self {
+        SetupError::Mdio(e)
+    }
+}
+
+/// Sets up the PHY at `phy` for the board's `rgmii-rxid`, when `id` says
+/// it is a BCM54210E: `Ok(false)`, with nothing written, for any other.
+/// The writes are U-Boot's `bcm54xx_config_clock_delay` and `phy_reset`,
+/// in U-Boot's order (the module doc says why the order is kept):
+///
+/// 1. the miscellaneous shadow of the auxiliary control register read
+///    and written back with the receive clock skew on;
+/// 2. the clock control shadow read and written back with the transmit
+///    clock delay off;
+/// 3. the PHY reset, and the reset bit polled until it clears.
+///
+/// Seven MDIO commands and the reset's polls. A PHY that never comes out
+/// of reset costs half a second of waits plus 500 reads: about 0.5 s on a
+/// bus that answers promptly, and about 10.5 s at the bound, on a bus
+/// whose every read takes the whole 20 ms a command is allowed.
+pub fn setup<B: Bus>(bus: &mut B, phy: u8, id: u32) -> Result<bool, SetupError> {
+    if !is_bcm54210e(id) {
+        return Ok(false);
+    }
+    // bcm54xx_auxctl_read: the shadow's number in bits 14:12 chooses what
+    // the next read returns.
+    mdio_write(bus, phy, BCM_AUXCNTL, (BCM_AUXCNTL_MISC << 12) | BCM_AUXCNTL_MISC)?;
+    let misc = mdio_read(bus, phy, BCM_AUXCNTL)?;
+    mdio_write(bus, phy, BCM_AUXCNTL, BCM_AUXCNTL_MISC | misc | BCM_AUXCNTL_MISC_WREN | BCM_AUXCNTL_MISC_RGMII_SKEW_EN)?;
+
+    // bcm_phy_read_shadow, then bcm_phy_write_shadow.
+    let select = BCM_SHD_CLK_CTL << BCM_SHD_SEL_SHIFT;
+    mdio_write(bus, phy, BCM_SHD, select)?;
+    let clk = mdio_read(bus, phy, BCM_SHD)? & BCM_SHD_DATA_MASK;
+    mdio_write(bus, phy, BCM_SHD, BCM_SHD_WRITE | select | (clk & !BCM_SHD_CLK_CTL_GTXCLK_EN))?;
+
+    // phy_reset.
+    mdio_write(bus, phy, PHY_BMCR, BMCR_RESET)?;
+    for _ in 0..RESET_POLLS {
+        if mdio_read(bus, phy, PHY_BMCR)? & BMCR_RESET == 0 {
+            return Ok(true);
+        }
+        bus.delay_us(RESET_POLL_US);
+    }
+    Err(SetupError::ResetStuck)
+}
+
+/// Reads the link of the PHY at `phy` as [`link`] does, but for a
+/// BCM54210E (by `id`) takes the speed and duplex the PHY resolved, from
+/// its auxiliary status register (U-Boot's `bcm54xx_parse_status`). For
+/// any other PHY this is [`link`]. Three MDIO reads on a BCM54210E.
+pub fn link_resolved<B: Bus>(bus: &mut B, phy: u8, id: u32) -> Result<Link, MdioError> {
+    if !is_bcm54210e(id) {
+        return link(bus, phy);
+    }
+    if let Err(link) = negotiated(bus, phy)? {
+        return Ok(link);
+    }
+    let mode = (mdio_read(bus, phy, BCM_AUXSTATUS)? & BCM_AUXSTATUS_LINKMODE_MASK) >> BCM_AUXSTATUS_LINKMODE_SHIFT;
+    // U-Boot's table. Its default is "10 half"; here a mode the table
+    // does not have is said to be unresolved.
+    Ok(match mode {
+        1 => Link::Up { speed: Speed::S10, full: false },
+        2 => Link::Up { speed: Speed::S10, full: true },
+        3 => Link::Up { speed: Speed::S100, full: false },
+        5 => Link::Up { speed: Speed::S100, full: true },
+        6 => Link::Up { speed: Speed::S1000, full: false },
+        7 => Link::Up { speed: Speed::S1000, full: true },
+        _ => Link::Unresolved,
     })
 }
