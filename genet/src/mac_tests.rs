@@ -594,6 +594,9 @@ fn init_touches_no_ring_of_a_dma_that_did_not_stop() {
         assert!(d.violations.is_empty(), "{:?}", d.violations);
         // Nothing at or past the receive descriptors but the two controls.
         assert!(d.writes().iter().all(|w| w.0 < 0x2000 || w.0 == 0x3044 || w.0 == 0x5044), "{:?}", d.writes());
+        // And it ended at the stop: the MAC was not reset, nor the port
+        // mode written, under a DMA still running.
+        assert!(!d.writes().iter().any(|w| *w == (0x808, 0xa000) || w.0 == 0x04), "{:?}", d.writes());
     }
     // A DMA slow to stop is waited for, and then set up.
     let mut d = left_running();
