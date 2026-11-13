@@ -21,7 +21,9 @@ receiver stay off: sending is step 6 and receiving step 7. Its receive
 buffers are a half-megabyte static mapped non-cacheable where the firmware
 says DMA is not coherent, and a line on every boot says how they really
 walk. `acpi::declared` and `amlscan::Transports::one` are now the one way a
-device is found by its `_HID`, for the SD card's EMMC2 as well. On QEMU and
+device is found by its `_HID`, for the SD card's EMMC2 as well, and the
+kernel's list of mapped devices grew from five to seven so the SD
+controller and the Ethernet each have a slot of their own. On QEMU and
 Parallels no GENET is declared and no register is touched, which
 `make test-netdump` holds.
 

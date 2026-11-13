@@ -672,15 +672,16 @@ Each has a recommendation; none blocks step 2.
    `discover` takes the one GENET the tables declare, through the helper
    below, and touches no register. After the identity map is installed,
    where `init_net` runs and the kernel's own fault handler is live,
-   `init` asks the MMU's walk whether the block is device memory at both
-   ends, makes the device quiet (`genet::mac::quiet`, design 4), runs the
-   crate's `Genet::init`, scans MDIO for exactly one PHY, runs
-   `phy::setup` and reads the link with `phy::link_resolved`. The device
+   `quiet` asks the MMU's walk whether the block is device memory at both
+   ends and makes the device quiet (`genet::mac::quiet`, design 4), for
+   every declared GENET, used or not; `init`, which takes `quiet`'s
+   answer, runs the crate's `Genet::init`, scans MDIO for exactly one
+   PHY, runs `phy::setup` and reads the link with `phy::link_resolved`. The device
    goes in `syscall.rs`'s cell as `Nic::Genet`, which reports no
    interrupt (design 7).
    **The MAC is left off, which is this step's one variable.**
    `Genet::start` is not called: a send is refused, no frame arrives,
-   and `has_frame` is one register read that says no. Steps 6 and 7 turn
+   and `has_frame` says no without asking the device. Steps 6 and 7 turn
    it on, and write the two paths that copy a frame, which are not here.
    **"Quiet at the exit" is done after the map is installed, not at the
    exit itself.** At the exit on the Pi the kernel is at EL2 on the
@@ -690,19 +691,23 @@ Each has a recommendation; none blocks step 2.
    statics and what the loader allocated before the exit.
    **The helper:** `acpi::declared(rsdp, hid)` collects the tables and
    asks `amlscan`, and `amlscan::Transports::one` is the rule for
-   "exactly one": one kept and none dropped. The three copies' rules did
-   not differ after all (a list of one cannot have dropped any), so the
-   SD card's discovery, `sdscan.rs`, `netscan.rs` and the driver all use
-   them and the SD path's behaviour is the same; `make test-sd` passed.
+   "exactly one": one kept and none dropped. The SD card's discovery,
+   `sdscan.rs`, `netscan.rs`, virtio-mmio's transports and the driver all
+   go through them. **The SD card's rule changed by this:** its own copy
+   took one device kept whatever had been dropped beside it, and `one`
+   does not. On a board that declares one EMMC2 the answer is the same;
+   `make test-sd` passed, on QEMU's PCI path, which is not the Pi's.
    **The receive buffers** are one page-aligned static of 524,288 bytes,
    `genetnic::RX_AREA`, in `.bss` (the image file did not grow), passed
    to `mmu.rs` as a second non-cacheable range beside the xHCI's pool
    whenever the firmware declares DMA non-coherent, device or none.
-   **The link's wait:** the PHY's reset drops the link, so `init` reads
-   the link before the reset and waits up to 5 s after it only when it
-   was not down before. A board with no cable boots without the wait and
-   says so. D3's bounded wait, with that one condition added; change the
-   5 s in `genetnic.rs` (`LINK_WAIT_MS`).
+   **The link's wait:** the PHY's reset drops the link, so `init` asks
+   for it every 100 ms until it is up, for at most 5 s (D3's bounded
+   wait; `LINK_WAIT_MS` in `genetnic.rs`). **A board with no cable waits
+   the whole 5 s on every boot.** The first version skipped the wait when
+   the link read down before the reset; the review pointed out that a
+   link still coming up reads the same, so the skip was a guess and is
+   gone.
    **Checked on QEMU, which has no GENET:**
    - `make test-netdump`, extended: on both boots the driver prints one
      line, "receive area ..., 0x80000 bytes: walks as cacheable memory
@@ -716,9 +721,11 @@ Each has a recommendation; none blocks step 2.
      rig failed, as it must.
    - Control, the Pi's address taken with nothing declared: the kernel
      faulted at `0xfd580000` under its own handler, and the rig failed.
-   - Each exit 0 on the committed code: `make test` (434 tests),
-     `test-early-fault`, `test-el1-drop`, `test-sd`, `test-smp`,
-     `test-usb-hub`, `test-no-identity`, `test-run-callback`.
+   - Each exit 0 on the committed code, and again on the review's:
+     `make test` (434 tests), `test-netdump`, `test-early-fault`,
+     `test-el1-drop`, `test-sd`, `test-smp`, `test-usb-hub`,
+     `test-no-identity`, `test-run-callback`. The two controls above were
+     run on the first commit only.
    **Not checked, and not checkable here:** `init` past its first line.
    No machine this kernel boots on has the device, so the quiet, the
    reset, the MDIO scan, the PHY's set-up and the link's read have run
@@ -736,10 +743,48 @@ Each has a recommendation; none blocks step 2.
    - `link up, 1000 Mb/s, full duplex` (or what the switch gives);
    - `the MAC's transmitter and receiver are left off`, then
      `NIC installed for the network server`, and a login.
-   Cable out: `link down (not waited for: ...)`, and a login as fast as
+   Cable out: `link down (waited 5000 ms)`, and a login 5 s later than
    before. Then `ping` fails for want of an answer and not for want of a
    NIC. A fault line names the register: `far_el1` less `0xfd580000` is
    its offset.
+
+   **The review of #457** found no fault in what QEMU can reach, and
+   these in what the first board run could:
+   - *A frame nothing could take.* `has_frame` asked the device while
+     `poll_frame` returned nothing. Had the producer index ever differed
+     from the consumer, `netd` would have been woken on every tick for
+     good. `has_frame` says no while the MAC is not started.
+   - *The wait skipped on a guess* (above).
+   - *Quiet only when installed.* With another NIC in the cell, a GENET
+     the firmware left receiving would have gone on writing memory.
+     `quiet` is its own function now and runs for every declared GENET;
+     `init` takes its answer, so the device cannot be set up without
+     having been stopped. A block that does not walk as device memory is
+     still not touched, and the line says the device is left as the
+     firmware left it.
+   - *Cacheable buffers were a log line.* Where the firmware says DMA is
+     not coherent and the receive area does not walk non-cacheable on
+     every page, `init` stops with a warning.
+   - *Mapped by coincidence.* `mmu::MAX_EXTRA_DEVICES` was 5, and the Pi
+     fills five (console, framebuffer, xHCI, two for the GIC), so the SD
+     controller and the Ethernet were mapped only because the console's
+     1GB block holds them, the coincidence `mmu.rs` records fixing for
+     the console itself on 2026-09-28. It is 7, one 4 KB table each, and
+     each has its slot.
+   - *The copies of "exactly one" did differ* (above): this record had
+     said they could not.
+   - `virtio_mmio_transports` was `acpi::declared` written out again; it
+     calls it. Comments in `main.rs`, `mmu.rs`, `syscall.rs` and
+     `acpi.rs` that this step had made untrue are corrected. The link's
+     line prints the wait from the constant.
+   Not acted on: each `_HID` asked for walks the AML tables again
+   (virtio, EMMC2, GENET), milliseconds at boot.
+   **Two of these reach past networking on the Pi:** the device list of
+   seven, and the SD card's rule. Each should leave a working board as it
+   was (the same 1GB block, one EMMC2 declared), and each is on the boot
+   path of a machine this was not run on. **The first board run of this
+   tree is therefore also a check of the SD card's boot**, before any
+   `genet:` line is read.
 
 6. **The board: transmit.** `netd` sends what it sends now. With the
    address file in place (step 8 may come first if that is simpler), a
