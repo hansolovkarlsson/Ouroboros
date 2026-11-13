@@ -8,7 +8,7 @@ that found another instrument of the same kind added a dated section after
 off a phone photo, the Raspberry Pi's bench tools, and on 2026-10-09 the
 stale-image guard and the four blind spots in the guard that replaced it, and
 on 2026-10-10 the controls a keyboard change blinded and then the multi-core
-rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's, and on 2026-10-20 the volume bounds', and on 2026-10-21 the exFAT sets' and names', and on 2026-10-22 the stall classifier's and sector 0's, and on 2026-10-23 the blank disk's, and on 2026-10-24 the exFAT frees' mutants and plants, and on 2026-10-25 the disk-trace stalls' classifier, fake, arithmetic and a host sleep, and on 2026-10-28 the read-only gate's control, review, run script and wait, and on 2026-10-29 the open probes' and the disk gate rig's silence, sites, truncate check and unspellable control, and on 2026-10-30 the read-only mount's shared tail, unheld order, overwritten transcript and unread pass, and the disk-gate staging's check run once, and that evening the boot start's bug no mount showed, its rig's absent step read as empty and its recomputed signature, and on 2026-10-31 the exFAT free's counts blind to order, the batch model's assertion that skipped the head, a fix no boot could grade, and a count I predicted for an order, and on 2026-11-01 an exit code that flattened two verdicts, a hint a byte wide read a cluster at a time, a model that started where it assumed and two citations that pointed at nothing, and on 2026-11-04 a rig that attached its disks so macOS could not mount them, a test helper whose encoding broke a deep nest before the walk reached it, and a grep that hid where a fault happened, and on 2026-11-05 a probe whose two writes libc joined into one, a control run without its boot flag, and a diagnostic whose only first run was on the Pi, and on 2026-11-07 a self-test case refused by the wrong rule, a rig that graded only runs that succeed, and a mutation caught as a crash, and on 2026-11-08 a filter that read a refused boot as silence, a control placed where the two answers agree, and a glob that read yesterday's logs, and on 2026-11-09 a control the far side's reap graded, a control a new guard answered for, and a review that read a mutant as the code, and on 2026-11-10 to 2026-11-11 a rig whose two rounds could have been one, a mark that covered only the paths driven, a reading that dropped the calls it could not name, a self-test that passed on text its author wrote, and a clause and a premise nothing observed, and on 2026-11-11 to 2026-11-12 an instrument's note taken for a finding, a check that passed for another reason, an observer too patient to see the fault, and a round that passed with its fix taken out. The spine below has held for all of them.*
+rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's, and on 2026-10-20 the volume bounds', and on 2026-10-21 the exFAT sets' and names', and on 2026-10-22 the stall classifier's and sector 0's, and on 2026-10-23 the blank disk's, and on 2026-10-24 the exFAT frees' mutants and plants, and on 2026-10-25 the disk-trace stalls' classifier, fake, arithmetic and a host sleep, and on 2026-10-28 the read-only gate's control, review, run script and wait, and on 2026-10-29 the open probes' and the disk gate rig's silence, sites, truncate check and unspellable control, and on 2026-10-30 the read-only mount's shared tail, unheld order, overwritten transcript and unread pass, and the disk-gate staging's check run once, and that evening the boot start's bug no mount showed, its rig's absent step read as empty and its recomputed signature, and on 2026-10-31 the exFAT free's counts blind to order, the batch model's assertion that skipped the head, a fix no boot could grade, and a count I predicted for an order, and on 2026-11-01 an exit code that flattened two verdicts, a hint a byte wide read a cluster at a time, a model that started where it assumed and two citations that pointed at nothing, and on 2026-11-04 a rig that attached its disks so macOS could not mount them, a test helper whose encoding broke a deep nest before the walk reached it, and a grep that hid where a fault happened, and on 2026-11-05 a probe whose two writes libc joined into one, a control run without its boot flag, and a diagnostic whose only first run was on the Pi, and on 2026-11-07 a self-test case refused by the wrong rule, a rig that graded only runs that succeed, and a mutation caught as a crash, and on 2026-11-08 a filter that read a refused boot as silence, a control placed where the two answers agree, and a glob that read yesterday's logs, and on 2026-11-09 a control the far side's reap graded, a control a new guard answered for, and a review that read a mutant as the code, and on 2026-11-10 to 2026-11-11 a rig whose two rounds could have been one, a mark that covered only the paths driven, a reading that dropped the calls it could not name, a self-test that passed on text its author wrote, and a clause and a premise nothing observed, and on 2026-11-11 to 2026-11-12 an instrument's note taken for a finding, a check that passed for another reason, an observer too patient to see the fault, and a round that passed with its fix taken out, and later on 2026-11-12, from the Pi's Ethernet scan, a test that broke two things at once, a reading taken at the wrong moment, a rig named as the guard of code it never runs, and a list of what must not appear that was already short. The spine below has held for all of them.*
 
 The previous day's retrospective
 ([`repairing-the-repairs-postmortem.md`](repairing-the-repairs-postmortem.md))
@@ -2904,3 +2904,54 @@ It was removed, and the fix stays on reading alone, said so in five places.
 run even for a round that was hard to build: a new check is a claim until it
 has been seen to fail. One that cannot is worse than none, since it reads as
 coverage.**
+
+## Four more, from the Pi's Ethernet scan (2026-11-12)
+
+The Pi's network arc began the same day, with a device no emulator has
+(#451, #452). Its second step is itself an instrument, a boot that reads
+the controller once so that the plan can stop predicting, and three reviews
+were mostly about whether that reading could be believed. None of the four
+below was found by a run. Each was found by reading.
+
+**A test that broke two things at once.** `amlscan` gained a third `_CRS`
+shape, and one condition of it is that the method ends in a `Return`. The
+test written for that condition built its bad method by cutting the bytes
+short, which broke the name after the opcode as well, and the walk refused
+it for the name. With the condition taken out the test still failed its
+input, for the other reason, and so still passed. A patching `_CRS` beside
+a local one had no test at all. Both have one now, each seen to fail with
+its condition out. **A test of a refusal has to break one thing. An input
+wrong in two ways proves the first rule that reaches it, and that need not
+be the one the test is named for.**
+
+**A reading taken at the wrong moment.** The scan logs whether the
+firmware has the controller's transmit, receive and DMA enables on, and
+the plan said this settles whether the firmware leaves DMA running for the
+kernel. The scan runs before `exit_boot_services`, because that is where
+the logger is. The firmware's driver may stop the device in its exit
+notification, so the line would have been true and would have answered a
+question nobody asked, and step 5's design was waiting on it. The log line
+now says "before the exit", and the design quiets the device whatever it
+reads. **A reading is of a moment as well as of a register. Where the
+question is about a later state, a true reading of an earlier one is the
+well-formed wrong answer this document is about.**
+
+**A rig named as the guard of code it never runs.** `make test-netdump`
+boots QEMU with the flag set and checks that the scan touches nothing
+where no GENET is declared. Its entry in `make-targets.md` and the
+Makefile's comment listed "the `genet` crate" among the changes that owe a
+run of it. On QEMU no GENET is declared, so not one line of that crate
+executes there. For that trigger the rig could not fail, and the grep that
+finds the rigs a change owes would have sent a `genet` change to it and
+come back green. The clause is gone and says why. **The "run it when X
+changes" clause is a claim that the rig executes X. It is written from
+what the rig is about, and it has to be written from what the rig runs.**
+
+**A list of what must not appear, already short.** The same rig refused a
+register or PHY line by a hand-kept list of the scan's line prefixes. The
+list was written beside the first version of the scan, and by the rework
+the scan printed a line the list did not have. It now names the two lines
+a machine with no GENET may print and refuses every other line of the
+scan, so a line added later is refused without the rig being told.
+**A must-not list is a copy of the code's output, and it drifts the way
+copies do. Where the allowed set is small, name that.**
