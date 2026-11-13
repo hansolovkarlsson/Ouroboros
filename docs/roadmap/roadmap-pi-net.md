@@ -174,8 +174,9 @@ tree, so the values are copied here):
   clock delay off, so the line ends `NOT as written`. The read-back alone
   does not say whether the reset put the delay back or the write never
   took: the value before the reset is read by `setup` but not logged.
-  **What this means for a frame is not worked out, and step 6 does not
-  start before it is.**
+  **What this means for a frame was worked out the same day** (step 4b,
+  "The transmit clock delay, worked out"): it is the state U-Boot's
+  pairing needs, and step 6 goes ahead on it.
 - **The link the driver reads:** up, 1000 Mb/s, full duplex, with the
   cable in; down after the whole 5000 ms wait with it out.
 - **The receive area walks as non-cacheable** in the running tables, 128
@@ -718,8 +719,41 @@ Each has a recommendation; none blocks step 2.
    three). So what U-Boot's order leaves on this PHY is not what its
    delay function writes, at least for the transmit side. Whether these
    are the right delays is still open, and only a frame on the wire
-   answers it (step 6's `tcpdump`); what the reading means for the MAC's
-   side of the delay is to be worked out before step 6 is written.
+   answers it (step 6's `tcpdump`).
+
+   **The transmit clock delay, worked out (2026-11-13, from the two
+   fetched sources and the reading above; no frame has been sent).**
+   RGMII wants the transmit clock delayed about 2 ns once, by the MAC or
+   by the PHY. The two drivers that run this board split it differently
+   for `rgmii-rxid`:
+   - *Linux* (`bcmmii.c`, `bcmgenet_mii_config`, and its
+     `bcm54xx_config_clock_delay`): the MAC delays (`ID_MODE_DIS` clear),
+     the PHY's transmit delay is written off, and the PHY is reset
+     *before* the write, so the write stands.
+   - *U-Boot* (`bcmgenet.c`, `bcmgenet_adjust_link`, and `broadcom.c`,
+     `bcm54210e_config`): the MAC does not delay (`ID_MODE_DIS` set), the
+     PHY's transmit delay is written off, and the PHY is reset *after*
+     the write.
+   Read as written, U-Boot's pairing has no delay anywhere, and U-Boot
+   works on this board. The board's reading is what squares it: in
+   U-Boot's order the PHY ends with its transmit delay **on**. So what
+   U-Boot runs is the PHY's delay on and the MAC's off, one delay, and
+   this driver ends in the same state: the PHY as the board printed it,
+   and `Genet::start` setting `ID_MODE_DIS` as U-Boot does.
+   **So `NOT as written` is the state to expect on this board**, and the
+   line says `as U-Boot leaves it` for it since step 6. **It is not to be
+   repaired:** the delay written off again after the reset, with
+   `ID_MODE_DIS` still set, is no delay at all, the one pairing that is
+   surely wrong. **The other pairing, if step 6's frames are bad, is
+   Linux's whole:** reset first, the delay off after it, `ID_MODE_DIS`
+   clear (which is also how the firmware had the MAC before the exit,
+   `EXT_RGMII_OOB_CTRL` `0x00f00050`).
+   **Not known from this:** whether the reset put the delay back or the
+   write never took (the first is the likelier, and only then is "U-Boot
+   ends where this driver does" sure, since U-Boot starts from another
+   boot chain's PHY), and what the firmware left in the PHY. `setup`
+   reads both shadows before it writes them; step 6 logs those values,
+   at no cost in MDIO commands.
 
 5. **The board: bring-up and link.** One helper in `acpi.rs` for "the one
    device of this `_HID` declared present", used by this driver, the scan
@@ -990,9 +1024,9 @@ Each has a recommendation; none blocks step 2.
    root mounted, in all three boots. `acpi::declared` and
    `Transports::one` gave the SD card's discovery the answer its own
    copy did.
-   **Left open by the run:** the transmit clock delay (step 4b, and
-   before step 6);
-   `LINK_WAIT_MS`, whose 5 s the cable-out boot paid in full.
+   **Left open by the run:** `LINK_WAIT_MS`, whose 5 s the cable-out
+   boot paid in full. The transmit clock delay was worked out the same
+   day (step 4b).
 
 6. **The board: transmit.** `netd` sends what it sends now. With the
    address file in place (step 8 may come first if that is simpler), a

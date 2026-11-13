@@ -913,9 +913,10 @@ not yet checked on this tree are marked (predicted).
       its link read, the MAC left off), is built and was run on the board
       in the same three boots: the device comes up, its link follows the
       cable, and the SD card still mounts. The runs left one question
-      before step 6: the PHY's transmit clock delay reads on after the
-      reset, where the set-up wrote it off (the plan's "From the board's
-      registers"). From there on only the board checks it. What it had to settle first, and what was read:
+      before step 6, worked out the same day: the PHY's transmit clock
+      delay reads on after the reset, where the set-up wrote it off,
+      which is the state U-Boot's pairing with the MAC needs (the plan's
+      step 4b). From there on only the board checks it. What it had to settle first, and what was read:
       - **Which NIC: decided by Hans on 2026-11-12, the on-board GENET
         first.** It is Broadcom GENET v5 with a BCM54213PE PHY over MDIO
         (the PHY (predicted)), plain MMIO, discovered from the firmware's
