@@ -1,7 +1,7 @@
 # True when written
 
 *A process retrospective, the twenty-ninth, covering 2026-09-03 and extended
-through 2026-11-07. Five PRs, no new subsystem, and four defects that were all
+through 2026-11-13. Five PRs, no new subsystem, and four defects that were all
 the same defect: a statement that was correct on the day someone typed it, and
 stopped being correct without anyone touching the file it lived in. The later
 sections, each dated, add the variants found since: claims false on arrival, a
@@ -16,7 +16,9 @@ on a premise that held for one of its paths, claims a move left behind,
 and a heuristic that one platform had already falsified and a vendor's
 update falsified loudly, and a recommendation taken from records the
 board's newest log had overtaken, and a prediction from a store the board
-never had, and a roadmap item asking for what was already built.*
+never had, and a roadmap item asking for what was already built, and four
+sentences about a device no emulator has, each written from memory or from
+an argument and none from the file it was about.*
 
 The previous day's retrospective
 ([`blind-instruments-postmortem.md`](blind-instruments-postmortem.md)) had the
@@ -1293,6 +1295,55 @@ the first try on the card looked like the item's own premise confirmed.
 nobody runs; read the reference for the feature before planning it, and
 when a check seems to confirm a claim, look at the thing itself and not at
 the tools that report on it.**
+
+## Sentences about a device nobody here can run (2026-11-13)
+
+Four pull requests built the Pi's Ethernet driver in a day (#454 to #457),
+for a device no emulator models, so that every claim about it stood
+unchecked by any run. Four reviews found no wrong register offset. They
+found 39 other things, and four of them were sentences of mine that were
+false on the day I wrote them, each in a record or a doc and not in code.
+
+*The device does not pad a short frame, so the caller must.* Written into
+the plan from memory, and a 60-byte minimum built on it. Linux's transmit
+path says in a comment that software padding would be needed only without
+the flag this driver sets. I found it an hour later, looking in that file
+for the line to cite for the minimum. The citation table the step's check
+asked for is what made me open the file.
+
+*Nothing reaches the driver around the enum, since `syscall.rs` and
+`exceptions.rs` no longer name `virtio_net`.* One of those files never
+had, the conclusion does not follow from the premise, and the PR offered
+it in place of a mutation run. The true reason was one line away in
+`main.rs`.
+
+*In U-Boot's order the PHY ends as it does under U-Boot either way.* True
+only if the PHY starts where U-Boot finds it. Here it starts where the
+board's UEFI firmware left it, which I had written two paragraphs
+earlier. The fix was to stop arguing: the set-up reads the registers back
+and returns them.
+
+*The three copies of the rule cannot differ, since a list of one cannot
+have dropped any.* The count I reasoned about has a second source,
+`amlscan`'s own candidate limit, in a file I had edited that day. The
+sentence justified leaving the SD card's copy alone.
+
+Each was an argument where a look would have done, and each was about
+code or hardware that nothing here executes: a reviewer reading the file
+the sentence was about is the only thing that found three of the four.
+The same reviews found the older shape as well, in the code's own
+comments: `on_net_irq` still giving a virtio detail as its reason after
+the enum made it an arm's promise, `mac.rs` calling the PHY's set-up an
+open question in the PR that settled it, `main.rs` counting five devices
+from six candidates when there were seven. And one variant new to this
+file: a test that asserted the PHY's delay settings after a reset, in a
+model whose reset did nothing to them, beside a module doc saying whether
+a reset keeps them is not known. A green test read as evidence for the
+one thing the code said it could not know.
+**Where nothing can run the code, the sentences are the only test there
+is, and they need what a test needs: the thing itself opened, not
+remembered or deduced. A citation the build asks for is one way to force
+that; a read-back is another.**
 
 ## What actually worked
 
