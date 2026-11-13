@@ -875,3 +875,45 @@ write, where macOS could remount the old ESP. No rig could tell the two
 orders apart. The real stick, re-staged with the order the second review
 asked for, was the only check that could.
 
+## Four branches, six rounds, and a stop written three times (2026-11-13)
+
+The Pi's Ethernet driver went in as four pull requests in a day (#455 to
+#457, with #454 before them), each reviewed once. Then the spine of this
+file was tested directly: a fifth review read nothing but the four commits
+made in answer to the other reviews (#459), and a sixth read #459 (#460).
+The fifth found ten things and the sixth found ten, and in each, two were
+on the path of the first board run.
+
+The clearest line through them is the code that stops the device. The
+first review of #455 said, rightly, that turning a DMA off was not waited
+for. The repair took a status poll from one Linux function and kept the
+order of operations from U-Boot, and the fifth review found the two do
+not go together: the transmitter was off before the transmit DMA that
+needs it to drain. That repair took Linux's order, and the sixth review
+found it asked the DMA once, before the wait it is given to finish, and
+called a slow one stuck. Three versions, each correcting the one before,
+each written by reading sources, for a device nothing here can run.
+
+The second line is shorter and is this file's rule with nothing added.
+The fifth review said an undriven bus would be read back as the PHY's
+settings. The repair made that an error. The sixth found the error was
+propagated as a failed set-up, so a correct set-up followed by one
+unanswered read would have cost the boot its link line. The repair was
+one `?` wide.
+
+Two things were different from the earlier entries. The reviews of
+repairs were asked for as such, by Hans, after the day had been closed
+out, and aimed at the fix commits alone; they were not a second reading
+of the whole branch that happened to land on a repair. And I stopped
+without a clean round. After the sixth I recommended against a seventh,
+not because the returns had fallen, they had not, but because every round
+was the same instrument: a reader and two drivers' sources. The model in
+the tests gained two rules of my own about how a transmit DMA behaves,
+each added so that a test could tell one repair from the one before it.
+A check built from the reviewer's reading cannot contradict the
+reviewer.
+**Reviewing the repairs finds as much as reviewing the work, so the
+repairs get a round of their own. But when every round uses the same
+evidence, the rounds do not converge, they alternate; stop when the next
+instrument is a different one, and say that the stop is not a pass.**
+
