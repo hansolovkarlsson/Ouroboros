@@ -46,7 +46,7 @@
 //! inside its device: `Scope (\_SB.VR00) { Name (_STA, Zero) }` later in the
 //! DSDT, or in an SSDT, or `Name (\_SB.VR00._STA, Zero)` anywhere, defines it
 //! too (the third review of #407). So every table is walked from its top
-//! level, all of them in one [`virtio_mmio`] call, as a parser would load
+//! level, all of them in one [`declared`] call, as a parser would load
 //! them: a `Scope`, `Device`, `Processor`, `PowerResource` or `ThermalZone`
 //! by recursing into its body at its own path, each name resolved to an
 //! absolute path (`\`, `^` and multi-segment names included), each `Name`
@@ -218,15 +218,6 @@ const MAX_DEPTH: usize = 8;
 /// dropped.
 const MAX_CANDIDATES: usize = 2 * MAX_TRANSPORTS;
 
-/// Adds to `into` every virtio-mmio transport the AML tables `tables` (the
-/// DSDT and every SSDT, each with its header) declare present. One call
-/// for all of them: a device's `_STA` or `_CRS` may be defined in another
-/// table than the device, by a `Scope` of its path (the third review of
-/// #407).
-pub fn virtio_mmio(tables: &[&[u8]], into: &mut Transports) {
-    declared(tables, VIRTIO_MMIO_HID, into);
-}
-
 /// The `_HID` the BCM2711's EMMC2 controller is declared by, the one the
 /// Raspberry Pi 4's SD card sits on (edk2-platforms `Emmc.asl`; Linux's
 /// `sdhci-iproc` matches it too).
@@ -241,9 +232,14 @@ pub const EMMC2_HID: &[u8; 8] = b"BRCME88C";
 pub const GENET_HID: &[u8; 7] = b"BCM6E4E";
 
 /// Adds to `into` the register block and interrupt of every device the
-/// tables declare present with `Name (_HID, "<hid>")`, by the same rules as
-/// [`virtio_mmio`]: the walk, `_STA` and `_CRS` as the module doc says,
-/// each a `Name` or one of the method shapes it reads.
+/// AML tables `tables` (the DSDT and every SSDT, each with its header)
+/// declare present with `Name (_HID, "<hid>")`: the walk, `_STA` and
+/// `_CRS` as the module doc says, each a `Name` or one of the method
+/// shapes it reads. One call for all the tables: a device's `_STA` or
+/// `_CRS` may be defined in another table than the device, by a `Scope`
+/// of its path (the third review of #407). The one entry point: the
+/// kernel asks for virtio-mmio ([`VIRTIO_MMIO_HID`]), the Pi's EMMC2 and
+/// its Ethernet all through this.
 pub fn declared(tables: &[&[u8]], hid: &[u8], into: &mut Transports) {
     if hid.is_empty() {
         return;

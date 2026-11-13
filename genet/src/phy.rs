@@ -256,16 +256,28 @@ impl From<MdioError> for SetupError {
 /// Selects the auxiliary control register's miscellaneous shadow and
 /// reads it (U-Boot's `bcm54xx_auxctl_read`: the shadow's number in bits
 /// 14:12 chooses what the next read returns).
+///
+/// All ones is a bus nobody drives, as for the status register, and is
+/// [`MdioError::NoAnswer`]: taken as the shadow's value it would read as
+/// every setting on.
 fn read_misc<B: Bus>(bus: &mut B, phy: u8) -> Result<u16, MdioError> {
     mdio_write(bus, phy, BCM_AUXCNTL, (BCM_AUXCNTL_MISC << 12) | BCM_AUXCNTL_MISC)?;
-    mdio_read(bus, phy, BCM_AUXCNTL)
+    match mdio_read(bus, phy, BCM_AUXCNTL)? {
+        0xffff => Err(MdioError::NoAnswer),
+        misc => Ok(misc),
+    }
 }
 
 /// Selects the clock control shadow and reads its ten bits of data
 /// (U-Boot's `bcm_phy_read_shadow`).
+/// All ones, before the data is cut out of it, is [`MdioError::NoAnswer`]
+/// here too.
 fn read_clk<B: Bus>(bus: &mut B, phy: u8) -> Result<u16, MdioError> {
     mdio_write(bus, phy, BCM_SHD, BCM_SHD_CLK_CTL << BCM_SHD_SEL_SHIFT)?;
-    Ok(mdio_read(bus, phy, BCM_SHD)? & BCM_SHD_DATA_MASK)
+    match mdio_read(bus, phy, BCM_SHD)? {
+        0xffff => Err(MdioError::NoAnswer),
+        raw => Ok(raw & BCM_SHD_DATA_MASK),
+    }
 }
 
 /// Sets up the PHY at `phy` for the board's `rgmii-rxid`, when `id` says
@@ -281,7 +293,10 @@ fn read_clk<B: Bus>(bus: &mut B, phy: u8) -> Result<u16, MdioError> {
 /// 3. the PHY reset, and the reset bit polled until it reads clear. A
 ///    read the PHY does not answer, or that reads all ones, is a PHY
 ///    still resetting and is polled past;
-/// 4. both shadows read back, and returned: what the PHY holds now.
+/// 4. both shadows read back, and returned: what the PHY holds now. A
+///    read-back that gets no answer is an error and not a value: the
+///    board's log is read for these two, and all ones would say "both
+///    on".
 ///
 /// Eleven MDIO commands and the reset's polls. A PHY that never comes out
 /// of reset costs half a second of waits plus 500 reads: about 0.5 s on a

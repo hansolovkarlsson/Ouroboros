@@ -786,6 +786,58 @@ Each has a recommendation; none blocks step 2.
    tree is therefore also a check of the SD card's boot**, before any
    `genet:` line is read.
 
+   **A review of the reviews' fixes** (2026-11-13, after #457 merged).
+   Each pull request of steps 4 to 5 was reviewed; what was changed in
+   answer to each review was not, and a repair is a change. A fifth
+   review read those four commits alone. It found the three changes that
+   reach the Pi's boot beyond networking sound (the list of seven builds
+   the same tables on the Pi, the SD card's rule differs only past 64
+   candidates, the split writes the same registers), and ten things in
+   the driver. Fixed:
+   - *The device was stopped in an order that can leave it unable to say
+     it stopped.* `quiet` turned the MAC's transmitter off and then the
+     transmit DMA. Linux's `bcmgenet_netif_stop` turns off the receiver,
+     tears down the DMAs, and only then the transmitter, with the comment
+     "TX DMA disabled must be done before this" (read in the fetched
+     source, `bcmgenet.c`): a transmit DMA with a frame still queued
+     drains it through the MAC. Had the firmware left one queued, the
+     DMA's status might never have read disabled, and the kernel would
+     have said the device "did not say it had" stopped and left the
+     Ethernet down. One helper, `halt`, now holds Linux's order, and
+     `quiet`, `Genet::init` and `Genet::stop` all stop through it. `init`
+     stops the device itself before its reset, where it reset first and
+     asked the DMAs afterwards, and so does not rest on a caller having
+     run `quiet`.
+   - *The read-back of the PHY's delays took all ones as their value*,
+     which reads as both on and "NOT as written". The board's log is read
+     for exactly that line. All ones is no answer now, for both shadows.
+   - *The link's wait asked a stuck MDIO bus again and again*, each time
+     writing a command over one still busy. A bus stuck busy ends the
+     wait at once; a PHY that only does not answer is still asked again.
+   - *A stop and then a start left the device dead and saying it was
+     started.* `Genet::stop` takes the `Genet`: the way back is `init`.
+   - *"No frame while the MAC is off" was the kernel wrapper's rule
+     alone.* It is `Genet::has_frame`'s, so `rx_next` has it too.
+   - The safety comment on the kernel's register access named the
+     function that no longer makes the check; the receive area's pages
+     were counted in two places with two spellings; the two guards on the
+     device list could no longer fail, and every region now goes through
+     one push that names a region it has to leave out; `Genet::stop` was
+     a copy of `quiet`; `amlscan::virtio_mmio` had no caller but its own
+     tests, which now call what the kernel calls.
+   **What the model says about the stop order is ours.** A transmit DMA
+   that will not stop once the transmitter is off with a frame queued is
+   our reading of Linux's comment, put in the model so a test can tell
+   the two orders apart. No device has shown it.
+   **Checked:** `make test` 437 tests; 127 mutations of the driver, each
+   failed by a test (one was alive after the pass: the first refusal of a
+   DMA that will not stop, which a later one covered, and which now has a
+   test that the MAC is not reset under it); each exit 0 on the fixes:
+   `test-netdump`, `test-early-fault`, `test-el1-drop`, `test-sd`,
+   `test-smp`, `test-usb-hub`, `test-no-identity`, `test-run-callback`.
+   Bring-up takes about 14 ms more: the device is stopped once by
+   `quiet` and again, already stopped, at the head of `init`.
+
 6. **The board: transmit.** `netd` sends what it sends now. With the
    address file in place (step 8 may come first if that is simpler), a
    `ping` of the Mac makes an ARP request.

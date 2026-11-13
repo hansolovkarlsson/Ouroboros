@@ -89,6 +89,13 @@ struct Dev {
     /// `u32::MAX` is never. (transmit, receive)
     dma_stop_lag: (u32, u32),
     dma_stop_left: (u32, u32),
+    /// A frame the firmware queued and the device has not sent. The
+    /// transmit DMA drains it through the MAC, so turned off with the
+    /// MAC's transmitter already off it never says it stopped (Linux's
+    /// `bcmgenet_netif_stop`: "TX DMA disabled must be done before this").
+    fw_tx_pending: bool,
+    /// The auxiliary control register reads all ones: nothing drives it.
+    aux_reads_ones: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -169,6 +176,8 @@ fn board() -> Dev {
         mdio_log: Vec::new(),
         dma_stop_lag: (0, 0),
         dma_stop_left: (0, 0),
+        fw_tx_pending: false,
+        aux_reads_ones: false,
     }
 }
 
@@ -225,6 +234,7 @@ impl Dev {
                 }
             }
             1 => self.bmsr_first.take().unwrap_or(self.phy_regs[1]),
+            0x18 if self.aux_reads_ones => 0xffff,
             0x18 => (self.aux[self.aux_read] & !0x8000) | self.aux_read as u16,
             0x1c => self.shd_read_high.unwrap_or((self.shd_sel as u16) << 10) | self.shd[self.shd_sel],
             _ => self.phy_regs[r],
@@ -321,7 +331,8 @@ impl Bus for Dev {
         }
         // A DMA turned off starts winding down.
         if offset == TDMA_CTL && self.reg(TDMA_CTL) & 1 != 0 && value & 1 == 0 {
-            self.dma_stop_left.0 = self.dma_stop_lag.0;
+            self.dma_stop_left.0 = if self.fw_tx_pending && self.reg(UMAC_CMD) & 1 == 0 { u32::MAX } else { self.dma_stop_lag.0 };
+            self.fw_tx_pending = false;
         }
         if offset == RDMA_CTL && self.reg(RDMA_CTL) & 1 != 0 && value & 1 == 0 {
             self.dma_stop_left.1 = self.dma_stop_lag.1;
@@ -418,6 +429,10 @@ fn init_is_u_boots_sequence_write_for_write() {
     let head = [
         // Every interrupt masked and cleared (Linux's bcmgenet_intr_disable).
         W(0x210, 0xffff_ffff), W(0x208, 0xffff_ffff), W(0x250, 0xffff_ffff), W(0x248, 0xffff_ffff),
+        // Stopped in Linux's order: the receiver, the transmit DMA, the
+        // drain, the receive DMA, the transmitter, the flush.
+        W(0x808, 0), D(2000), W(0x5044, 0), D(10_000), W(0x3044, 0), W(0x808, 0), D(2000),
+        W(0xb34, 1), D(10), W(0xb34, 0),
         // bcmgenet_eth_probe.
         W(0x04, 3), W(0x08, 0), D(10), W(0x808, 0), W(0x808, 0xa000),
         // bcmgenet_umac_reset.
@@ -426,8 +441,8 @@ fn init_is_u_boots_sequence_write_for_write() {
         W(0xd80, 7), W(0xd80, 0), W(0x814, 1536), W(0x300, 2), W(0x600, 0), W(0x3b4, 1),
         // bcmgenet_gmac_write_hwaddr.
         W(0x80c, 0xdca6_3201), W(0x810, 0x0000_0203),
-        // bcmgenet_disable_dma, with Linux's wait between the two DMAs.
-        W(0x5044, 0), D(10_000), W(0x3044, 0), W(0xb34, 1), D(10), W(0xb34, 0),
+        // bcmgenet_disable_dma, in U-Boot's place.
+        W(0x5044, 0), W(0x3044, 0), W(0xb34, 1), D(10), W(0xb34, 0),
         // rx_ring_init: the consumer aligned on the producer's low half.
         W(0x304c, 8), W(0x3014, 0), W(0x302c, 0), W(0x3000, 0), W(0x301c, 767),
         W(0x300c, 0x1234), W(0x3010, 0x0100_0800), W(0x3028, 0x0005_0010), W(0x3040, 0x0001_0000),
@@ -537,10 +552,13 @@ fn quiet_turns_off_what_can_write_memory_or_interrupt() {
         d.ops,
         [
             W(0x210, 0xffff_ffff), W(0x208, 0xffff_ffff), W(0x250, 0xffff_ffff), W(0x248, 0xffff_ffff),
-            // The enables off, the speed bits kept, and a frame's time.
-            W(0x808, 0x08), D(2000),
-            // The transmit DMA, the drain, the receive DMA, the flush.
-            W(0x5044, 0x0002_0002), D(10_000), W(0x3044, 0x0002_0002), W(0xb34, 1), D(10), W(0xb34, 0),
+            // The receiver off, the transmitter and the speed bits kept,
+            // and a frame's time.
+            W(0x808, 0x09), D(2000),
+            // The transmit DMA, the drain, the receive DMA.
+            W(0x5044, 0x0002_0002), D(10_000), W(0x3044, 0x0002_0002),
+            // Only now the transmitter, a frame's time, and the flush.
+            W(0x808, 0x08), D(2000), W(0xb34, 1), D(10), W(0xb34, 0),
         ]
     );
     assert!(!d.rx_running() && !d.tx_running());
@@ -552,12 +570,12 @@ fn a_dma_is_waited_for_until_it_says_it_stopped() {
     let mut d = left_running();
     d.dma_stop_lag = (7, 40);
     assert_eq!(quiet(&mut d), Some(Stopped { tdma: true, rdma: true }));
-    assert_eq!(d.delayed_us(), 2000 + 7 + 10_000 + 40 + 10);
+    assert_eq!(d.delayed_us(), 2000 + 7 + 10_000 + 40 + 2000 + 10);
     // The last poll allowed is believed; one more is not waited for.
     let mut d = left_running();
     d.dma_stop_lag = (4999, 5000);
     assert_eq!(quiet(&mut d), Some(Stopped { tdma: true, rdma: false }));
-    assert_eq!(d.delayed_us(), 2000 + 4999 + 10_000 + 5000 + 10);
+    assert_eq!(d.delayed_us(), 2000 + 4999 + 10_000 + 5000 + 2000 + 10);
     let mut d = left_running();
     d.dma_stop_lag = (u32::MAX, 0);
     let stopped = quiet(&mut d).unwrap();
@@ -576,6 +594,9 @@ fn init_touches_no_ring_of_a_dma_that_did_not_stop() {
         assert!(d.violations.is_empty(), "{:?}", d.violations);
         // Nothing at or past the receive descriptors but the two controls.
         assert!(d.writes().iter().all(|w| w.0 < 0x2000 || w.0 == 0x3044 || w.0 == 0x5044), "{:?}", d.writes());
+        // And it ended at the stop: the MAC was not reset, nor the port
+        // mode written, under a DMA still running.
+        assert!(!d.writes().iter().any(|w| *w == (0x808, 0xa000) || w.0 == 0x04), "{:?}", d.writes());
     }
     // A DMA slow to stop is waited for, and then set up.
     let mut d = left_running();
@@ -585,15 +606,48 @@ fn init_touches_no_ring_of_a_dma_that_did_not_stop() {
 }
 
 #[test]
-fn stop_makes_it_quiet_and_a_send_is_refused_until_the_next_start() {
+fn a_frame_the_firmware_left_queued_is_let_out_before_the_transmitter_stops() {
+    // The transmit DMA drains a queued frame through the MAC. Stopped
+    // with the transmitter still on it says so; with the transmitter
+    // turned off first it never would, and the device would be refused.
+    let mut d = left_running();
+    d.fw_tx_pending = true;
+    assert_eq!(quiet(&mut d), Some(Stopped { tdma: true, rdma: true }));
+    assert_eq!(d.reg(UMAC_CMD) & 3, 0);
+    let mut d = left_running();
+    d.fw_tx_pending = true;
+    assert!(Genet::init(&mut d, RX_BASE).is_ok());
+    assert!(d.violations.is_empty(), "{:?}", d.violations);
     let mut d = board();
-    let mut g = up(&mut d);
+    let g = up(&mut d);
+    d.fw_tx_pending = true;
+    assert!(g.stop(&mut d).both());
+}
+
+#[test]
+fn stop_makes_it_quiet_and_takes_the_device() {
+    let mut d = board();
+    let g = up(&mut d);
+    // `stop` takes the `Genet`: there is nothing left to start or send on.
     assert_eq!(g.stop(&mut d), Stopped { tdma: true, rdma: true });
-    assert!(!g.started() && !d.rx_running() && !d.tx_running());
+    assert!(!d.rx_running() && !d.tx_running());
     assert_eq!((d.reg(RDMA_CTL) & 1, d.reg(TDMA_CTL) & 1, d.reg(UMAC_CMD) & 3), (0, 0, 0));
+}
+
+#[test]
+fn nothing_is_a_frame_before_the_mac_is_started() {
+    // The producer index differs from the consumer taken at set-up (the
+    // firmware's era, or a device that moved it): with the receiver off
+    // that is nobody's frame, and the device is not even asked.
+    let mut d = board();
+    let mut g = Genet::init(&mut d, RX_BASE).unwrap();
+    d.rx_prod = 3;
     d.ops.clear();
-    assert_eq!(g.tx_send(&mut d, TX_ADDR, 60), Err(TxError::NotStarted));
-    assert!(d.ops.is_empty());
+    d.reads.clear();
+    assert!(!g.has_frame(&mut d));
+    assert_eq!(g.rx_next(&mut d), Rx::None);
+    assert!(d.reads.is_empty() && d.ops.is_empty());
+    assert!(!g.rx_release(&mut d));
 }
 
 #[test]
@@ -1206,6 +1260,28 @@ fn a_phy_silent_while_it_resets_is_waited_for() {
         assert_eq!(setup(&mut d, 1, BCM), Err(SetupError::ResetStuck), "{reads:?}");
         assert_eq!(d.mdio_log.iter().filter(|c| *c == &(false, 0, 0)).count(), 500);
     }
+}
+
+#[test]
+fn a_shadow_that_reads_all_ones_is_no_answer_not_every_setting_on() {
+    // The auxiliary control register undriven: the set-up stops at its
+    // first read and writes no delay.
+    let mut d = bcm();
+    d.aux_reads_ones = true;
+    assert_eq!(setup(&mut d, 1, BCM), Err(SetupError::Mdio(MdioError::NoAnswer)));
+    assert_eq!(d.mdio_log.len(), 2, "{:?}", d.mdio_log);
+    // The clock control shadow undriven: all sixteen bits set, which cut
+    // to its ten of data would read as the transmit delay on.
+    let mut d = bcm();
+    d.shd_read_high = Some(0xfc00);
+    d.shd[3] = 0x03ff;
+    assert_eq!(setup(&mut d, 1, BCM), Err(SetupError::Mdio(MdioError::NoAnswer)));
+    assert!(!d.mdio_log.contains(&(true, 0x00, 0x8000)), "the PHY was reset after a read that got no answer");
+    // One bit short of all ones is the PHY's own.
+    let mut d = bcm();
+    d.shd_read_high = Some(0xfc00);
+    d.shd[3] = 0x03fe;
+    assert!(setup(&mut d, 1, BCM).unwrap().is_some());
 }
 
 #[test]

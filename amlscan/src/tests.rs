@@ -35,7 +35,7 @@ fn scan(t: &[u8]) -> Transports {
 
 fn scan_all(tables: &[&[u8]]) -> Transports {
     let mut found = Transports::new();
-    virtio_mmio(tables, &mut found);
+    declared(tables, VIRTIO_MMIO_HID, &mut found);
     found
 }
 
@@ -822,7 +822,7 @@ fn the_pi4s_emmc2_is_read_beside_its_dsdt() {
     let found = emmc2(&[PI4_DSDT, PI4_SSDT_EMMC]);
     assert_eq!(found.as_slice(), &[PI4_EMMC2]);
     let mut virtio = Transports::new();
-    virtio_mmio(&[PI4_DSDT, PI4_SSDT_EMMC], &mut virtio);
+    declared(&[PI4_DSDT, PI4_SSDT_EMMC], VIRTIO_MMIO_HID, &mut virtio);
     assert!(virtio.is_empty(), "the Pi declares no virtio-mmio");
 }
 
