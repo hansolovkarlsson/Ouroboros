@@ -11,9 +11,10 @@
 //! Two parts. The scan, [`registers`] and [`phys`], is the arc's step 2:
 //! what the device says of itself before anything drives it. The driver's
 //! logic is step 4: [`mac::Genet`] (reset, the rings, one transmit, one
-//! receive) and [`phy::link`] (the link and its speed). Nothing here touches
-//! memory: the packet buffers are the caller's, and this crate deals in
-//! their addresses and in indexes.
+//! receive), and step 4b: [`phy::setup`] and [`phy::link_resolved`] (the
+//! Pi's PHY set up, its link and its speed). Nothing here touches memory:
+//! the packet buffers are the caller's, and this crate deals in their
+//! addresses and in indexes.
 //!
 //! **Where each number comes from.** Every register offset and bit here was
 //! read in U-Boot's `drivers/net/bcmgenet.c` (the driver for this board's
@@ -22,8 +23,9 @@
 //! were U-Boot's at tag `v2024.10` and Linux's at `v6.6`, and
 //! `cited_tests.rs` carries the line of each constant in them. The absolute
 //! offsets are those files' block offset plus register offset, added here.
-//! The PHY's registers are IEEE 802.3 clause 22's, by the names and values
-//! of Linux's `include/uapi/linux/mii.h` at the same tag.
+//! The PHY's standard registers are IEEE 802.3 clause 22's, by the names
+//! and values of Linux's `include/uapi/linux/mii.h` at the same tag, and
+//! its Broadcom ones are from U-Boot's `drivers/net/phy/broadcom.c`.
 //!
 //! Pure: no I/O of its own, no heap, no statics, so it builds and is
 //! tested on the host (`make test`).
@@ -211,7 +213,7 @@ pub fn mac_usable(mac: &[u8; 6]) -> bool {
     mac.iter().any(|&b| b != 0) && mac[0] & 1 == 0
 }
 
-/// How an MDIO read ended without a value.
+/// How an MDIO command, a read or a write, ended without its result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MdioError {
     /// The PHY address or the register is above 31.
@@ -228,10 +230,24 @@ pub const MDIO_POLLS: u32 = 2000;
 /// The wait before each poll, in microseconds.
 pub const MDIO_POLL_US: u32 = 10;
 
+/// A command word for register `reg` of the PHY at `phy`, without the
+/// start bit: the operation, the two five-bit addresses, and for a write
+/// its data. `None` for an address above 31. The one place the addresses
+/// are checked and packed.
+fn mdio_command(op: u32, phy: u8, reg: u8, data: u16) -> Option<u32> {
+    (phy < 32 && reg < 32).then(|| op | (u32::from(phy) << MDIO_PMD_SHIFT) | (u32::from(reg) << MDIO_REG_SHIFT) | u32::from(data))
+}
+
 /// The command word that reads register `reg` of the PHY at `phy`, without
 /// the start bit (U-Boot's `bcmgenet_mdio_read`).
 pub fn mdio_read_command(phy: u8, reg: u8) -> Option<u32> {
-    (phy < 32 && reg < 32).then(|| MDIO_RD | (u32::from(phy) << MDIO_PMD_SHIFT) | (u32::from(reg) << MDIO_REG_SHIFT))
+    mdio_command(MDIO_RD, phy, reg, 0)
+}
+
+/// The command word that writes `value` to it (U-Boot's
+/// `bcmgenet_mdio_write`).
+pub fn mdio_write_command(phy: u8, reg: u8, value: u16) -> Option<u32> {
+    mdio_command(MDIO_WR, phy, reg, value)
 }
 
 /// Reads register `reg` of the PHY at `phy`: the command written, then the
@@ -250,10 +266,7 @@ pub fn mdio_read<B: Bus>(bus: &mut B, phy: u8, reg: u8) -> Result<u16, MdioError
 /// controller does not say whether a PHY took a write, so `Ok` means the
 /// command finished, not that anything heard it.
 pub fn mdio_write<B: Bus>(bus: &mut B, phy: u8, reg: u8, value: u16) -> Result<(), MdioError> {
-    if phy >= 32 || reg >= 32 {
-        return Err(MdioError::BadAddress);
-    }
-    let command = MDIO_WR | (u32::from(phy) << MDIO_PMD_SHIFT) | (u32::from(reg) << MDIO_REG_SHIFT) | u32::from(value);
+    let command = mdio_write_command(phy, reg, value).ok_or(MdioError::BadAddress)?;
     mdio_run(bus, command).map(|_| ())
 }
 

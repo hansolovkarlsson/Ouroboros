@@ -44,9 +44,10 @@
 //! - A received frame shorter than an Ethernet header, or longer than the
 //!   maximum the device was told, is dropped, whatever the device says.
 //!
-//! **What this does not do:** it writes nothing to the PHY (`phy.rs` says
-//! why that is an open question), and it does not tell the MAC the duplex
-//! (U-Boot does not either: a half-duplex link runs with the MAC at full).
+//! **What this does not do:** it writes nothing to the PHY (that is
+//! `phy::setup`, the plan's step 4b), and it does not tell the MAC the
+//! duplex (U-Boot does not either: a half-duplex link runs with the MAC at
+//! full).
 
 use crate::phy::Speed;
 use crate::{mac, mac_usable, reg, version, Bus, CMD_RX_EN, CMD_TX_EN, DMA_EN, MAJOR_V5};
