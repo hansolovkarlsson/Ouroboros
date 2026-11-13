@@ -14,7 +14,7 @@ touches nothing it was not told is there. Two boots of a copy of the staged
 ESP, each graded from the serial console and from QEMU's own trace:
 
 1. With `NETDUMP`: the flag is seen, the scan says no GENET is declared and
-   that no register was touched, no register line and no PHY line appears,
+   that no register was touched, no other line of the scan appears,
    and the boot goes on to the shell and answers `help`, with zero fault
    lines in QEMU's trace. A scan that read the Pi's address anyway would
    fault here, before the exit, through the firmware's vectors.
@@ -34,7 +34,6 @@ boot failed; the transcripts are kept on a failure and with --keep.
 import argparse
 import importlib.util
 import os
-import re
 import shutil
 import sys
 import tempfile
@@ -44,9 +43,11 @@ _spec = importlib.util.spec_from_file_location("early_fault", os.path.join(HERE,
 early = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(early)
 
-# Lines only the scan prints.
+# Lines only the scan prints, and of those, any but the two a machine with
+# no GENET may print. Named by what is allowed, so a line added to
+# netscan.rs is refused here without this list hearing of it.
 SCAN_LINE = r"Ouroboros kernel: net: "
-REGISTER_LINE = r"net: GENET \+0x|net: GENET registers|net: GENET version|net: PHY at|net: MDIO|net: scanning"
+BEYOND_THE_DECLARATION = SCAN_LINE + r"(?!GENET declared present: |not exactly one GENET declared: no register touched)"
 FAULTS = early.CLEAN_BOOT_MUST_NOT
 
 
@@ -62,12 +63,7 @@ def main():
     # it never booted.
     ident, head = early.staged_build(args.esp)
     print(f"staged kernel: build {ident or '<not exactly one identity in the image>'}; this tree: {head}")
-    build = re.escape(ident) if ident else "<no identity>"
-    current = r"^" if ident and ident.split(" ")[0].removesuffix("+dirty") == head else r"(?!x)x"
-    identity = [
-        ("the build line names the staged kernel", r"UEFI stage alive, build " + build + r", "),
-        (f"the staged kernel is this tree's commit ({head})", current),
-    ]
+    identity = early.identity_checks(ident, head)
     work = tempfile.mkdtemp(prefix="netdump-")
     results = []
 
@@ -85,7 +81,7 @@ def main():
         ("boot services exited", r"exiting boot services"),
         ("shell", r"shell ready"),
         ("help answered after the dwell", r"^builtins: help"),
-    ], [("a register or PHY line", REGISTER_LINE)] + FAULTS, aborts, "zero", order=[
+    ], [("a scan line beyond the declaration", BEYOND_THE_DECLARATION)] + FAULTS, aborts, "zero", order=[
         ("the scan's lines before the exit", r"no register touched", r"exiting boot services"),
     ]))
 

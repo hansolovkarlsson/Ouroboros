@@ -155,6 +155,16 @@ pub fn mdio_read<B: Bus>(bus: &mut B, phy: u8, reg: u8) -> Result<u16, MdioError
     Err(MdioError::Busy)
 }
 
+/// Whether a write of `value` at `offset` is one the scan ([`registers`]
+/// and [`phys`]) makes: to `MDIO_CMD`, a read operation for some PHY and
+/// register, with or without the start bit, and no other bit. A [`Bus`]
+/// lent for the scan alone refuses any other write, so that "read-only"
+/// does not rest on what this crate's other functions will one day do.
+pub fn scan_write_allowed(offset: usize, value: u32) -> bool {
+    let address = (0x1f << MDIO_PMD_SHIFT) | (0x1f << MDIO_REG_SHIFT);
+    offset == reg::MDIO_CMD && value & !(MDIO_START_BUSY | address) == MDIO_RD
+}
+
 /// The PHY registers [`phys`] reads, by IEEE 802.3 clause 22: the status
 /// register and the identifier's two halves.
 pub const PHY_BMSR: u8 = 1;
@@ -245,10 +255,11 @@ pub fn registers<B: Bus>(bus: &mut B, seen: &mut dyn FnMut(usize, &'static str, 
     Registers { sys_rev, port_ctrl, rgmii_oob, intr_mask, umac_cmd, mac0, mac1, rdma_ctrl, tdma_ctrl }
 }
 
-/// What [`phys`] found on the MDIO bus. The four counts and the stuck
-/// address account for every address: each either answered whole, answered
-/// in part, was flagged as no answer, read all ones, read zero, or was
-/// never reached.
+/// What [`phys`] found on the MDIO bus. The kept list, the five counts and
+/// the stuck address account for every address: each either answered whole
+/// (kept, or counted in `dropped`), answered in part, was flagged as no
+/// answer, read all ones, read zero, or was never reached. So the six sum
+/// to 32, or to the stuck address when there is one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PhyScan {
     list: [Phy; MAX_PHYS],

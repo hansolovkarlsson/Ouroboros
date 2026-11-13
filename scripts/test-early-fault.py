@@ -197,6 +197,20 @@ def staged_build(esp):
     return ident, head
 
 
+def identity_checks(ident, head):
+    """The two grades that tie a boot to this tree, for any rig that boots
+    the staged ESP (test-netdump.py uses them too): the boot's first line
+    names the identity read from the image, and that identity is HEAD's
+    commit. The second can only be decided here, so its pattern is one that
+    always matches or one that never does."""
+    build = re.escape(ident) if ident else "<no identity>"
+    current = bool(ident) and ident.split(" ")[0].removesuffix("+dirty") == head
+    return [
+        ("the build line names the staged kernel", r"UEFI stage alive, build " + build + r", "),
+        (f"the staged kernel is this tree's commit ({head})", r"^" if current else r"(?!x)x"),
+    ]
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--esp", default="build/esp", help="the staged ESP directory (make esp)")
@@ -256,9 +270,8 @@ def main():
     open(os.path.join(work, "plain.serial"), "w").write(text)
     results.append(grade("control", text, [
         ("reporter armed", r"early fault reporter armed"),
-        ("the build line names the staged kernel", r"UEFI stage alive, build " + build + r", "),
+        *identity_checks(ident, head),
         ("the post-exit line names it too", r"console live, build " + build + r"\b"),
-        (f"the staged kernel is this tree's commit ({head})", r"^" if ident and ident.split(" ")[0].removesuffix("+dirty") == head else r"(?!x)x"),
         ("on the kernel's own stack", r"UEFI stage alive, build \S+ \w+, on its own stack \(sp 0x[0-9a-f]+, the kernel's stack 0x[0-9a-f]+\.\.0x[0-9a-f]+, the entry's sp on the firmware's was 0x[0-9a-f]+\)"),
         ("boot services exited", r"exiting boot services"),
         (f"handed off at {handed_off}", rf"running at {handed_off} after the exit"),

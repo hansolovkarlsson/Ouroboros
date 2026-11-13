@@ -16,7 +16,7 @@ Step 2 of `docs/roadmap/roadmap-pi-net.md`, built and not yet run on a
 board. With the flag file at the boot partition's root the kernel logs,
 before the exit, the GENET the ACPI tables declare and, with exactly one,
 nine of its registers (the version, the MAC address the firmware left,
-whether it was left running) and every PHY that answers on its MDIO bus.
+whether it is running at that point, before the exit) and every PHY that answers on its MDIO bus.
 The scan is the first piece of a new pure crate, `genet`, written over a
 `Bus` trait so it runs on the host against a model of the device: no QEMU
 machine has one. `make test-netdump` holds the other half on QEMU: where no

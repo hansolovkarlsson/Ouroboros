@@ -4,7 +4,10 @@
 //! (`main.rs`). A reading aid, as `sdscan.rs` was for the SD card: it
 //! drives nothing, and its lines settle what the plan lists as predicted
 //! (the version, the address the firmware left, the PHY and where it
-//! answers, whether the firmware leaves the device running).
+//! answers, whether the firmware has the device running at this point).
+//! That last is read **before the exit**: the firmware's driver may change
+//! the enables in its own exit notification, so it is not the state the
+//! kernel inherits, and step 5 quiets the device whatever it reads.
 //!
 //! - **The declaration:** how many GENET devices the ACPI tables declare
 //!   present (`amlscan::declared` with `GENET_HID`). With any count but
@@ -24,9 +27,13 @@
 //!   from edk2's sources as remembered). A command of its own between one
 //!   of ours and our poll would be read back as our answer, and this
 //!   reading is made once, to be believed. So the MDIO half runs at
-//!   `TPL_NOTIFY`, where no timer callback runs, a few milliseconds on a
-//!   live bus and 20 ms on a dead one, and nothing is logged until the
-//!   priority is back down.
+//!   `TPL_NOTIFY`, where no timer callback runs, and nothing is logged
+//!   until the priority is back down. On a live bus that is a few
+//!   milliseconds and on a dead one 20 ms (the first command's budget ends
+//!   the scan). The bound is far above both: a bus whose every command
+//!   completes just inside its 20 ms budget is never cut off, and 32
+//!   addresses of up to four commands is about 2.6 s, longer still if the
+//!   firmware's stall rounds 10 us up.
 //!
 //! The registers are read on the firmware's mapping, which its own driver
 //! uses. A device declared but not mapped would fault here, through the
@@ -35,8 +42,11 @@
 
 use crate::acpi;
 
-/// The scan's access to the device: 32-bit volatile reads and writes at
-/// `base`, and the firmware's stall for the delay.
+/// The scan's access to the device: 32-bit volatile reads at `base`, the
+/// firmware's stall for the delay, and no write but an MDIO read command
+/// (`genet::scan_write_allowed`). The flag is documented as read-only, and
+/// this is where that is held: the crate will grow reset and DMA writes
+/// over the same trait, and none of them can pass through this bus.
 struct Mmio {
     base: usize,
 }
@@ -52,8 +62,8 @@ impl genet::Bus for Mmio {
     }
 
     fn write(&mut self, offset: usize, value: u32) {
-        assert!(offset.is_multiple_of(4) && offset + 4 <= genet::BLOCK_LEN as usize);
-        // SAFETY: as `read`. `genet::phys` writes `MDIO_CMD` alone.
+        assert!(genet::scan_write_allowed(offset, value), "the scan may write MDIO read commands alone");
+        // SAFETY: as `read`; the offset is `MDIO_CMD`'s, by the assert.
         unsafe { core::ptr::write_volatile((self.base + offset) as *mut u32, value) }
     }
 
@@ -98,7 +108,7 @@ pub unsafe fn report(rsdp: Option<*const u8>) {
         }
     };
     log::info!("Ouroboros kernel: net: GENET registers {:#x}, {:#x} bytes, INTID {:?}", c.base, c.size, c.intid);
-    if !genet::block_usable(c.base, c.size) || usize::try_from(c.base).is_err() {
+    if !genet::block_usable(c.base, c.size) {
         log::info!(
             "Ouroboros kernel: net: that is not a block of {:#x} bytes at an aligned address: no register touched",
             genet::BLOCK_LEN
@@ -118,7 +128,7 @@ pub unsafe fn report(rsdp: Option<*const u8>) {
     }
     let m = genet::mac(r.mac0, r.mac1);
     log::info!(
-        "Ouroboros kernel: net: GENET version major {major} minor {minor} (v5), MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} ({}), transmit enabled {}, receive enabled {}, receive DMA on {}, transmit DMA on {}",
+        "Ouroboros kernel: net: GENET version major {major} minor {minor} (v5), MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} ({}); before the exit: transmit enabled {}, receive enabled {}, receive DMA on {}, transmit DMA on {}",
         m[0],
         m[1],
         m[2],
@@ -131,17 +141,21 @@ pub unsafe fn report(rsdp: Option<*const u8>) {
         r.rdma_ctrl & genet::DMA_EN != 0,
         r.tdma_ctrl & genet::DMA_EN != 0
     );
-    log::info!("Ouroboros kernel: net: scanning the MDIO bus at TPL_NOTIFY, the firmware's timer events held off");
+    log::info!("Ouroboros kernel: net: scanning the MDIO bus at TPL_NOTIFY, the firmware's timer events held off (up to about 3 s; 20 ms on a dead bus)");
     let scanned = {
         // SAFETY: raised for the MDIO scan alone, which calls nothing of
         // the firmware's but Stall (allowed at any priority) and is bounded
-        // (`genet::MDIO_POLLS` a command, the scan ended by a stuck one);
+        // (`genet::MDIO_POLLS` a command, at most four commands an address,
+        // the scan ended by a stuck one: the module doc has the figure);
         // the guard restores the priority at this block's end, before
         // anything is logged.
         let _tpl = unsafe { uefi::boot::raise_tpl(uefi::boot::Tpl::NOTIFY) };
         genet::phys(&mut bus, &r)
     };
-    let Some(p) = scanned else { return };
+    let Some(p) = scanned else {
+        log::info!("Ouroboros kernel: net: the MDIO scan refused the version it was given: nothing was written");
+        return;
+    };
     for phy in p.phys() {
         log::info!(
             "Ouroboros kernel: net: PHY at MDIO address {}: id {:#010x}, status {:#06x}, link {}, autonegotiation done {}",

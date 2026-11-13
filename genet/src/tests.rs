@@ -208,7 +208,35 @@ fn a_flagged_read_is_no_answer() {
 fn scan(m: &mut Model) -> (Registers, Option<PhyScan>) {
     let r = registers(m, &mut |_, _, _| {});
     let p = phys(m, &r);
+    if let Some(p) = &p {
+        // Every address is in exactly one count, up to where the scan ended.
+        let counted = p.phys().len() + p.dropped + p.partial + p.no_answer + p.read_ones + p.read_zero;
+        assert_eq!(counted, p.stuck_at.map_or(32, usize::from), "{p:?}");
+    }
+    for (offset, value) in &m.writes {
+        assert!(scan_write_allowed(*offset, *value), "the scan wrote {value:#x} at {offset:#x}");
+    }
     (r, p)
+}
+
+#[test]
+fn the_scans_write_rule_takes_mdio_reads_alone() {
+    let read = mdio_read_command(31, 31).unwrap();
+    assert!(scan_write_allowed(reg::MDIO_CMD, read));
+    assert!(scan_write_allowed(reg::MDIO_CMD, read | MDIO_START_BUSY));
+    assert!(scan_write_allowed(reg::MDIO_CMD, mdio_read_command(0, 0).unwrap()));
+    // Another register, however harmless the value.
+    assert!(!scan_write_allowed(reg::UMAC_CMD, read));
+    assert!(!scan_write_allowed(reg::MDIO_CMD + 4, read));
+    // A write operation (bit 26), alone or beside the read bit; no operation.
+    assert!(!scan_write_allowed(reg::MDIO_CMD, (read & !MDIO_RD) | (1 << 26)));
+    assert!(!scan_write_allowed(reg::MDIO_CMD, read | (1 << 26)));
+    assert!(!scan_write_allowed(reg::MDIO_CMD, read & !MDIO_RD));
+    // Data, the fail flag, or a bit above the start bit.
+    assert!(!scan_write_allowed(reg::MDIO_CMD, read | 1));
+    assert!(!scan_write_allowed(reg::MDIO_CMD, read | 0x8000));
+    assert!(!scan_write_allowed(reg::MDIO_CMD, read | MDIO_READ_FAIL));
+    assert!(!scan_write_allowed(reg::MDIO_CMD, read | (1 << 30)));
 }
 
 const PI_PHY: Phy = Phy { addr: 1, id: 0x600d_84a2, bmsr: 0x796d };

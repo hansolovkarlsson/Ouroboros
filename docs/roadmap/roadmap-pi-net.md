@@ -146,7 +146,11 @@ and the design's point 2 is the answer to that.
 4. **Quiet at the exit.** Whatever the firmware's driver was doing, the
    device's DMA and its transmit and receive enables go off before the
    kernel uses memory the firmware owned, the same rule the xHCI takeover
-   follows. Step 2 reads whether the firmware leaves DMA running.
+   follows. Step 2 reads whether the firmware has DMA running before
+   the exit. That is not the state the kernel inherits (the firmware's
+   driver may stop the device in its exit notification, which is how
+   edk2's GENET driver is remembered, unread), so this design does not
+   wait on the answer: the device is quieted whatever step 2 shows.
 5. **One queue, its buffers in a non-cacheable range of their own.** Ring
    16 alone, 2048-byte buffers, no priority queues, no checksum offload,
    the second interrupt unused. The receive and transmit buffers are one
@@ -234,12 +238,15 @@ Each has a recommendation; none blocks step 2.
 
 2. **Read the board.** One boot under a new flag file, `\NETDUMP`, that
    logs before the exit: what `amlscan::declared` finds for `GENET_HID`,
-   then, only if it found exactly one device, `SYS_REV_CTRL`,
-   `SYS_PORT_CTRL`, `UMAC_CMD`, `UMAC_MAC0` and `UMAC_MAC1`,
-   `EXT_RGMII_OOB_CTRL`, both DMA control registers, the INTRL2_0 mask
-   status, and, only when the version reads v5, the id and status of
-   every PHY that answers on MDIO, addresses 0 to 31. The MDIO read
-   commands are the scan's only writes; everything else is a read.
+   then, only if it found exactly one device, `SYS_REV_CTRL`, and, only
+   when that version reads v5, the rest: `SYS_PORT_CTRL`, `UMAC_CMD`,
+   `UMAC_MAC0` and `UMAC_MAC1`, `EXT_RGMII_OOB_CTRL`, both DMA control
+   registers, the INTRL2_0 mask status, and the id and status of every
+   PHY that answers on MDIO, addresses 0 to 31. On any other version the
+   log has one register line and no more, by design and not by a fault.
+   The MDIO read commands are the scan's only writes, and the bus the
+   kernel lends the scan refuses any other
+   (`genet::scan_write_allowed`); everything else is a read.
    Without the flag nothing here runs, as with `\SDDUMP`.
    **Built 2026-11-12, not yet run on the board.** The scan is the first
    piece of design 2's crate, in two halves over a `Bus` trait (read,
@@ -283,13 +290,32 @@ Each has a recommendation; none blocks step 2.
    `sdscan.rs` are the others). The driver's discovery would be the
    fourth, so step 5 makes it one helper in `acpi.rs`; this step did not
    reach into the SD card's proven path to do it.
+   **The review of #452** found no fault in the offsets or the MDIO
+   sequence, and corrected what the scan claims. The enables are read
+   before the exit, so they do not say what the kernel inherits (design
+   4 now says so, and the log line does). "Read-only" is held by the bus
+   the kernel lends, which refuses any write but an MDIO read command,
+   where it rested on what the crate happened to write. The time at
+   `TPL_NOTIFY` was stated as 20 ms at most and is bounded at about
+   2.6 s (a bus whose commands complete slowly is never cut off); the
+   doc and the log line say that now. A scan that returned nothing would
+   have ended the log without a line. The rig names the two lines a
+   machine with no GENET may print, where it listed the ones it may not,
+   and takes its identity grades from `test-early-fault.py`
+   (`identity_checks`) where it had a copy. It is no longer listed as a
+   check for the `genet` crate, none of whose code runs on QEMU. **For
+   step 5's helper:** the three copies already differ. `netscan.rs`
+   requires that no device was dropped; `emmc2_from_acpi` and
+   `sdscan.rs` take the one device whatever the counts beside it. The
+   helper has to choose one rule.
    **The check on the board, still owed:** the version's major reads 6;
    the MAC address is the one the board's own firmware setup screen shows
    (or the Mac's ARP table from the Pi's own operating system), and not
    zeros; the PHY id is a Broadcom one; the status register's link bit
    follows the cable, in two boots, cable in and cable out. This step
    settles the predictions under "What is known" and whether the firmware
-   leaves DMA running (design 4). `touch NETDUMP` at the card's boot
+   has DMA running before the exit, which is not yet what it leaves the
+   kernel (design 4). `touch NETDUMP` at the card's boot
    partition root, boot with serial captured, and the lines start
    `Ouroboros kernel: net:` (`testing-pi4.md`, the boot flag table).
 

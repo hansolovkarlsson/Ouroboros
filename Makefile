@@ -2268,13 +2268,14 @@ test-el1-drop: esp
 # (scripts/test-netdump.py, kernel/src/netscan.rs, step 2 of
 # docs/roadmap/roadmap-pi-net.md): one boot with the NETDUMP flag file at
 # the ESP root, which on QEMU must say that no GENET is declared and that no
-# register was touched, print no register or PHY line, reach the shell and
+# register was touched, print no other line of the scan, reach the shell and
 # answer `help` with a clean QEMU trace; and one without the flag, which
 # must print no line of the scan at all. What the scan reads from a GENET
 # is the genet crate's, tested on the host in `make test`; only a board
 # shows the device. About a minute. Run it when netscan.rs, bootflags.rs's
-# NETDUMP, amlscan's `declared`, the genet crate or test-early-fault.py
-# (whose boot and grading it imports) changes.
+# NETDUMP, amlscan's `declared` or test-early-fault.py (whose boot and
+# grading it imports) changes. Not for a change to the genet crate: no
+# GENET is declared on QEMU, so none of its code runs here.
 test-netdump: esp
 	python3 scripts/test-netdump.py
 
