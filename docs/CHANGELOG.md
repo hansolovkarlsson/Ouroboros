@@ -11,7 +11,7 @@ here actually works today, see [`architecture.md`](architecture.md) and
 
 **Not yet released.** Changes since v0.25.0, drafted as they land.
 
-**The Pi's PHY is set up as U-Boot sets it up, and its real speed is read (2026-11-13).**
+**The Pi's PHY is set up as U-Boot sets it up, and its real speed is read (2026-11-13, #456).**
 Step 4b of `docs/roadmap/roadmap-pi-net.md`, Hans's answer to decision D7.
 For the board's Broadcom BCM54210E and no other PHY, `genet::phy::setup`
 writes the RGMII clock delays U-Boot's driver writes and resets the PHY,

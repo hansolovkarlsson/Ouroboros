@@ -558,7 +558,7 @@ Each has a recommendation; none blocks step 2.
      virtio-net's send already has.
 
 4b. **The Pi's PHY, as U-Boot sets it up** (decision D7).
-   **Built 2026-11-13, on the host.** In `genet::phy`, for a PHY whose
+   **Built 2026-11-13, on the host (#456).** In `genet::phy`, for a PHY whose
    identifier is U-Boot's BCM54210E (`0x600d84a0` under the mask
    `0xfffffff0`) and for no other:
    - `setup`: U-Boot's `bcm54xx_config_clock_delay` for `rgmii-rxid` (the
