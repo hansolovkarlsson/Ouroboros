@@ -726,19 +726,16 @@ extern "C" fn kernel_main() -> ! {
     // addresses (madt.rs for the GIC), none assumed to live in the fixed
     // low-1GB device block. `mmu.rs`'s `MAX_EXTRA_L1_TABLES` is sized to
     // match, so each can have its own L1 table past 512GB.
-    let mut extra_devices = [(0u64, 0u64); mmu::MAX_EXTRA_DEVICES];
-    let mut extra_device_count = 0;
+    let mut extra = ExtraDevices::new();
     // The discovered serial console, mapped because it is the console: the
     // fixed low-1GB device block is a QEMU-shaped convention, and the Pi 4's
     // PL011 (0xfe201000) is far above it. Mapped under `\FBCON` too, where it
     // goes unused, since it costs one block and keeps the map the same.
     if let Some(base) = console_base {
-        extra_devices[extra_device_count] = (base, 0x1000);
-        extra_device_count += 1;
+        extra.push("the console", base, 0x1000);
     }
     if let Some(info) = fb_info {
-        extra_devices[extra_device_count] = (info.base, info.size as u64);
-        extra_device_count += 1;
+        extra.push("the framebuffer", info.base, info.size as u64);
     }
     if let Some(info) = xhci_info {
         // Size is a coarse over-estimate (the real BAR size comes from a
@@ -746,39 +743,30 @@ extern "C" fn kernel_main() -> ! {
         // `install_identity_map` only needs a nonzero size to know the
         // region isn't empty, and maps a whole 1GB block regardless, same
         // as the framebuffer fallback).
-        extra_devices[extra_device_count] = (info.base, 0x10000);
-        extra_device_count += 1;
+        extra.push("the xHCI controller", info.base, 0x10000);
     }
     if let Some(info) = gic_info {
-        extra_devices[extra_device_count] = (info.gicd_base, 0x10000);
-        extra_device_count += 1;
+        extra.push("the GIC distributor", info.gicd_base, 0x10000);
         let (secondary_base, secondary_size) = match info.version {
             madt::GicVersion::V2 => (info.gicc_base, 0x10000),
             madt::GicVersion::V3 => (info.gicr_base, info.gicr_size),
         };
-        extra_devices[extra_device_count] = (secondary_base, secondary_size);
-        extra_device_count += 1;
+        extra.push("the GIC's CPU interface or redistributor", secondary_base, secondary_size);
     }
     // The SD host controller. It has had a slot of its own since
     // 2026-11-13, when the list grew to hold every candidate; before that
     // it was mapped on the Pi only because the console's 1GB block held it.
-    // The bound is kept, and `init_sd` asks the walker before the first
-    // access in any case.
+    // `init_sd` asks the walker before the first access in any case.
     if let Some(ctl) = &sd_controller {
-        if extra_device_count < mmu::MAX_EXTRA_DEVICES {
-            extra_devices[extra_device_count] = (ctl.base, 0x1000);
-            extra_device_count += 1;
-        }
+        extra.push("the SD host controller", ctl.base, 0x1000);
     }
     // The Ethernet's registers, a slot of their own as the SD controller's
     // have, and `genetnic::quiet` asks the walker before its first access
     // either way.
     if let Some(d) = &genet_declared {
-        if extra_device_count < mmu::MAX_EXTRA_DEVICES {
-            extra_devices[extra_device_count] = (d.base, u64::from(genet::BLOCK_LEN));
-            extra_device_count += 1;
-        }
+        extra.push("the Ethernet", d.base, u64::from(genet::BLOCK_LEN));
     }
+    let (extra_devices, extra_device_count) = (extra.list, extra.count);
     // The boot EL0 regions, one per task slot (auto-sized to NUM_TASKS so
     // raising the slot count needs no edit here): slot 0 the loaded program,
     // slot 1 idle, slots 2/3/4 the filesystem/console/network servers ((0, 0)
@@ -1377,6 +1365,37 @@ struct SdController {
     base: u64,
     /// "PCI" (QEMU's `sdhci-pci`) or "ACPI" (the Pi's EMMC2).
     source: &'static str,
+}
+
+/// The device regions `main` hands `mmu::install_identity_map`, at most
+/// `mmu::MAX_EXTRA_DEVICES` of them. Every candidate goes through
+/// [`push`](Self::push), so one that does not fit is said, by name, at the
+/// point it is left out: the list is sized to hold every candidate there
+/// is today, and a candidate added without raising the constant would
+/// otherwise be dropped in silence and found mapped, or not, by which 1GB
+/// block it shares.
+struct ExtraDevices {
+    list: [(u64, u64); mmu::MAX_EXTRA_DEVICES],
+    count: usize,
+}
+
+impl ExtraDevices {
+    fn new() -> Self {
+        Self { list: [(0, 0); mmu::MAX_EXTRA_DEVICES], count: 0 }
+    }
+
+    /// After the exit, where the console is the kernel's own.
+    fn push(&mut self, what: &str, base: u64, size: u64) {
+        if self.count < mmu::MAX_EXTRA_DEVICES {
+            self.list[self.count] = (base, size);
+            self.count += 1;
+        } else {
+            console::println!(
+                "Ouroboros kernel: WARNING: {what} @ {base:#x} is given no mapping of its own: the list of device regions is full ({} of them)",
+                mmu::MAX_EXTRA_DEVICES
+            );
+        }
+    }
 }
 
 /// The Raspberry Pi 4's EMMC2, when the ACPI tables declare exactly one

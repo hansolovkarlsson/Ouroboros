@@ -58,14 +58,23 @@ pub(crate) fn dma_region() -> (u64, u64) {
     (RX_AREA.0.get() as u64, RX_AREA_LEN as u64)
 }
 
+/// How many of the receive area's pages walk as non-cacheable in the
+/// tables now running, and how many pages it has: every page asked of the
+/// MMU itself. The one count the log line and [`init`]'s refusal both
+/// read.
+fn rx_area_noncacheable_pages() -> (u64, u64) {
+    let (base, size) = dma_region();
+    let pages = size / 4096;
+    ((0..pages).filter(|p| mmu::walks_as_noncacheable(base + p * 4096)).count() as u64, pages)
+}
+
 /// Logs how the receive area walks in the tables now running: every page
 /// asked of the MMU itself. Called on every boot, device or none, so the
 /// line that must say "non-cacheable" on the Pi has a control on QEMU that
 /// must say "cacheable".
 pub(crate) fn report_rx_area() {
     let (base, size) = dma_region();
-    let pages = size / 4096;
-    let nc = (0..pages).filter(|p| mmu::walks_as_noncacheable(base + p * 4096)).count() as u64;
+    let (nc, pages) = rx_area_noncacheable_pages();
     let how = if nc == pages {
         "non-cacheable"
     } else if nc == 0 {
@@ -90,9 +99,10 @@ impl genet::Bus for Mmio {
     fn read(&mut self, offset: usize) -> u32 {
         assert!(offset.is_multiple_of(4) && offset + 4 <= genet::BLOCK_LEN as usize);
         // SAFETY: inside the 64 KB block the firmware declares, which
-        // `init` saw walk as device memory at both ends before this bus
-        // was built; 32-bit and aligned, the base by `genet::block_usable`
-        // and the offset by the assert.
+        // `quiet` saw walk as device memory at both ends before it built
+        // this bus, the only place one is built (`init` is handed
+        // `quiet`'s); 32-bit and aligned, the base by
+        // `genet::block_usable` and the offset by the assert.
         unsafe { core::ptr::read_volatile((self.base + offset) as *const u32) }
     }
 
@@ -248,8 +258,9 @@ pub(crate) struct Device {
 pub(crate) unsafe fn init(quieted: Quieted, dma_noncoherent: bool) -> Option<Device> {
     let Quieted { mut bus, sys_rev } = quieted;
     let base = bus.base;
-    let (area, size) = dma_region();
-    if dma_noncoherent && !(0..size / 4096).all(|p| mmu::walks_as_noncacheable(area + p * 4096)) {
+    let (area, _) = dma_region();
+    let (nc, pages) = rx_area_noncacheable_pages();
+    if dma_noncoherent && nc != pages {
         console::println!(
             "Ouroboros kernel: genet: WARNING: the firmware says DMA is not coherent and the receive area does not walk non-cacheable on every page: the Ethernet is not brought up"
         );
@@ -321,12 +332,15 @@ impl Device {
                 return;
             }
         }
-        // Asked until the link is up or the time is: a read that fails,
-        // or says down or negotiating, is asked again. Only the last
-        // answer is reported.
+        // Asked until the link is up or the time is: a read that says
+        // down or negotiating, or that the PHY does not answer (it may
+        // still be coming out of its reset), is asked again. A bus whose
+        // command never finishes ends the wait at once: asking again
+        // would write a new command over the one still busy. Only the
+        // last answer is reported.
         let deadline = timer::deadline_us(LINK_WAIT_MS * 1000);
         let mut link = phy::link_resolved(&mut self.bus, addr, id);
-        while !matches!(link, Ok(Link::Up { .. })) && timer::now_ticks() < deadline {
+        while !matches!(link, Ok(Link::Up { .. }) | Err(genet::MdioError::Busy)) && timer::now_ticks() < deadline {
             timer::delay_us(LINK_POLL_MS * 1000);
             link = phy::link_resolved(&mut self.bus, addr, id);
         }
@@ -339,6 +353,7 @@ impl Device {
             Ok(Link::Down) => console::println!("Ouroboros kernel: genet: link down (waited {LINK_WAIT_MS} ms)"),
             Ok(Link::Negotiating) => console::println!("Ouroboros kernel: genet: link still negotiating (waited {LINK_WAIT_MS} ms)"),
             Ok(Link::Unresolved) => console::println!("Ouroboros kernel: genet: link up at a speed the PHY does not name (waited {LINK_WAIT_MS} ms)"),
+            Err(genet::MdioError::Busy) => console::println!("Ouroboros kernel: genet: the link did not read: the MDIO bus is stuck busy (not waited for)"),
             Err(e) => console::println!("Ouroboros kernel: genet: the link did not read ({e:?}, waited {LINK_WAIT_MS} ms)"),
         }
     }
@@ -349,13 +364,14 @@ impl Device {
     }
 
     /// Whether a received frame waits: at most one register read, nothing
-    /// written, no wait, as the tick's caller needs. **False while the MAC
-    /// is not started, without asking the device**: `poll_frame` takes
-    /// nothing in step 5, and a "yes" that nothing can consume would wake
-    /// the network server on every tick for good.
+    /// written, no wait, as the tick's caller needs. False while the MAC
+    /// is not started, which is the crate's rule (`Genet::has_frame`) and
+    /// is all of step 5: `poll_frame` takes nothing, and a "yes" that
+    /// nothing can consume would wake the network server on every tick
+    /// for good.
     pub(crate) fn has_frame(&self) -> bool {
         let mut bus = self.bus;
-        self.genet.started() && self.genet.has_frame(&mut bus)
+        self.genet.has_frame(&mut bus)
     }
 
     /// Refuses: the MAC is not started in step 5, and step 6 is where a
