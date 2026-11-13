@@ -487,7 +487,7 @@ amlscan/             the devices an ACPI table declares present by _HID (virtio-
 genet/               the Pi 4's Ethernet, Broadcom GENET v5: the logic that needs no hardware, over a Bus (read, write, delay) the caller
                      lends, host-tested against a model of the device, since no QEMU machine has one. The read-only scan
                      (roadmap-pi-net.md step 2) and the driver's logic (step 4: mac.rs, reset and rings and one frame each way;
-                     phy.rs, the link); the kernel's half is step 5. The model is ours: only the board is a foreign observer
+                     phy.rs, the Pi's PHY set up as U-Boot does and its link, step 4b); the kernel's half is step 5. The model is ours: only the board is a foreign observer
 heldkeys/            netd's held user keys: the table, whose key signs for a parked request, and when a run sent under one ends; liveness
                      is passed in, so the rules that turn on a login dead and not yet reaped run on the host. netd is the one caller
 keyseq/              tells a key's escape sequence (ESC [ A) from ordinary input: the ONE filter every keyboard reader uses

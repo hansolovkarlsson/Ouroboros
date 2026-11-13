@@ -584,13 +584,16 @@ Each has a recommendation; none blocks step 2.
    and the LED register.
    **What it means for step 5:** the order there is `Genet::init`, the
    PHY found by `phys` (its address and identifier), `phy::setup`, then
-   `phy::link_resolved` and, on a link, `Genet::start`. The reset drops
+   `phy::link_resolved` and, on a link, `Genet::start`. `setup`'s
+   answer, the two delay shadows as the PHY holds them after its reset,
+   goes in the boot log. The reset drops
    the link: it takes seconds to come back, so the first read after
    `setup` says down or negotiating, and D3's "again whenever a send
    finds the link down" is how the link is then found. A PHY that never
    leaves reset costs about 0.5 s; the bound, on a bus whose every read
    takes its whole 20 ms, is about 10.5 s.
-   **Checked:** 11 new host tests. The model's PHY has the two Broadcom
+   **Checked** (the first commit's figures; the review's are below): 11
+   new host tests. The model's PHY has the two Broadcom
    windows as U-Boot's `broadcom.c` uses them, and a reset bit that stays
    set for a number of reads. The set-up's MDIO commands equal U-Boot's,
    one for one (eight on a PHY whose reset clears at once); the skew is
@@ -604,9 +607,47 @@ Each has a recommendation; none blocks step 2.
    of data, which changes nothing while the PHY echoes the selector it
    was given) and got a test with a PHY that does not. 126 constants are
    cited now, the Broadcom ones to `broadcom.c`'s lines.
+   **The review of #456** fetched the same sources itself and found the
+   write sequence, the mode table, the identifier and every citation to
+   match. What it found around them, and what was done:
+   - *A PHY silent while it resets failed the set-up as "no PHY".* The
+     reset poll took the controller's "no answer" flag as an error.
+     U-Boot's MDIO read never looks at that flag, so it polls on. The
+     poll here now does too, for a flagged read and for all ones; only a
+     bus that sticks ends it early.
+   - *`setup` said it had worked without looking.* This plan says the
+     reset may or may not keep the delays, and the PHY starts where the
+     UEFI firmware's driver left it, not where U-Boot finds it. `setup`
+     now reads both shadows back after the reset and returns them
+     (`Delays`, with `as_written`). **Step 5 logs them, and the first
+     board run answers the question.** The model's reset can keep the
+     shadows or wipe them, and the tests run both.
+   - *An auxiliary status of all ones read as 1000 full.* It is
+     `NoAnswer` now, as the status register's already was.
+   - *The read that can be wrong on this PHY was still public.* `link`
+     is private to the crate; `link_resolved` is the one way in.
+   - A test asserted the shadows after the model's reset, which wrote
+     down as fact what is not known. It asserts the writes before the
+     reset and the returned state after it.
+   - Stale lines: `mac.rs` still called the PHY's set-up an open
+     question, the crate's module doc named neither the new functions nor
+     `broadcom.c`, and `docs/ROADMAP.md` item 7 still said only steps 1
+     and 2 were built. The PHY is named by what it is taken for: the
+     board's is predicted a BCM54213PE, and U-Boot's BCM54210E driver is
+     the one that matches its identifier.
+   - The MDIO command word is packed in one place, and the link's status
+     is an enum where it was an error type carrying an answer.
+   After the review: 14 host tests of step 4b where there were 11, the
+   set-up eleven MDIO commands on a PHY whose reset clears at once
+   (the four of the read-back added), and 37 mutations of step 4b's
+   code, each failed by a test, in a pass of 118 over the whole driver.
+   Departures from U-Boot the review asked to be listed, now in
+   `phy.rs`'s module doc: a reset that never ends is an error here
+   (U-Boot throws `phy_reset`'s result away), and the read-back.
    **Still only the board's to say:** whether these are the right delays
-   (a wrong one is frames with bad checksums, or none), and whether the
-   PHY is this one (step 2's scan reads its identifier).
+   (a wrong one is frames with bad checksums, or none), whether the reset
+   keeps them (`setup`'s answer), and whether the PHY is this one
+   (step 2's scan reads its identifier).
 
 5. **The board: bring-up and link.** One helper in `acpi.rs` for "the one
    device of this `_HID` declared present", used by this driver, the scan
