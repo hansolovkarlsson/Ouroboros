@@ -137,7 +137,7 @@ pre-alpha code that mostly proves it boots, and most of it can only run on
 the target. The **pure crates are the exception and now have one**:
 `make test` runs the host unit tests for every crate with no I/O, no
 syscalls and no target dependency (`accounts`, `regex`, `ed25519`,
-`clusterkeys`, `heldkeys`, `ninep-abi`, `keyseq`, `parttable`, `amlscan`, `genet`: 437 tests as of 2026-11-13, by the target's own `passed` lines, and the number is
+`clusterkeys`, `heldkeys`, `ninep-abi`, `keyseq`, `parttable`, `amlscan`, `genet`: 440 tests as of 2026-11-13, by the target's own `passed` lines, and the number is
 checked by running it, not by incrementing), clippy over those crates' test
 targets too, the cross-language wire-constant check
 (`scripts/check-wire-constants.py`: Rust against the two C headers and the
