@@ -2,20 +2,28 @@
 //! that needs no hardware, over a [`Bus`] the caller passes
 //! (`docs/roadmap/roadmap-pi-net.md`, design 2). No QEMU machine models
 //! this device, so everything here runs on the host against a model of it
-//! (`tests.rs`) and in the kernel against the board. **The model is ours:**
-//! the tests check this code against our reading of the device, its
-//! arithmetic, its order and its bounds. They cannot catch a wrong
-//! reading. The board is the only foreign observer.
+//! (`tests.rs` for the scan, `mac_tests.rs` for the driver) and in the
+//! kernel against the board. **The model is ours:** the tests check this
+//! code against our reading of the device, its arithmetic, its order and
+//! its bounds. They cannot catch a wrong reading. The board is the only
+//! foreign observer.
 //!
-//! Today this is the arc's step 2 alone, [`registers`] and [`phys`]: what
-//! the device says of itself before anything drives it. The driver proper
-//! is step 4.
+//! Two parts. The scan, [`registers`] and [`phys`], is the arc's step 2:
+//! what the device says of itself before anything drives it. The driver's
+//! logic is step 4: [`mac::Genet`] (reset, the rings, one transmit, one
+//! receive) and [`phy::link`] (the link and its speed). Nothing here touches
+//! memory: the packet buffers are the caller's, and this crate deals in
+//! their addresses and in indexes.
 //!
 //! **Where each number comes from.** Every register offset and bit here was
-//! read on 2026-11-12 in U-Boot's `drivers/net/bcmgenet.c` (the driver for
-//! this board's GENET) or Linux's `drivers/net/ethernet/broadcom/genet/
-//! bcmgenet.h`, and each constant's doc names which. The absolute offsets
-//! are those files' block offset plus register offset, added here.
+//! read in U-Boot's `drivers/net/bcmgenet.c` (the driver for this board's
+//! GENET) or in Linux's `drivers/net/ethernet/broadcom/genet/bcmgenet.h`
+//! and `bcmgenet.c`, and each constant's doc names which. The files read
+//! were U-Boot's at tag `v2024.10` and Linux's at `v6.6`, and
+//! `cited_tests.rs` carries the line of each constant in them. The absolute
+//! offsets are those files' block offset plus register offset, added here.
+//! The PHY's registers are IEEE 802.3 clause 22's, by the names and values
+//! of Linux's `include/uapi/linux/mii.h` at the same tag.
 //!
 //! Pure: no I/O of its own, no heap, no statics, so it builds and is
 //! tested on the host (`make test`).
@@ -42,11 +50,26 @@ pub mod reg {
     pub const SYS_REV_CTRL: usize = 0x0000;
     /// `SYS_PORT_CTRL` (U-Boot): the port mode.
     pub const SYS_PORT_CTRL: usize = 0x0004;
+    /// `SYS_RBUF_FLUSH_CTRL`, `GENET_SYS_OFF + 0x08` (U-Boot).
+    pub const SYS_RBUF_FLUSH_CTRL: usize = 0x0008;
     /// `EXT_RGMII_OOB_CTRL`, `GENET_EXT_OFF + 0x0c` (U-Boot).
     pub const EXT_RGMII_OOB_CTRL: usize = 0x0080 + 0x0c;
+    /// `INTRL2_CPU_CLEAR` of block 0, `GENET_INTRL2_0_OFF + 0x08` (Linux):
+    /// a bit written clears that pending interrupt.
+    pub const INTRL2_0_CLEAR: usize = 0x0200 + 0x08;
     /// `INTRL2_CPU_MASK_STATUS` of block 0, `GENET_INTRL2_0_OFF + 0x0c`
     /// (Linux): a set bit is a masked interrupt.
     pub const INTRL2_0_MASK_STATUS: usize = 0x0200 + 0x0c;
+    /// `INTRL2_CPU_MASK_SET` of block 0, `GENET_INTRL2_0_OFF + 0x10`
+    /// (Linux): a bit written masks that interrupt.
+    pub const INTRL2_0_MASK_SET: usize = 0x0200 + 0x10;
+    /// The same two of block 1, from `GENET_INTRL2_1_OFF` (0x0240, Linux).
+    pub const INTRL2_1_CLEAR: usize = 0x0240 + 0x08;
+    pub const INTRL2_1_MASK_SET: usize = 0x0240 + 0x10;
+    /// `RBUF_CTRL`, `GENET_RBUF_OFF + 0x00` (U-Boot).
+    pub const RBUF_CTRL: usize = 0x0300;
+    /// `RBUF_TBUF_SIZE_CTRL`, `GENET_RBUF_OFF + 0xb4` (U-Boot).
+    pub const RBUF_TBUF_SIZE_CTRL: usize = 0x0300 + 0xb4;
     /// `UMAC_CMD`, `GENET_UMAC_OFF + 0x008` (U-Boot).
     pub const UMAC_CMD: usize = 0x0800 + 0x008;
     /// `UMAC_MAC0`, `GENET_UMAC_OFF + 0x00c` (U-Boot): the address's first
@@ -54,8 +77,72 @@ pub mod reg {
     pub const UMAC_MAC0: usize = 0x0800 + 0x00c;
     /// `UMAC_MAC1`, `GENET_UMAC_OFF + 0x010` (U-Boot): its last two.
     pub const UMAC_MAC1: usize = 0x0800 + 0x010;
+    /// `TBUF_CTRL` (Linux): at 0x00 of the transmit buffer block, which on
+    /// v5 is at 0x0600 (`tbuf_offset` in `bcmgenet.c`'s `GENET_V5`
+    /// parameters, line 3811). U-Boot never names it.
+    pub const TBUF_CTRL: usize = 0x0600;
+    /// `UMAC_MAX_FRAME_LEN`, `GENET_UMAC_OFF + 0x014` (U-Boot).
+    pub const UMAC_MAX_FRAME_LEN: usize = 0x0800 + 0x014;
+    /// `UMAC_TX_FLUSH`, `GENET_UMAC_OFF + 0x334` (U-Boot).
+    pub const UMAC_TX_FLUSH: usize = 0x0800 + 0x334;
+    /// `UMAC_MIB_CTRL`, `GENET_UMAC_OFF + 0x580` (U-Boot).
+    pub const UMAC_MIB_CTRL: usize = 0x0800 + 0x580;
     /// `MDIO_CMD`, `GENET_UMAC_OFF + 0x614` (U-Boot).
     pub const MDIO_CMD: usize = 0x0800 + 0x614;
+
+    /// The receive descriptors, `GENET_RX_OFF` (U-Boot): 256 of 12 bytes.
+    pub const RX_DESCS: usize = 0x2000;
+    /// The transmit descriptors, `GENET_TX_OFF` (U-Boot).
+    pub const TX_DESCS: usize = 0x4000;
+    /// A descriptor's three words (U-Boot's `DMA_DESC_*`): the length and
+    /// status, then the buffer's address, low half and high.
+    pub const DESC_LENGTH_STATUS: usize = 0x00;
+    pub const DESC_ADDRESS_LO: usize = 0x04;
+    pub const DESC_ADDRESS_HI: usize = 0x08;
+    /// A descriptor's size, `DMA_DESC_SIZE` (U-Boot).
+    pub const DESC_SIZE: usize = 12;
+
+    /// Ring 16's registers in the receive DMA, U-Boot's
+    /// `RDMA_RING_REG_BASE`: `GENET_RX_OFF`, the 256 descriptors, then 16
+    /// rings of 0x40 bytes.
+    pub const RDMA_RING: usize = 0x2000 + 256 * 12 + 0x40 * 16;
+    /// Ring 16's registers in the transmit DMA, `TDMA_RING_REG_BASE`.
+    pub const TDMA_RING: usize = 0x4000 + 256 * 12 + 0x40 * 16;
+    /// The receive ring's registers (U-Boot). The device advances the
+    /// producer index and the driver the consumer.
+    pub const RDMA_WRITE_PTR: usize = RDMA_RING;
+    pub const RDMA_PROD_INDEX: usize = RDMA_RING + 0x08;
+    pub const RDMA_CONS_INDEX: usize = RDMA_RING + 0x0c;
+    pub const RDMA_RING_BUF_SIZE: usize = RDMA_RING + 0x10;
+    pub const RDMA_START_ADDR: usize = RDMA_RING + 0x14;
+    pub const RDMA_END_ADDR: usize = RDMA_RING + 0x1c;
+    pub const RDMA_XON_XOFF_THRESH: usize = RDMA_RING + 0x28;
+    pub const RDMA_READ_PTR: usize = RDMA_RING + 0x2c;
+    /// The transmit ring's registers (U-Boot). **Not the receive ring's
+    /// layout:** here the consumer index is at 0x08 and the producer at
+    /// 0x0c, the read pointer at 0x00 and the write pointer at 0x2c. The
+    /// driver advances the producer and the device the consumer.
+    pub const TDMA_READ_PTR: usize = TDMA_RING;
+    pub const TDMA_CONS_INDEX: usize = TDMA_RING + 0x08;
+    pub const TDMA_PROD_INDEX: usize = TDMA_RING + 0x0c;
+    pub const TDMA_RING_BUF_SIZE: usize = TDMA_RING + 0x10;
+    pub const TDMA_START_ADDR: usize = TDMA_RING + 0x14;
+    pub const TDMA_END_ADDR: usize = TDMA_RING + 0x1c;
+    pub const TDMA_MBUF_DONE_THRESH: usize = TDMA_RING + 0x24;
+    pub const TDMA_FLOW_PERIOD: usize = TDMA_RING + 0x28;
+    pub const TDMA_WRITE_PTR: usize = TDMA_RING + 0x2c;
+    /// Each DMA's own registers after its 17 rings' (U-Boot's
+    /// `RDMA_REG_BASE`, `TDMA_REG_BASE`): `DMA_RING_CFG` at 0x00 and
+    /// `DMA_SCB_BURST_SIZE` at 0x0c, with `DMA_CTRL` (below) at 0x04.
+    pub const RDMA_RING_CFG: usize = RDMA_RING + 0x40;
+    /// `DMA_STATUS`, at 0x08 of each DMA's own registers (Linux's
+    /// `bcmgenet_dma_regs_v3plus` in `bcmgenet.c`, line 221). U-Boot never
+    /// reads it.
+    pub const RDMA_STATUS: usize = RDMA_RING + 0x40 + 0x08;
+    pub const TDMA_STATUS: usize = TDMA_RING + 0x40 + 0x08;
+    pub const RDMA_SCB_BURST_SIZE: usize = RDMA_RING + 0x40 + 0x0c;
+    pub const TDMA_RING_CFG: usize = TDMA_RING + 0x40;
+    pub const TDMA_SCB_BURST_SIZE: usize = TDMA_RING + 0x40 + 0x0c;
     /// Receive DMA's `DMA_CTRL`: `GENET_RX_OFF` (0x2000), 256 descriptors
     /// of 12 bytes, 17 rings' registers of 0x40 bytes, then 0x04 (U-Boot's
     /// `RDMA_REG_BASE + DMA_CTRL`).
@@ -68,7 +155,15 @@ const _: () = {
     // The two computed offsets, as U-Boot's own arithmetic gives them.
     assert!(reg::RDMA_CTRL == 0x3044 && reg::TDMA_CTRL == 0x5044);
     assert!(reg::TDMA_CTRL + 4 <= BLOCK_LEN as usize);
+    // The rings' registers end where each DMA's own begin, and the
+    // transmit descriptors start past the receive DMA's last register.
+    assert!(reg::RDMA_RING == 0x3000 && reg::TDMA_RING == 0x5000);
+    assert!(reg::RDMA_RING_CFG + 4 == reg::RDMA_CTRL && reg::TDMA_RING_CFG + 4 == reg::TDMA_CTRL);
+    assert!(reg::RDMA_SCB_BURST_SIZE < reg::TX_DESCS);
 };
+
+pub mod mac;
+pub mod phy;
 
 /// `CMD_TX_EN`, `UMAC_CMD` bit 0 (U-Boot).
 pub const CMD_TX_EN: u32 = 1 << 0;
@@ -358,5 +453,9 @@ pub fn phys<B: Bus>(bus: &mut B, registers: &Registers) -> Option<PhyScan> {
     Some(s)
 }
 
+#[cfg(test)]
+mod cited_tests;
+#[cfg(test)]
+mod mac_tests;
 #[cfg(test)]
 mod tests;

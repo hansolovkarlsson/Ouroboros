@@ -82,6 +82,47 @@ first):
 - **Cache.** U-Boot flushes and invalidates around every buffer, which is
   what `_CCA 0` means for a driver with cacheable buffers.
 
+**From the same sources read again on 2026-11-13, pinned** (U-Boot at tag
+`v2024.10`: `drivers/net/bcmgenet.c`, `drivers/net/phy/phy.c` and
+`broadcom.c`; Linux at `v6.6`: `bcmgenet.h`, `bcmgenet.c`, `bcmmii.c` and
+`include/uapi/linux/mii.h`). Step 4 was written from these, and what they
+added to the list above:
+
+- **The two drivers disagree on the MAC's RGMII delay for `rgmii-rxid`.**
+  U-Boot sets `ID_MODE_DIS` in `EXT_RGMII_OOB_CTRL` for `rgmii` and for
+  `rgmii-rxid` (`bcmgenet_adjust_link`). Linux sets it for `rgmii` alone
+  (`bcmmii.c`, `bcmgenet_mii_config`). Both run this board.
+- **U-Boot's bring-up writes to the PHY, and this plan had it writing
+  nothing.** Its driver for the board's PHY (`bcm54210e_config`) sets the
+  PHY's own clock delays through two Broadcom shadow registers (for
+  `rgmii-rxid`: the receive skew on, the transmit delay off), restarts
+  autonegotiation, resets the PHY and sets its LEDs. It then reads the
+  speed from a Broadcom status register, not the standard ones. Decision
+  D7 is what to do about it.
+- **The receive producer index is 16 bits; the register's high half counts
+  discarded frames** (Linux's `DMA_P_INDEX_MASK` and
+  `DMA_P_INDEX_DISCARD_CNT_SHIFT`). U-Boot compares the whole register.
+- **U-Boot's wait for a send to complete never ends at the 65536th
+  frame**: it compares the consumer index's low 16 bits against a producer
+  it did not wrap.
+- **Linux drops a received frame** that is longer than its buffer, that
+  does not carry both the start and end flags, or that has any of five
+  error flags. U-Boot checks none of these.
+- **Linux masks and clears every interrupt of both blocks at set-up**
+  (`bcmgenet_intr_disable`). U-Boot never touches them.
+- **The device pads a short frame itself when it appends the checksum.**
+  Linux's transmit path says software padding of runt packets would be
+  needed only without `DMA_TX_APPEND_CRC` (`bcmgenet.c` line 2132), and
+  neither driver pads. (This line first said the opposite, from memory,
+  and the crate had a 60-byte minimum for an hour on the strength of it.)
+- **Linux turns on a 64-byte status block in both directions**
+  (`RBUF_64B_EN`, and `TBUF_64B_EN` at 0x0600 on v5); U-Boot leaves both
+  off, sets only the bit beside the first and never names the second. A
+  driver that follows U-Boot after a firmware that followed Linux would
+  find 64 bytes it does not expect before each received frame, and would
+  have the first 64 bytes of each frame it sends taken for a status
+  block.
+
 **Predicted, from memory of the Pi's devicetree and firmware sources, not
 read on 2026-11-12:** the PHY is a BCM54213PE at MDIO address 1; the first
 interrupt (189) carries the default queue and the link, the second (190)
@@ -160,8 +201,11 @@ and the design's point 2 is the answer to that.
    `xhci.rs` does none; frames are copied in and out at the syscall, as
    virtio-net's are. Without that entry the buffers are cacheable memory
    on a non-coherent device, and the fault would show only on the board:
-   step 5 has the check. How many receive buffers (U-Boot's 256 is half a
-   megabyte) is step 4's to settle.
+   step 5 has the check. **Settled in step 4: 256 receive buffers of 2048
+   bytes, half a megabyte, as U-Boot.** The ring could be given fewer
+   descriptors, and no source read here sets a smaller one up on this
+   device, so a smaller ring would be a reading of our own with nothing to
+   check it against but the board.
 6. **A NIC enum behind the syscalls, `netd` unchanged.** `nic.rs` holds
    `enum Nic { Virtio, Genet }` the way `block.rs` holds the disks, and
    `syscall.rs`'s cell holds a `Nic`. `NET_SEND`, `NET_RECV`, `NET_MAC` and
@@ -207,6 +251,28 @@ Each has a recommendation; none blocks step 2.
 - **D6. The pure crate** (design 2), or the driver written straight into
   the kernel as `sdhci.rs` was. Recommended: the crate. Without it nothing
   but the board can fail a check on the driver's logic.
+
+- **D7. The PHY's set-up** (new on 2026-11-13, from the sources read for
+  step 4; it replaces what D3 assumed, that nothing need be written to the
+  PHY). U-Boot writes the PHY's RGMII clock delays and resets it, and
+  reads the speed the PHY settled on from a Broadcom status register; the
+  `genet` crate as step 4 built it writes nothing to the PHY and reads the
+  link from the standard registers, which give the best speed both ends
+  advertise and so the wrong one when the PHY has dropped to a lower. What state the PHY is in when the
+  kernel gets it is not known: the firmware may have set it up, or not.
+  The choices: (a) write nothing, and learn from the board; (b) do what
+  U-Boot's `bcm54210e_config` and `bcm54xx_parse_status` do, as a step 4b
+  in the crate (an MDIO write, the two shadow registers, the resolved
+  speed, all only for a PHY whose identifier is this one's, host-tested
+  like the rest), before the board is tried. Recommended: (b). U-Boot is the one working driver for
+  this exact board that this plan follows everywhere else, and its MAC
+  setting (`ID_MODE_DIS`) is paired with its PHY setting; taking one
+  without the other is a combination nobody runs. A wrong delay shows as
+  frames with bad checksums or none at all, which on the board is hard to
+  tell from five other faults. With (b), `ID_MODE_DIS` stays as U-Boot has
+  it; if the board then disagrees, Linux's pairing is the one other thing
+  to try. **Does not block step 5's bring-up**, which sends nothing; it
+  should be settled before step 6.
 
 ## Steps, each with its check
 
@@ -378,6 +444,117 @@ Each has a recommendation; none blocks step 2.
    receive of a maximum-size frame, a frame longer than the buffer
    refused, and a busy MDIO that never clears ending in an error and not a
    hang. Every bound is mutated once.
+   **Built 2026-11-13, on the host (#455).** Two new modules in the crate, and
+   nothing in them touches memory: the packet buffers are the caller's,
+   and a frame is named by its buffer's index or its address.
+   `genet::mac` is the driver: `quiet` (design 4: interrupts masked, the
+   MAC's enables and both DMAs off, on v5 only), `Genet::init` (U-Boot's
+   probe and start, write for write, ending with the DMAs on and the MAC
+   off), `start` (the speed to the MAC and its enables, U-Boot's
+   `bcmgenet_adjust_link`), `has_frame` (one register read), `rx_next`
+   and `rx_release`, and `tx_send`. `genet::phy` is `link`: the status
+   register twice, then what both ends advertise, gigabit first, by the
+   standard registers and U-Boot's `genphy_parse_link` rule.
+   **Where it departs from U-Boot,** each stated in `mac.rs`'s module doc
+   and each with a test: the address is read before the reset and written
+   back, and an unusable one ends `init` before any write (design 3, D5);
+   every interrupt is masked first; both 64-byte status blocks are
+   cleared and the receive DMA's rings 0 to 15 disabled, so a firmware
+   that drove the device as Linux does leaves nothing behind (design 3);
+   the indexes are 16 bits; a received frame must be whole, unflagged and
+   inside its buffer; a buffer's address is computed, never read back
+   from the device; a send waits for the consumer to equal the producer
+   (U-Boot's comparison never ends at the 65536th frame), for at most
+   100 ms; and a send is refused while an earlier frame is still with the
+   device, because every send shares one buffer.
+   **Checked** (the figures are the first commit's; the review's are
+   below): 36 new host tests (34 of the driver, 2 of the citations) against a model device that is typed
+   from the sources as numbers, not from the crate's constants: `init`'s
+   writes and delays equal U-Boot's sequence, all 821 of them; a device
+   left running ends in the state a fresh one does, with no ring set up
+   under an enabled DMA; both counters across 65536 and the ring across
+   256, in each direction; a frame that fills its buffer taken and one
+   byte more dropped; each of the five error flags, and five bits that
+   are not errors; a full ring; the send bounds; a send done on the last
+   poll and one that is not; a frame the device never takes, across the
+   wrap too; the link at each speed and duplex, the latched status, a PHY
+   that does not answer and an MDIO bus that sticks (an error after one
+   command's 20 ms, not a hang). 66 mutations, one a rule or bound, each
+   failed a test. The first pass left one alive, U-Boot's own "consumer at
+   or past the producer" in place of equality, and it got the wrap test
+   that fails it. `cited_tests.rs` carries 108 constants, each with its
+   line in U-Boot `v2024.10` or Linux `v6.6`; a script checked that each
+   cited line defines that name (the sources are GPL and are not in this
+   tree, so the test checks the values).
+   **What none of this says:** the model is ours (design 2). The
+   sequence is U-Boot's and the tests hold the code to it; whether the
+   device does what the sources say is the board's to answer.
+   **Not built, on purpose:** any write to the PHY (D7), and the duplex
+   told to the MAC (U-Boot does not either).
+   **The review of #455** found no wrong offset, and ten things in what
+   the crate promises. Acted on:
+   - *Turning a DMA off was not waited for.* `quiet` said "after this the
+     device writes to no memory" and only cleared the enable bits, as
+     U-Boot does. Linux polls each DMA's status register until it says
+     disabled, and gives the MAC and the DMAs time to finish a frame.
+     The crate does that now (`DMA_STATUS`, 5 ms of polls a DMA, 2 ms
+     after the MAC's enables, 10 ms between the DMAs); `quiet` answers
+     whether each stopped, and `init` sets up no ring of a DMA that did
+     not (`InitError::DmaStuck`). The model's DMA winds down over a
+     number of status reads, so a ring written too early is a violation
+     a test sees.
+   - *A status of all ones read as a gigabit link.* A bus nobody drives
+     has every bit of "up, negotiated, 1000 full" set. `link` answers
+     `NoAnswer` for it, as the scan already counted it apart.
+   - *A release too many moved the consumer past the device.*
+     `rx_release` acts only on a frame `rx_next` returned and that has
+     not been released, and says whether it did.
+   - *A frame of 1 to 13 bytes, or of up to 2046, could be returned.*
+     The crate drops a frame under 14 bytes or over the 1536 it told the
+     device.
+   - *A second `start` turned the MAC off for one write.* The speed is
+     now written with the enables held.
+   - *Nothing could ask whether the transmit buffer was free.*
+     `tx_idle` is public, and `tx_send`'s doc says to ask it before the
+     copy. `Genet::stop` exists, so a device made quiet no longer says it
+     is started.
+   - Two models of the MDIO bus: the driver's gained the busy polls and
+     the unflagged all-ones answer the scan's has. They are still two.
+   **After the review:** 43 host tests of the driver and the link where
+   there were 34 (`make test`: 419 tests), `init` 822 writes and delays,
+   110 cited constants, and 81 mutations, each failed by a test. That
+   pass left two alive at first, both on the bound "no longer than its
+   buffer", which the new bound of 1536 had made unable to fail; it was
+   removed, and there is one bound.
+   Not acted on:
+   - *The speed read is the best both ends advertise, not the one the PHY
+     settled on.* A Broadcom PHY on a poor cable drops to 100 and goes on
+     advertising 1000; the MAC would be set to 1000 and nothing would
+     pass. U-Boot reads the resolved speed from a Broadcom register for
+     this reason. It is one read, and it is Broadcom-specific, so it is
+     part of D7 and of step 4b. `phy.rs` says so.
+   - *`tx_send` waits for the device to take the frame, under the kernel
+     lock.* Kept: it is the bound virtio-net's send has, and on the board
+     a send that reports its own failure is worth more than the time.
+     Returning at once and letting the next send wait is the change to
+     make if step 6 measures the wait to matter.
+   **For step 5, found here:**
+   - A received frame is 14 to 1536 bytes (the review made the crate hold
+     that itself), inside the ABI's 2036 and inside `netd`'s 1600-byte
+     buffers, so step 7's clamp in `netd` is owed for virtio-net's sake
+     and not for this device's.
+   - A send takes 14 to 1532 bytes. `netd`'s largest frame is 1514.
+   - The kernel's one transmit buffer may be written only when
+     `Genet::tx_idle` says so. After a send that timed out, the frame is
+     still the device's.
+   - `quiet` answers whether each DMA said it stopped. Only when both did
+     may the kernel take memory the firmware owned; the line it logs
+     otherwise is step 5's to word.
+   - The receive area is one static of 524,288 bytes, in the kernel's
+     image on every machine, the ones with no GENET too. Its range is the
+     second `uncached` entry of design 5.
+   - `tx_send` waits up to 100 ms under the kernel lock, the bound
+     virtio-net's send already has.
 
 5. **The board: bring-up and link.** One helper in `acpi.rs` for "the one
    device of this `_HID` declared present", used by this driver, the scan
