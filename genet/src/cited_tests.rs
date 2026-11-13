@@ -108,6 +108,8 @@ const CITED: &[(&str, u64, u64, Src, u32)] = &[
     ("INTRL2_CPU_MASK_SET", (reg::INTRL2_0_MASK_SET - 0x200) as u64, 0x10, L, 242),
     ("GENET_INTRL2_0_OFF", (reg::INTRL2_0_CLEAR - 0x08) as u64, 0x0200, L, 284),
     ("GENET_INTRL2_1_OFF", (reg::INTRL2_1_CLEAR - 0x08) as u64, 0x0240, L, 285),
+    ("DMA_DISABLED", DMA_DISABLED as u64, 1 << 0, L, 374),
+    ("DMA_TIMEOUT_VAL", DMA_STOP_POLLS as u64, 5000, L, 396),
     ("DMA_P_INDEX_MASK", DMA_INDEX_MASK as u64, 0xffff, L, 345),
     ("DMA_C_INDEX_MASK", DMA_INDEX_MASK as u64, 0xffff, L, 346),
     ("DMA_RX_LG", (DMA_RX_ERRORS & 0x10) as u64, 0x0010, L, 428),

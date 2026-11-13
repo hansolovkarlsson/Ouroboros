@@ -34,7 +34,15 @@
 //!   ([`TX_POLLS`]), where U-Boot's is 100 reads.
 //! - A send is refused while an earlier one is still with the device: all
 //!   sends share one buffer, and rewriting it under a frame not yet taken
-//!   would send the wrong bytes.
+//!   would send the wrong bytes. [`Genet::tx_idle`] is the question to ask
+//!   before the buffer is written.
+//! - Turning a DMA off is waited for: its status register is polled until
+//!   it says disabled, as Linux's `bcmgenet_dma_teardown` does, with the
+//!   waits Linux gives the MAC and the DMAs to finish a frame in flight.
+//!   U-Boot clears the enable bits and goes on. A ring is never set up
+//!   under a DMA that has not said it stopped.
+//! - A received frame shorter than an Ethernet header, or longer than the
+//!   maximum the device was told, is dropped, whatever the device says.
 //!
 //! **What this does not do:** it writes nothing to the PHY (`phy.rs` says
 //! why that is an open question), and it does not tell the MAC the duplex
@@ -58,18 +66,23 @@ pub const RX_PAD: usize = 2;
 /// descriptors would need less, and no source read here sets one up on
 /// this device, so the size is U-Boot's.
 pub const RX_AREA_LEN: usize = DESCS * RX_BUF_LEN;
-/// The longest received frame this can return: a buffer less the pad.
-pub const RX_MAX_FRAME: usize = RX_BUF_LEN - RX_PAD;
+/// The shortest frame there is, in either direction: an Ethernet header.
+/// This crate's own floor; neither source has one.
+pub const MIN_FRAME: usize = 14;
 /// `ENET_MAX_MTU_SIZE` (U-Boot): 1500 of data, 14 of header, 4 of VLAN tag,
 /// 6 of Broadcom tag, 4 of checksum and 8 of pad. Written to
 /// `UMAC_MAX_FRAME_LEN`.
 pub const MAX_FRAME_LEN: u32 = 1500 + 14 + 4 + 6 + 4 + 8;
-/// The shortest frame a send takes: an Ethernet header, this crate's own
-/// floor. A frame shorter than Ethernet's 60 is the device's to pad:
-/// Linux's `bcmgenet_xmit` says software padding of runt packets would
-/// only be needed without `DMA_TX_APPEND_CRC` (`bcmgenet.c` line 2132),
-/// and U-Boot pads nothing either.
-pub const TX_MIN_FRAME: usize = 14;
+/// The longest received frame this returns: the maximum the device is
+/// told. A buffer holds more ([`RX_BUF_LEN`] less the pad), and a frame
+/// the device lets through above this is dropped here.
+pub const RX_MAX_FRAME: usize = MAX_FRAME_LEN as usize;
+/// The shortest frame a send takes, [`MIN_FRAME`]. A frame shorter than
+/// Ethernet's 60 is the device's to pad: Linux's `bcmgenet_xmit` says
+/// software padding of runt packets would only be needed without
+/// `DMA_TX_APPEND_CRC` (`bcmgenet.c` line 2132), and U-Boot pads nothing
+/// either.
+pub const TX_MIN_FRAME: usize = MIN_FRAME;
 /// The longest frame a send takes: [`MAX_FRAME_LEN`] less the checksum.
 pub const TX_MAX_FRAME: usize = MAX_FRAME_LEN as usize - 4;
 
@@ -88,9 +101,9 @@ pub const CMD_SPEED_SHIFT: u32 = 2;
 pub const MIB_RESET_ALL: u32 = 0b111;
 /// `RBUF_64B_EN` (Linux) and `RBUF_ALIGN_2B` (U-Boot), in `RBUF_CTRL`.
 pub const RBUF_64B_EN: u32 = 1 << 0;
+pub const RBUF_ALIGN_2B: u32 = 1 << 1;
 /// `TBUF_64B_EN` (Linux), in `TBUF_CTRL`.
 pub const TBUF_64B_EN: u32 = 1 << 0;
-pub const RBUF_ALIGN_2B: u32 = 1 << 1;
 /// `RGMII_LINK`, `OOB_DISABLE`, `RGMII_MODE_EN`, `ID_MODE_DIS` (U-Boot), in
 /// `EXT_RGMII_OOB_CTRL`.
 pub const RGMII_LINK: u32 = 1 << 4;
@@ -135,6 +148,19 @@ pub const DMA_RX_ERRORS: u32 = 0x0001 | 0x0002 | 0x0004 | 0x0008 | 0x0010;
 /// `DMA_P_INDEX_MASK` and `DMA_C_INDEX_MASK` (Linux): an index is 16 bits.
 pub const DMA_INDEX_MASK: u32 = 0xffff;
 
+/// `DMA_DISABLED` (Linux), in either `DMA_STATUS`: the DMA has stopped.
+pub const DMA_DISABLED: u32 = 1 << 0;
+/// The most polls of `DMA_STATUS` a DMA turned off gets, a microsecond
+/// apart: Linux's `DMA_TIMEOUT_VAL`, 5 ms.
+pub const DMA_STOP_POLLS: u32 = 5000;
+/// The wait after the MAC's enables go off, in microseconds: it stops on
+/// a frame boundary, and Linux's `umac_enable_set` sleeps 1 to 2 ms for a
+/// full-size frame to pass.
+pub const MAC_STOP_US: u32 = 2000;
+/// The wait between the two DMAs going off, in microseconds: Linux's
+/// "wait 10ms for packet drain in both tx and rx dma".
+pub const DMA_DRAIN_US: u32 = 10_000;
+
 /// The most polls of the consumer index one send gets, each but the first
 /// after a [`TX_POLL_US`] wait: 100 ms in all, the bound the kernel gives
 /// virtio-net's send.
@@ -149,6 +175,8 @@ const _: () = {
     // A buffer's length and a frame's both fit a descriptor's 12-bit
     // length field.
     assert!(TX_MAX_FRAME <= RX_BUF_LEN && RX_BUF_LEN <= DMA_BUFLENGTH_MASK as usize);
+    // The longest frame returned fits a buffer after the pad.
+    assert!(RX_MAX_FRAME + RX_PAD <= RX_BUF_LEN);
     // The ring index is the counter's low byte: 256 divides 65536.
     assert!(DESCS == 256);
 };
@@ -163,6 +191,25 @@ pub enum InitError {
     NoMac([u8; 6]),
     /// The receive area's address is zero or runs past 2^64.
     BadBuffers,
+    /// A DMA did not say it stopped (the one exception to "nothing was
+    /// written": the device was reset and the DMAs told to stop, and no
+    /// ring or descriptor was touched).
+    DmaStuck(Stopped),
+}
+
+/// Whether each DMA said it stopped within [`DMA_STOP_POLLS`] of being
+/// turned off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Stopped {
+    pub tdma: bool,
+    pub rdma: bool,
+}
+
+impl Stopped {
+    /// Both stopped: the device writes to no memory and reads none.
+    pub fn both(&self) -> bool {
+        self.tdma && self.rdma
+    }
 }
 
 /// Why a send did not happen or was not seen to.
@@ -181,9 +228,10 @@ pub enum TxError {
 /// Why a received frame was dropped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RxDrop {
-    /// Its length is more than its buffer.
+    /// Its length is more than its buffer, or more than
+    /// [`RX_MAX_FRAME`].
     Oversize,
-    /// Its length is no more than the pad.
+    /// It is shorter than [`MIN_FRAME`].
     Runt,
     /// It does not start and end in this buffer.
     Fragment,
@@ -198,9 +246,10 @@ pub enum Rx {
     None,
     /// A frame: `len` bytes at `offset` in buffer `buffer` of the receive
     /// area (the buffer is at `buffer * RX_BUF_LEN`). It stays there until
-    /// [`Genet::rx_release`].
+    /// [`Genet::rx_release`]. `len` is [`MIN_FRAME`] to [`RX_MAX_FRAME`].
     Frame { buffer: usize, offset: usize, len: usize },
-    /// A frame was waiting, was not usable, and has been released.
+    /// A frame was waiting, was not usable, and has been released: there
+    /// is nothing for the caller to release.
     Dropped(RxDrop),
 }
 
@@ -225,6 +274,8 @@ pub struct Genet {
     /// The transmit producer index: frames handed over, 16 bits.
     tx_prod: u16,
     started: bool,
+    /// Whether `rx_next` has returned a frame not yet released.
+    rx_held: bool,
     drops: Drops,
 }
 
@@ -233,14 +284,31 @@ fn set<B: Bus>(bus: &mut B, offset: usize, clear: u32, bits: u32) {
     bus.write(offset, (v & !clear) | bits);
 }
 
-/// U-Boot's `bcmgenet_disable_dma`: both DMAs' enable bits off, then the
-/// transmit FIFO flushed.
-fn disable_dma<B: Bus>(bus: &mut B) {
+/// Polls a `DMA_STATUS` until it says disabled, at most
+/// [`DMA_STOP_POLLS`] times a microsecond apart.
+fn dma_stopped<B: Bus>(bus: &mut B, status: usize) -> bool {
+    for _ in 0..DMA_STOP_POLLS {
+        if bus.read(status) & DMA_DISABLED != 0 {
+            return true;
+        }
+        bus.delay_us(1);
+    }
+    false
+}
+
+/// Both DMAs off and seen to be: Linux's `bcmgenet_dma_teardown` (the
+/// transmit DMA first, the wait for frames in flight, then the receive
+/// DMA, each polled), then U-Boot's flush of the transmit FIFO.
+fn stop_dma<B: Bus>(bus: &mut B) -> Stopped {
     set(bus, reg::TDMA_CTRL, DMA_EN, 0);
+    let tdma = dma_stopped(bus, reg::TDMA_STATUS);
+    bus.delay_us(DMA_DRAIN_US);
     set(bus, reg::RDMA_CTRL, DMA_EN, 0);
+    let rdma = dma_stopped(bus, reg::RDMA_STATUS);
     bus.write(reg::UMAC_TX_FLUSH, 1);
     bus.delay_us(10);
     bus.write(reg::UMAC_TX_FLUSH, 0);
+    Stopped { tdma, rdma }
 }
 
 /// Linux's `bcmgenet_intr_disable`: every interrupt of both blocks masked,
@@ -254,17 +322,21 @@ fn mask_interrupts<B: Bus>(bus: &mut B) {
 
 /// Makes a device the firmware may have left running quiet (the plan's
 /// design 4): its interrupts masked, the MAC's transmitter and receiver
-/// off, both DMAs off (U-Boot's `bcmgenet_gmac_eth_stop`, after the
-/// masking). Does it only to GENET v5, and returns whether it did. After
-/// this the device writes to no memory.
-pub fn quiet<B: Bus>(bus: &mut B) -> bool {
+/// off and given [`MAC_STOP_US`] to finish a frame, then both DMAs off
+/// and polled until each says so. Does it only to GENET v5: `None` is
+/// any other version, with nothing written. **Only when the answer's
+/// `both()` is true does the device write to no memory**; otherwise a DMA
+/// was told to stop and did not say it had, and the caller must not take
+/// the memory the firmware gave it. About 12 ms on a device that stops,
+/// 22 ms on one that does not.
+pub fn quiet<B: Bus>(bus: &mut B) -> Option<Stopped> {
     if version(bus.read(reg::SYS_REV_CTRL)).0 != MAJOR_V5 {
-        return false;
+        return None;
     }
     mask_interrupts(bus);
     set(bus, reg::UMAC_CMD, CMD_TX_EN | CMD_RX_EN, 0);
-    disable_dma(bus);
-    true
+    bus.delay_us(MAC_STOP_US);
+    Some(stop_dma(bus))
 }
 
 impl Genet {
@@ -323,7 +395,12 @@ impl Genet {
         bus.write(reg::UMAC_MAC0, u32::from_be_bytes([address[0], address[1], address[2], address[3]]));
         bus.write(reg::UMAC_MAC1, u32::from_be_bytes([0, 0, address[4], address[5]]));
 
-        disable_dma(bus);
+        // bcmgenet_disable_dma, and each DMA seen to have stopped before
+        // its ring is touched.
+        let stopped = stop_dma(bus);
+        if !stopped.both() {
+            return Err(InitError::DmaStuck(stopped));
+        }
 
         // rx_ring_init. The device's producer index cannot be set, so the
         // consumer is aligned on it.
@@ -364,7 +441,7 @@ impl Genet {
         bus.write(reg::TDMA_CTRL, DMA_RING16_EN | DMA_EN);
         set(bus, reg::RDMA_CTRL, DMA_RINGS_0_15_EN, DMA_RING16_EN | DMA_EN);
 
-        Ok(Genet { mac: address, rx_cons, tx_prod, started: false, drops: Drops::default() })
+        Ok(Genet { mac: address, rx_cons, tx_prod, started: false, rx_held: false, drops: Drops::default() })
     }
 
     /// The station address read before the reset and written back after.
@@ -385,13 +462,29 @@ impl Genet {
     /// Tells the MAC the link's speed and turns its transmitter and
     /// receiver on: U-Boot's `bcmgenet_adjust_link` for the board's
     /// `rgmii-rxid`, then its last step. Run it once the PHY reports a
-    /// link, and again when a later link comes up at another speed.
+    /// link, and again when a later link comes up at another speed: on a
+    /// MAC already on, the speed changes with the enables held (U-Boot's
+    /// own write of the speed alone would turn a running MAC off for one
+    /// write). The first time the writes are U-Boot's.
     pub fn start<B: Bus>(&mut self, bus: &mut B, speed: Speed) {
         set(bus, reg::EXT_RGMII_OOB_CTRL, OOB_DISABLE, RGMII_LINK | RGMII_MODE_EN);
         set(bus, reg::EXT_RGMII_OOB_CTRL, 0, ID_MODE_DIS);
-        bus.write(reg::UMAC_CMD, (speed as u32) << CMD_SPEED_SHIFT);
+        let enables = bus.read(reg::UMAC_CMD) & (CMD_TX_EN | CMD_RX_EN);
+        bus.write(reg::UMAC_CMD, ((speed as u32) << CMD_SPEED_SHIFT) | enables);
         set(bus, reg::UMAC_CMD, 0, CMD_TX_EN | CMD_RX_EN);
         self.started = true;
+    }
+
+    /// Makes the device quiet again, as [`quiet`] does, and forgets that
+    /// it was started: a send is refused until the next
+    /// [`start`](Self::start). The rings are as they were; a frame held by
+    /// [`rx_next`](Self::rx_next) is still held.
+    pub fn stop<B: Bus>(&mut self, bus: &mut B) -> Stopped {
+        self.started = false;
+        mask_interrupts(bus);
+        set(bus, reg::UMAC_CMD, CMD_TX_EN | CMD_RX_EN, 0);
+        bus.delay_us(MAC_STOP_US);
+        stop_dma(bus)
     }
 
     /// Whether a received frame waits: one register read, nothing written,
@@ -421,29 +514,49 @@ impl Genet {
         } else if len_stat & DMA_RX_ERRORS != 0 {
             self.drops.flagged = self.drops.flagged.saturating_add(1);
             RxDrop::Flagged(len_stat as u16)
-        } else if length <= RX_PAD {
+        } else if length < RX_PAD + MIN_FRAME {
             self.drops.runt = self.drops.runt.saturating_add(1);
             RxDrop::Runt
+        } else if length > RX_PAD + RX_MAX_FRAME {
+            self.drops.oversize = self.drops.oversize.saturating_add(1);
+            RxDrop::Oversize
         } else {
+            self.rx_held = true;
             return Rx::Frame { buffer, offset: RX_PAD, len: length - RX_PAD };
         };
-        self.rx_release(bus);
+        self.rx_advance(bus);
         Rx::Dropped(drop)
     }
 
     /// Gives the frame [`rx_next`](Self::rx_next) returned back to the
     /// device: its buffer is the device's to fill again. U-Boot's
-    /// `bcmgenet_gmac_free_pkt`.
-    pub fn rx_release<B: Bus>(&mut self, bus: &mut B) {
+    /// `bcmgenet_gmac_free_pkt`. Does nothing, and returns false, unless
+    /// `rx_next` returned a [`Rx::Frame`] that has not been released: a
+    /// release too many would put the consumer index past the device's
+    /// producer, and every frame after would be read from the wrong
+    /// place.
+    pub fn rx_release<B: Bus>(&mut self, bus: &mut B) -> bool {
+        if !self.rx_held {
+            return false;
+        }
+        self.rx_held = false;
+        self.rx_advance(bus);
+        true
+    }
+
+    fn rx_advance<B: Bus>(&mut self, bus: &mut B) {
         self.rx_cons = self.rx_cons.wrapping_add(1);
         bus.write(reg::RDMA_CONS_INDEX, u32::from(self.rx_cons));
     }
 
     /// Sends the `len` bytes at `addr` (the address as the device sees it)
     /// as one frame, the device appending the checksum, and waits for the
-    /// device to take them, at most [`TX_POLLS`] polls. The bytes must stay as they
-    /// are until this returns `Ok`, or until a later call no longer
-    /// returns [`TxError::Busy`].
+    /// device to take them, at most [`TX_POLLS`] polls. The bytes must
+    /// stay as they are until this returns `Ok` or, after a
+    /// [`TxError::Timeout`], until [`tx_idle`](Self::tx_idle) is true. A
+    /// caller with one buffer for every send asks `tx_idle` **before** it
+    /// writes the next frame into it: the `Busy` this returns comes after
+    /// the caller's copy, too late to save the frame still queued.
     pub fn tx_send<B: Bus>(&mut self, bus: &mut B, addr: u64, len: usize) -> Result<(), TxError> {
         if !self.started {
             return Err(TxError::NotStarted);
@@ -471,8 +584,9 @@ impl Genet {
         Err(TxError::Timeout)
     }
 
-    /// Whether the device has taken every frame handed to it.
-    fn tx_idle<B: Bus>(&self, bus: &mut B) -> bool {
+    /// Whether the device has taken every frame handed to it, so that the
+    /// bytes of the last one may be written over. One register read.
+    pub fn tx_idle<B: Bus>(&self, bus: &mut B) -> bool {
         (bus.read(reg::TDMA_CONS_INDEX) & DMA_INDEX_MASK) as u16 == self.tx_prod
     }
 }

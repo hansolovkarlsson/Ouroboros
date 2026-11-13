@@ -7,8 +7,16 @@
 //!
 //! The rule for the speed is U-Boot's `genphy_parse_link`
 //! (`drivers/net/phy/phy.c`): what both ends advertise, gigabit first.
-//! U-Boot's own driver for the Pi's PHY reads a Broadcom status register
-//! where this reads the standard ones.
+//!
+//! **That is the best speed the two ends could agree on, not the speed the
+//! PHY settled on.** A Broadcom PHY that cannot hold gigabit on the cable
+//! it has (two pairs, or a bad one) drops to 100 on its own and goes on
+//! advertising 1000. This file would then report 1000, the MAC would be
+//! set to it, and no frame would pass in either direction, with no error
+//! anywhere. U-Boot's driver for the Pi's PHY reads the speed the PHY
+//! resolved from a Broadcom status register (`bcm54xx_parse_status`,
+//! register 0x19) for that reason. Reading it belongs with the rest of
+//! the Broadcom-specific set-up, decision D7.
 
 use crate::{mdio_read, Bus, MdioError, BMSR_ANEG_DONE, BMSR_LINK, PHY_BMSR};
 
@@ -70,10 +78,17 @@ pub enum Link {
 /// bit latches low, so the first reading can be an old drop), and for a
 /// negotiated link the advertisement registers of both ends. At most six
 /// MDIO reads, each bounded as [`mdio_read`] is, and no write but those
-/// read commands.
+/// read commands. A status that reads all ones is no PHY's answer and is
+/// [`MdioError::NoAnswer`].
 pub fn link<B: Bus>(bus: &mut B, phy: u8) -> Result<Link, MdioError> {
     mdio_read(bus, phy, PHY_BMSR)?;
     let bmsr = mdio_read(bus, phy, PHY_BMSR)?;
+    // All ones is a bus nobody drives (no PHY, or one held in reset), with
+    // every bit of "link up at gigabit" set. The scan counts it apart for
+    // the same reason.
+    if bmsr == 0xffff {
+        return Err(MdioError::NoAnswer);
+    }
     if bmsr & BMSR_LINK == 0 {
         return Ok(Link::Down);
     }

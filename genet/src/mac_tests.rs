@@ -29,8 +29,12 @@ use Op::{D, W};
 /// software reset that loses the station address (our assumption, the
 /// reason the driver reads it first), and one PHY on MDIO.
 ///
+/// A DMA turned off goes on running until its status register has been
+/// read `dma_stop_lag` times (Linux polls it; the lag is ours to set).
+///
 /// What it watches: a ring's set-up registers and the receive descriptors
-/// written while that DMA is enabled are `violations`.
+/// written while that DMA is enabled, or turned off and not yet stopped,
+/// are `violations`.
 struct Dev {
     regs: BTreeMap<usize, u32>,
     ops: Vec<Op>,
@@ -52,6 +56,17 @@ struct Dev {
     bmsr_first: Option<u16>,
     mdio: u32,
     mdio_stuck: bool,
+    /// Reads of `MDIO_CMD` a started command stays busy for.
+    mdio_busy: u32,
+    mdio_busy_left: u32,
+    mdio_result: u32,
+    /// An address with no PHY reads all ones with no flag, where it is
+    /// flagged otherwise.
+    mdio_ones: bool,
+    /// Reads of a `DMA_STATUS` before a DMA turned off says disabled;
+    /// `u32::MAX` is never. (transmit, receive)
+    dma_stop_lag: (u32, u32),
+    dma_stop_left: (u32, u32),
 }
 
 const SYS_REV: usize = 0x00;
@@ -104,6 +119,12 @@ fn board() -> Dev {
         bmsr_first: None,
         mdio: 0,
         mdio_stuck: false,
+        mdio_busy: 0,
+        mdio_busy_left: 0,
+        mdio_result: 0,
+        mdio_ones: false,
+        dma_stop_lag: (0, 0),
+        dma_stop_left: (0, 0),
     }
 }
 
@@ -121,6 +142,18 @@ fn left_running() -> Dev {
 }
 
 impl Dev {
+    fn dma_status(ctrl: u32, left: &mut u32) -> u32 {
+        if ctrl & 1 != 0 {
+            return 0;
+        }
+        if *left == 0 {
+            return 1;
+        }
+        if *left != u32::MAX {
+            *left -= 1;
+        }
+        0
+    }
     fn reg(&self, offset: usize) -> u32 {
         self.regs.get(&offset).copied().unwrap_or(0)
     }
@@ -171,7 +204,19 @@ impl Bus for Dev {
                 }
                 u32::from(self.tx_cons)
             }
-            MDIO => self.mdio,
+            MDIO => {
+                if self.mdio & (1 << 29) != 0 && !self.mdio_stuck {
+                    if self.mdio_busy_left > 0 {
+                        self.mdio_busy_left -= 1;
+                    } else {
+                        self.mdio = self.mdio_result;
+                    }
+                }
+                self.mdio
+            }
+            // DMA_STATUS: disabled once the DMA is off and has wound down.
+            0x5048 => Self::dma_status(self.reg(TDMA_CTL), &mut self.dma_stop_left.0),
+            0x3048 => Self::dma_status(self.reg(RDMA_CTL), &mut self.dma_stop_left.1),
             _ => self.reg(offset),
         }
     }
@@ -181,8 +226,17 @@ impl Bus for Dev {
         self.ops.push(W(offset, value));
         let rx_setup = matches!(offset, 0x3000 | 0x3010 | 0x3014 | 0x301c | 0x3028 | 0x302c | 0x3040 | 0x304c) || (RX_DESC..RX_DESC + 256 * 12).contains(&offset);
         let tx_setup = matches!(offset, 0x5000 | 0x5010 | 0x5014 | 0x501c | 0x5024 | 0x5028 | 0x502c | 0x5040 | 0x504c);
-        if (rx_setup && self.reg(RDMA_CTL) & 1 != 0) || (tx_setup && self.reg(TDMA_CTL) & 1 != 0) {
-            self.violations.push(format!("{offset:#x} written with its DMA enabled"));
+        let rx_live = self.reg(RDMA_CTL) & 1 != 0 || self.dma_stop_left.1 > 0;
+        let tx_live = self.reg(TDMA_CTL) & 1 != 0 || self.dma_stop_left.0 > 0;
+        if (rx_setup && rx_live) || (tx_setup && tx_live) {
+            self.violations.push(format!("{offset:#x} written with its DMA running"));
+        }
+        // A DMA turned off starts winding down.
+        if offset == TDMA_CTL && self.reg(TDMA_CTL) & 1 != 0 && value & 1 == 0 {
+            self.dma_stop_left.0 = self.dma_stop_lag.0;
+        }
+        if offset == RDMA_CTL && self.reg(RDMA_CTL) & 1 != 0 && value & 1 == 0 {
+            self.dma_stop_left.1 = self.dma_stop_lag.1;
         }
         match offset {
             // The two indexes the device owns.
@@ -218,7 +272,10 @@ impl Bus for Dev {
                     }
                     let (phy, r) = (((value >> 21) & 0x1f) as u8, ((value >> 16) & 0x1f) as usize);
                     let command = value & !(1 << 29);
-                    self.mdio = if phy != self.phy {
+                    self.mdio_busy_left = self.mdio_busy;
+                    self.mdio_result = if phy != self.phy && self.mdio_ones {
+                        command | 0xffff
+                    } else if phy != self.phy {
                         command | 1 << 28
                     } else if r == 1 {
                         command | u32::from(self.bmsr_first.take().unwrap_or(self.phy_regs[1]))
@@ -270,8 +327,8 @@ fn init_is_u_boots_sequence_write_for_write() {
         W(0xd80, 7), W(0xd80, 0), W(0x814, 1536), W(0x300, 2), W(0x600, 0), W(0x3b4, 1),
         // bcmgenet_gmac_write_hwaddr.
         W(0x80c, 0xdca6_3201), W(0x810, 0x0000_0203),
-        // bcmgenet_disable_dma.
-        W(0x5044, 0), W(0x3044, 0), W(0xb34, 1), D(10), W(0xb34, 0),
+        // bcmgenet_disable_dma, with Linux's wait between the two DMAs.
+        W(0x5044, 0), D(10_000), W(0x3044, 0), W(0xb34, 1), D(10), W(0xb34, 0),
         // rx_ring_init: the consumer aligned on the producer's low half.
         W(0x304c, 8), W(0x3014, 0), W(0x302c, 0), W(0x3000, 0), W(0x301c, 767),
         W(0x300c, 0x1234), W(0x3010, 0x0100_0800), W(0x3028, 0x0005_0010), W(0x3040, 0x0001_0000),
@@ -319,7 +376,7 @@ fn any_other_version_is_refused_with_nothing_written() {
         assert_eq!(Genet::init(&mut d, RX_BASE).unwrap_err(), InitError::NotV5(rev));
         assert!(d.ops.is_empty());
         assert_eq!(d.reads, [SYS_REV]);
-        assert!(!quiet(&mut d));
+        assert_eq!(quiet(&mut d), None);
         assert!(d.ops.is_empty(), "quiet wrote to version {rev:#x}");
     }
 }
@@ -376,17 +433,68 @@ fn a_device_left_running_ends_in_the_same_state() {
 #[test]
 fn quiet_turns_off_what_can_write_memory_or_interrupt() {
     let mut d = left_running();
-    assert!(quiet(&mut d));
+    assert_eq!(quiet(&mut d), Some(Stopped { tdma: true, rdma: true }));
     assert_eq!(
         d.ops,
         [
             W(0x210, 0xffff_ffff), W(0x208, 0xffff_ffff), W(0x250, 0xffff_ffff), W(0x248, 0xffff_ffff),
-            // The enables off, the speed bits kept.
-            W(0x808, 0x08),
-            W(0x5044, 0x0002_0002), W(0x3044, 0x0002_0002), W(0xb34, 1), D(10), W(0xb34, 0),
+            // The enables off, the speed bits kept, and a frame's time.
+            W(0x808, 0x08), D(2000),
+            // The transmit DMA, the drain, the receive DMA, the flush.
+            W(0x5044, 0x0002_0002), D(10_000), W(0x3044, 0x0002_0002), W(0xb34, 1), D(10), W(0xb34, 0),
         ]
     );
     assert!(!d.rx_running() && !d.tx_running());
+}
+
+#[test]
+fn a_dma_is_waited_for_until_it_says_it_stopped() {
+    // Each takes some polls to stop: a microsecond's wait for each.
+    let mut d = left_running();
+    d.dma_stop_lag = (7, 40);
+    assert_eq!(quiet(&mut d), Some(Stopped { tdma: true, rdma: true }));
+    assert_eq!(d.delayed_us(), 2000 + 7 + 10_000 + 40 + 10);
+    // The last poll allowed is believed; one more is not waited for.
+    let mut d = left_running();
+    d.dma_stop_lag = (4999, 5000);
+    assert_eq!(quiet(&mut d), Some(Stopped { tdma: true, rdma: false }));
+    assert_eq!(d.delayed_us(), 2000 + 4999 + 10_000 + 5000 + 10);
+    let mut d = left_running();
+    d.dma_stop_lag = (u32::MAX, 0);
+    let stopped = quiet(&mut d).unwrap();
+    assert_eq!(stopped, Stopped { tdma: false, rdma: true });
+    assert!(!stopped.both());
+    assert!(quiet(&mut left_running()).unwrap().both());
+}
+
+#[test]
+fn init_touches_no_ring_of_a_dma_that_did_not_stop() {
+    for lag in [(u32::MAX, 0), (0, u32::MAX)] {
+        let mut d = left_running();
+        d.dma_stop_lag = lag;
+        let stopped = Stopped { tdma: lag.0 == 0, rdma: lag.1 == 0 };
+        assert_eq!(Genet::init(&mut d, RX_BASE).unwrap_err(), InitError::DmaStuck(stopped));
+        assert!(d.violations.is_empty(), "{:?}", d.violations);
+        // Nothing at or past the receive descriptors but the two controls.
+        assert!(d.writes().iter().all(|w| w.0 < 0x2000 || w.0 == 0x3044 || w.0 == 0x5044), "{:?}", d.writes());
+    }
+    // A DMA slow to stop is waited for, and then set up.
+    let mut d = left_running();
+    d.dma_stop_lag = (300, 300);
+    assert!(Genet::init(&mut d, RX_BASE).is_ok());
+    assert!(d.violations.is_empty(), "{:?}", d.violations);
+}
+
+#[test]
+fn stop_makes_it_quiet_and_a_send_is_refused_until_the_next_start() {
+    let mut d = board();
+    let mut g = up(&mut d);
+    assert_eq!(g.stop(&mut d), Stopped { tdma: true, rdma: true });
+    assert!(!g.started() && !d.rx_running() && !d.tx_running());
+    assert_eq!((d.reg(RDMA_CTL) & 1, d.reg(TDMA_CTL) & 1, d.reg(UMAC_CMD) & 3), (0, 0, 0));
+    d.ops.clear();
+    assert_eq!(g.tx_send(&mut d, TX_ADDR, 60), Err(TxError::NotStarted));
+    assert!(d.ops.is_empty());
 }
 
 #[test]
@@ -399,6 +507,7 @@ fn start_tells_the_mac_the_speed_then_turns_it_on() {
         // bcmgenet_adjust_link: OOB_DISABLE (0x20) off, RGMII_LINK and
         // RGMII_MODE_EN on, then ID_MODE_DIS; the speed; the enables.
         assert_eq!(d.ops, [W(0x8c, 0x50), W(0x8c, 0x0001_0050), W(0x808, word), W(0x808, word | 3)]);
+        assert!(!d.ops.contains(&D(0)));
         assert!(g.started() && d.rx_running() && d.tx_running());
     }
 }
@@ -410,6 +519,9 @@ fn a_second_start_changes_the_speed_and_leaves_the_mac_on() {
     g.start(&mut d, Speed::S100);
     assert_eq!(d.reg(UMAC_CMD), 0x7);
     assert_eq!(d.reg(OOB), 0x0001_0050);
+    // The MAC was never off on the way: every write to it had both enables.
+    let cmds: Vec<u32> = d.writes().iter().filter(|w| w.0 == UMAC_CMD).map(|w| w.1).collect();
+    assert_eq!(cmds, [0x7, 0x7]);
 }
 
 // ---- receive ----
@@ -436,10 +548,30 @@ fn a_frame_is_returned_where_it_lies_until_released() {
     // Looking is not taking: the same frame again, and nothing written.
     assert_eq!(g.rx_next(&mut d), frame);
     assert!(d.ops.is_empty());
-    g.rx_release(&mut d);
+    assert!(g.rx_release(&mut d));
     assert_eq!(d.ops, [W(RDMA_CONS, 6)]);
     assert!(!g.has_frame(&mut d));
     assert_eq!(g.rx_next(&mut d), Rx::None);
+}
+
+#[test]
+fn a_release_with_no_frame_held_does_nothing() {
+    let mut d = board();
+    let mut g = up(&mut d);
+    // Nothing was returned.
+    assert!(!g.rx_release(&mut d));
+    // A second release of one frame.
+    assert!(d.deliver(60));
+    assert!(matches!(g.rx_next(&mut d), Rx::Frame { .. }));
+    assert!(g.rx_release(&mut d));
+    assert!(!g.rx_release(&mut d));
+    // A dropped frame was released by rx_next itself.
+    assert!(d.deliver_raw(66, 0));
+    assert_eq!(g.rx_next(&mut d), Rx::Dropped(RxDrop::Fragment));
+    assert!(!g.rx_release(&mut d));
+    // The consumer moved twice, once a frame, and is level with the device.
+    assert_eq!(d.writes(), [(RDMA_CONS, 1), (RDMA_CONS, 2)]);
+    assert!(!g.has_frame(&mut d));
 }
 
 #[test]
@@ -488,14 +620,15 @@ fn the_discard_count_in_the_high_half_is_not_a_frame() {
 }
 
 #[test]
-fn a_frame_that_fills_its_buffer_is_taken_and_one_byte_more_is_not() {
+fn the_longest_frame_is_the_devices_maximum_and_one_byte_more_is_not() {
     let mut d = board();
     let mut g = up(&mut d);
-    // 2046 bytes and the pad are the buffer's 2048.
-    assert!(d.deliver(2046));
-    assert_eq!(g.rx_next(&mut d), Rx::Frame { buffer: 0, offset: 2, len: 2046 });
+    // 1536 is what init told the device; with the pad, 1538.
+    assert!(d.deliver(1536));
+    assert_eq!(g.rx_next(&mut d), Rx::Frame { buffer: 0, offset: 2, len: 1536 });
     g.rx_release(&mut d);
-    for length in [2049, 0xfff] {
+    // One more, the buffer's own 2048, one past it, the field's most.
+    for length in [1539, 2048, 2049, 0xfff] {
         d.ops.clear();
         assert!(d.deliver_raw(length, 0x6000));
         assert_eq!(g.rx_next(&mut d), Rx::Dropped(RxDrop::Oversize), "length {length}");
@@ -503,20 +636,21 @@ fn a_frame_that_fills_its_buffer_is_taken_and_one_byte_more_is_not() {
         assert_eq!(d.ops.len(), 1);
         assert!(!g.has_frame(&mut d));
     }
-    assert_eq!(g.drops(), Drops { oversize: 2, ..Drops::default() });
+    assert_eq!(g.drops(), Drops { oversize: 4, ..Drops::default() });
 }
 
 #[test]
-fn a_frame_no_longer_than_the_pad_is_a_runt() {
+fn a_frame_shorter_than_a_header_is_a_runt() {
     let mut d = board();
     let mut g = up(&mut d);
-    for length in [0, 1, 2] {
+    // Nothing, less than the pad, the pad alone, a byte short of a header.
+    for length in [0, 1, 2, 15] {
         assert!(d.deliver_raw(length, 0x6000));
-        assert_eq!(g.rx_next(&mut d), Rx::Dropped(RxDrop::Runt));
+        assert_eq!(g.rx_next(&mut d), Rx::Dropped(RxDrop::Runt), "length {length}");
     }
-    assert!(d.deliver_raw(3, 0x6000));
-    assert_eq!(g.rx_next(&mut d), Rx::Frame { buffer: 3, offset: 2, len: 1 });
-    assert_eq!(g.drops().runt, 3);
+    assert!(d.deliver_raw(16, 0x6000));
+    assert_eq!(g.rx_next(&mut d), Rx::Frame { buffer: 4, offset: 2, len: 14 });
+    assert_eq!(g.drops().runt, 4);
 }
 
 #[test]
@@ -681,6 +815,22 @@ fn a_frame_the_device_never_takes_blocks_the_next_send_until_it_does() {
 }
 
 #[test]
+fn tx_idle_says_when_the_shared_buffer_may_be_written() {
+    let mut d = board();
+    let mut g = up(&mut d);
+    assert!(g.tx_idle(&mut d));
+    d.tx_dead = true;
+    assert_eq!(g.tx_send(&mut d, TX_ADDR, 60), Err(TxError::Timeout));
+    d.ops.clear();
+    // The frame is still the device's: one read says so, nothing written.
+    assert!(!g.tx_idle(&mut d));
+    assert!(d.ops.is_empty());
+    d.tx_dead = false;
+    d.tx_target = 1;
+    assert!(g.tx_idle(&mut d));
+}
+
+#[test]
 fn a_frame_not_taken_across_the_wrap_is_not_seen_as_taken() {
     // The producer wraps to 0 and the consumer stays at 0xffff: "consumer
     // at or past the producer", U-Boot's test, would call that done.
@@ -785,6 +935,30 @@ fn the_second_status_reading_is_the_one_believed() {
     d.bmsr_first = Some(0x796d);
     d.phy_regs[1] = 0x7949;
     assert_eq!(link_of(&mut d), Link::Down);
+}
+
+#[test]
+fn a_status_of_all_ones_is_no_phy_not_a_gigabit_link() {
+    // Nothing drives the bus and nothing flags it: every register reads
+    // ones, which has the link, negotiated and gigabit bits all set.
+    let mut d = board();
+    d.mdio_ones = true;
+    assert_eq!(link(&mut d, 2), Err(MdioError::NoAnswer));
+    // Two reads of the status and no more.
+    assert_eq!(d.writes().len(), 2 * 2);
+    // A PHY whose status is one bit short of all ones is a PHY.
+    let mut d = board();
+    d.phy_regs[1] = 0xfffd;
+    assert_eq!(link_of(&mut d), Link::Up { speed: Speed::S1000, full: true });
+}
+
+#[test]
+fn a_command_that_takes_some_polls_is_waited_for() {
+    let mut d = board();
+    d.mdio_busy = 5;
+    assert_eq!(link_of(&mut d), Link::Up { speed: Speed::S1000, full: true });
+    // Four reads, six polls each, a wait before each poll.
+    assert_eq!(d.delayed_us(), 4 * 6 * 10);
 }
 
 #[test]

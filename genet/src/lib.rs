@@ -2,10 +2,11 @@
 //! that needs no hardware, over a [`Bus`] the caller passes
 //! (`docs/roadmap/roadmap-pi-net.md`, design 2). No QEMU machine models
 //! this device, so everything here runs on the host against a model of it
-//! (`tests.rs`) and in the kernel against the board. **The model is ours:**
-//! the tests check this code against our reading of the device, its
-//! arithmetic, its order and its bounds. They cannot catch a wrong
-//! reading. The board is the only foreign observer.
+//! (`tests.rs` for the scan, `mac_tests.rs` for the driver) and in the
+//! kernel against the board. **The model is ours:** the tests check this
+//! code against our reading of the device, its arithmetic, its order and
+//! its bounds. They cannot catch a wrong reading. The board is the only
+//! foreign observer.
 //!
 //! Two parts. The scan, [`registers`] and [`phys`], is the arc's step 2:
 //! what the device says of itself before anything drives it. The driver's
@@ -134,6 +135,11 @@ pub mod reg {
     /// `RDMA_REG_BASE`, `TDMA_REG_BASE`): `DMA_RING_CFG` at 0x00 and
     /// `DMA_SCB_BURST_SIZE` at 0x0c, with `DMA_CTRL` (below) at 0x04.
     pub const RDMA_RING_CFG: usize = RDMA_RING + 0x40;
+    /// `DMA_STATUS`, at 0x08 of each DMA's own registers (Linux's
+    /// `bcmgenet_dma_regs_v3plus` in `bcmgenet.c`, line 221). U-Boot never
+    /// reads it.
+    pub const RDMA_STATUS: usize = RDMA_RING + 0x40 + 0x08;
+    pub const TDMA_STATUS: usize = TDMA_RING + 0x40 + 0x08;
     pub const RDMA_SCB_BURST_SIZE: usize = RDMA_RING + 0x40 + 0x0c;
     pub const TDMA_RING_CFG: usize = TDMA_RING + 0x40;
     pub const TDMA_SCB_BURST_SIZE: usize = TDMA_RING + 0x40 + 0x0c;
