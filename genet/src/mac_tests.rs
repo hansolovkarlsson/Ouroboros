@@ -621,6 +621,14 @@ fn stopping_a_stopped_device_costs_no_wait() {
     // Only the flush's own 10 us, and the MAC's register is not written.
     assert_eq!(d.delayed_us(), 10);
     assert!(!d.writes().iter().any(|w| w.0 == UMAC_CMD));
+    // Either DMA found on is given the wait for frames in flight.
+    for (tdma, rdma) in [(DMA_ON, 0), (0, DMA_ON)] {
+        let mut d = board();
+        d.regs.insert(TDMA_CTL, tdma);
+        d.regs.insert(RDMA_CTL, rdma);
+        assert_eq!(quiet(&mut d), Some(Stopped { tdma: true, rdma: true }));
+        assert_eq!(d.delayed_us(), 10_000 + 10, "transmit {tdma:#x}, receive {rdma:#x}");
+    }
 }
 
 #[test]
