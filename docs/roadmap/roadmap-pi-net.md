@@ -666,6 +666,81 @@ Each has a recommendation; none blocks step 2.
    A sustained boot shows no fault, with the tick calling `has_frame`
    throughout. One variable: nothing is sent yet.
 
+   **Built 2026-11-13, not yet run on the board.**
+   `kernel/src/genetnic.rs` is the kernel's half (named so because a
+   module called `genet` would clash with the crate). Before the exit,
+   `discover` takes the one GENET the tables declare, through the helper
+   below, and touches no register. After the identity map is installed,
+   where `init_net` runs and the kernel's own fault handler is live,
+   `init` asks the MMU's walk whether the block is device memory at both
+   ends, makes the device quiet (`genet::mac::quiet`, design 4), runs the
+   crate's `Genet::init`, scans MDIO for exactly one PHY, runs
+   `phy::setup` and reads the link with `phy::link_resolved`. The device
+   goes in `syscall.rs`'s cell as `Nic::Genet`, which reports no
+   interrupt (design 7).
+   **The MAC is left off, which is this step's one variable.**
+   `Genet::start` is not called: a send is refused, no frame arrives,
+   and `has_frame` is one register read that says no. Steps 6 and 7 turn
+   it on, and write the two paths that copy a frame, which are not here.
+   **"Quiet at the exit" is done after the map is installed, not at the
+   exit itself.** At the exit on the Pi the kernel is at EL2 on the
+   firmware's tables with no fault handler of its own, so a miss there
+   would be a silent hang. Nothing between the exit and `init` uses
+   memory the firmware owned: the kernel runs on its own image, its own
+   statics and what the loader allocated before the exit.
+   **The helper:** `acpi::declared(rsdp, hid)` collects the tables and
+   asks `amlscan`, and `amlscan::Transports::one` is the rule for
+   "exactly one": one kept and none dropped. The three copies' rules did
+   not differ after all (a list of one cannot have dropped any), so the
+   SD card's discovery, `sdscan.rs`, `netscan.rs` and the driver all use
+   them and the SD path's behaviour is the same; `make test-sd` passed.
+   **The receive buffers** are one page-aligned static of 524,288 bytes,
+   `genetnic::RX_AREA`, in `.bss` (the image file did not grow), passed
+   to `mmu.rs` as a second non-cacheable range beside the xHCI's pool
+   whenever the firmware declares DMA non-coherent, device or none.
+   **The link's wait:** the PHY's reset drops the link, so `init` reads
+   the link before the reset and waits up to 5 s after it only when it
+   was not down before. A board with no cable boots without the wait and
+   says so. D3's bounded wait, with that one condition added; change the
+   5 s in `genetnic.rs` (`LINK_WAIT_MS`).
+   **Checked on QEMU, which has no GENET:**
+   - `make test-netdump`, extended: on both boots the driver prints one
+     line, "receive area ..., 0x80000 bytes: walks as cacheable memory
+     (0 of 128 pages non-cacheable)", read from the MMU's own walk, and
+     no other `genet:` line. That is the control the check above asks
+     for.
+   - Control, the non-cacheable mapping forced on QEMU: the same line
+     said "non-cacheable (128 of 128 pages)", `mmu.rs`'s self-check
+     logged the area as Normal Non-cacheable on every page in all 11
+     views with its neighbours not, the boot reached the shell, and the
+     rig failed, as it must.
+   - Control, the Pi's address taken with nothing declared: the kernel
+     faulted at `0xfd580000` under its own handler, and the rig failed.
+   - Each exit 0 on the committed code: `make test` (434 tests),
+     `test-early-fault`, `test-el1-drop`, `test-sd`, `test-smp`,
+     `test-usb-hub`, `test-no-identity`, `test-run-callback`.
+   **Not checked, and not checkable here:** `init` past its first line.
+   No machine this kernel boots on has the device, so the quiet, the
+   reset, the MDIO scan, the PHY's set-up and the link's read have run
+   only as the crate's host tests against our own model.
+   **The board run, owed after step 2's:** a card from this tree, serial
+   captured, two boots, cable in and cable out. The lines start
+   `Ouroboros kernel: genet:`. A pass, cable in:
+   - `ACPI declares GENET @ 0xfd580000` (before the exit);
+   - `receive area ...: walks as non-cacheable memory (128 of 128 ...)`;
+   - `GENET v5 (version major 6 ...) @ 0xfd580000, MAC ...` with the
+     address step 2 read;
+   - `PHY at MDIO address N, id 0x600d84a_: set up and reset; ...`, whose
+     last words say whether the reset kept the delays. **Either answer
+     is a finding and not a failure**: it is the question D7 left open;
+   - `link up, 1000 Mb/s, full duplex` (or what the switch gives);
+   - `the MAC's transmitter and receiver are left off`, then
+     `NIC installed for the network server`, and a login.
+   Cable out: `link down (not waited for: ...)`, and a login as fast as
+   before. Then `ping` fails for want of an answer and not for want of a
+   NIC. A fault line names the register: `far_el1` less `0xfd580000` is
+   its offset.
+
 6. **The board: transmit.** `netd` sends what it sends now. With the
    address file in place (step 8 may come first if that is simpler), a
    `ping` of the Mac makes an ARP request.
