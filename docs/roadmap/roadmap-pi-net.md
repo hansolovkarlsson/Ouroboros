@@ -441,7 +441,7 @@ Each has a recommendation; none blocks step 2.
    receive of a maximum-size frame, a frame longer than the buffer
    refused, and a busy MDIO that never clears ending in an error and not a
    hang. Every bound is mutated once.
-   **Built 2026-11-13, on the host.** Two new modules in the crate, and
+   **Built 2026-11-13, on the host (#455).** Two new modules in the crate, and
    nothing in them touches memory: the packet buffers are the caller's,
    and a frame is named by its buffer's index or its address.
    `genet::mac` is the driver: `quiet` (design 4: interrupts masked, the

@@ -11,7 +11,7 @@ here actually works today, see [`architecture.md`](architecture.md) and
 
 **Not yet released.** Changes since v0.25.0, drafted as they land.
 
-**The Pi's Ethernet driver exists on the host: reset, the rings, a frame each way, the link (2026-11-13).**
+**The Pi's Ethernet driver exists on the host: reset, the rings, a frame each way, the link (2026-11-13, #455).**
 Step 4 of `docs/roadmap/roadmap-pi-net.md`. The `genet` crate gains
 `mac.rs` and `phy.rs`: the device made quiet, reset and set up as U-Boot's
 driver does it, one frame sent, one received, and the link's speed read
