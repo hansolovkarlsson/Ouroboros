@@ -63,11 +63,45 @@ struct Dev {
     /// An address with no PHY reads all ones with no flag, where it is
     /// flagged otherwise.
     mdio_ones: bool,
+    /// The Broadcom PHY's two windows: the auxiliary control register's
+    /// eight shadows and which one a read returns, and the 0x1c
+    /// register's 32 shadows and which one is selected.
+    aux: [u16; 8],
+    aux_read: usize,
+    shd: [u16; 32],
+    shd_sel: usize,
+    /// Bits a read of register 0x1c returns above the ten of data, in
+    /// place of the selector it was given.
+    shd_read_high: Option<u16>,
+    /// Reads of the control register that still show the reset bit;
+    /// `u32::MAX` is forever.
+    reset_polls: u32,
+    reset_left: u32,
+    /// Whether a reset puts both delay shadows back to `SHADOW_DEFAULTS`.
+    /// Not known of the real PHY, so the tests run both ways.
+    reset_wipes: bool,
+    /// What a read gets while the PHY resets: its control register with
+    /// the reset bit, or no answer, flagged or as all ones.
+    reset_reads: Resetting,
+    /// Every MDIO command the PHY took: (write?, register, data).
+    mdio_log: Vec<(bool, u8, u16)>,
     /// Reads of a `DMA_STATUS` before a DMA turned off says disabled;
     /// `u32::MAX` is never. (transmit, receive)
     dma_stop_lag: (u32, u32),
     dma_stop_left: (u32, u32),
 }
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Resetting {
+    BitSet,
+    Flagged,
+    Ones,
+}
+
+/// What the model's reset leaves in the two delay shadows when it wipes
+/// them: (miscellaneous, clock control). Ours; the real defaults are the
+/// board's to show.
+const SHADOW_DEFAULTS: (u16, u16) = (0x0000, 0x0200);
 
 const SYS_REV: usize = 0x00;
 const UMAC_CMD: usize = 0x808;
@@ -123,6 +157,16 @@ fn board() -> Dev {
         mdio_busy_left: 0,
         mdio_result: 0,
         mdio_ones: false,
+        aux: [0; 8],
+        aux_read: 0,
+        shd: [0; 32],
+        shd_sel: 0,
+        shd_read_high: None,
+        reset_polls: 0,
+        reset_left: 0,
+        reset_wipes: false,
+        reset_reads: Resetting::BitSet,
+        mdio_log: Vec::new(),
         dma_stop_lag: (0, 0),
         dma_stop_left: (0, 0),
     }
@@ -142,6 +186,50 @@ fn left_running() -> Dev {
 }
 
 impl Dev {
+    /// The PHY takes a write. The two Broadcom windows as U-Boot's
+    /// `broadcom.c` uses them: register 0x18's low three bits name a
+    /// shadow, and for shadow 7 a write without bit 15 only chooses what
+    /// the next read returns (bits 14:12); register 0x1c's bits 14:10 name
+    /// a shadow, written only with bit 15.
+    fn phy_write(&mut self, r: usize, value: u16) {
+        self.mdio_log.push((true, r as u8, value));
+        match r {
+            0 if value & 0x8000 != 0 => {
+                self.reset_left = self.reset_polls;
+                if self.reset_wipes {
+                    (self.aux[7], self.shd[3]) = SHADOW_DEFAULTS;
+                }
+            }
+            0x18 if value & 7 == 7 && value & 0x8000 == 0 => self.aux_read = usize::from((value >> 12) & 7),
+            0x18 => self.aux[usize::from(value & 7)] = value & !7,
+            0x1c => {
+                self.shd_sel = usize::from((value >> 10) & 0x1f);
+                if value & 0x8000 != 0 {
+                    self.shd[self.shd_sel] = value & 0x3ff;
+                }
+            }
+            _ => self.phy_regs[r] = value,
+        }
+    }
+    fn phy_read(&mut self, r: usize) -> u16 {
+        self.mdio_log.push((false, r as u8, 0));
+        match r {
+            0 => {
+                if self.reset_left > 0 {
+                    if self.reset_left != u32::MAX {
+                        self.reset_left -= 1;
+                    }
+                    0x8000 | self.phy_regs[0]
+                } else {
+                    self.phy_regs[0]
+                }
+            }
+            1 => self.bmsr_first.take().unwrap_or(self.phy_regs[1]),
+            0x18 => (self.aux[self.aux_read] & !0x8000) | self.aux_read as u16,
+            0x1c => self.shd_read_high.unwrap_or((self.shd_sel as u16) << 10) | self.shd[self.shd_sel],
+            _ => self.phy_regs[r],
+        }
+    }
     fn dma_status(ctrl: u32, left: &mut u32) -> u32 {
         if ctrl & 1 != 0 {
             return 0;
@@ -267,20 +355,31 @@ impl Bus for Dev {
             MDIO => {
                 self.mdio = value;
                 if value & (1 << 29) != 0 && !self.mdio_stuck {
-                    if value & (3 << 26) != 2 << 26 || value & 0xffff != 0 {
-                        self.violations.push(format!("MDIO command {value:#x} is not a read"));
+                    let op = (value >> 26) & 3;
+                    if !(op == 2 && value & 0xffff == 0 || op == 1) {
+                        self.violations.push(format!("MDIO command {value:#x} is neither a read nor a write"));
                     }
                     let (phy, r) = (((value >> 21) & 0x1f) as u8, ((value >> 16) & 0x1f) as usize);
                     let command = value & !(1 << 29);
                     self.mdio_busy_left = self.mdio_busy;
-                    self.mdio_result = if phy != self.phy && self.mdio_ones {
+                    self.mdio_result = if op == 1 {
+                        if phy == self.phy {
+                            self.phy_write(r, value as u16);
+                        }
+                        command
+                    } else if phy != self.phy && self.mdio_ones {
                         command | 0xffff
                     } else if phy != self.phy {
                         command | 1 << 28
-                    } else if r == 1 {
-                        command | u32::from(self.bmsr_first.take().unwrap_or(self.phy_regs[1]))
+                    } else if self.reset_left > 0 && self.reset_reads != Resetting::BitSet {
+                        // The PHY is not on the bus while it resets.
+                        self.mdio_log.push((false, r as u8, 0));
+                        if self.reset_left != u32::MAX {
+                            self.reset_left -= 1;
+                        }
+                        command | if self.reset_reads == Resetting::Flagged { 1 << 28 } else { 0xffff }
                     } else {
-                        command | u32::from(self.phy_regs[r])
+                        command | u32::from(self.phy_read(r))
                     };
                 }
             }
@@ -975,4 +1074,256 @@ fn a_phy_that_does_not_answer_and_a_bus_that_sticks_are_errors() {
 #[test]
 fn the_speeds_in_megabits() {
     assert_eq!([Speed::S10.mbps(), Speed::S100.mbps(), Speed::S1000.mbps()], [10, 100, 1000]);
+}
+
+// ---- the Pi's PHY ----
+
+/// The board's PHY as predicted, and a revision of it.
+const BCM: u32 = 0x600d_84a2;
+
+/// A BCM54210E with something already in its two shadows.
+fn bcm() -> Dev {
+    let mut d = board();
+    d.phy_regs[0] = 0x1140;
+    d.aux[7] = 0x0070;
+    d.shd[3] = 0x0210; // the transmit clock delay on, and another bit
+    d.phy_regs[0x19] = 0x0700;
+    d
+}
+
+#[test]
+fn the_identifier_is_u_boots_whatever_the_revision() {
+    assert!(is_bcm54210e(0x600d_84a0) && is_bcm54210e(0x600d_84a2) && is_bcm54210e(0x600d_84af));
+    assert!(!is_bcm54210e(0x600d_84b0) && !is_bcm54210e(0x600d_8490) && !is_bcm54210e(0x700d_84a2));
+    assert!(!is_bcm54210e(0) && !is_bcm54210e(0xffff_ffff));
+}
+
+#[test]
+fn an_mdio_write_is_u_boots_command_in_two_writes() {
+    let mut d = board();
+    assert_eq!(mdio_write_command(1, 0x1c, 0x8c10), Some(0x043c_8c10));
+    assert_eq!(mdio_write_command(31, 31, 0xffff), Some(0x0400_0000 | 31 << 21 | 31 << 16 | 0xffff));
+    assert_eq!((mdio_write_command(32, 0, 0), mdio_write_command(0, 32, 0)), (None, None));
+    assert_eq!(mdio_write(&mut d, 1, 0x1c, 0x8c10), Ok(()));
+    // MDIO_WR (1 << 26), the PHY at bit 21, the register at 16, the data.
+    assert_eq!(d.writes(), [(MDIO, 0x043c_8c10), (MDIO, 0x243c_8c10)]);
+    assert_eq!(d.mdio_log, [(true, 0x1c, 0x8c10)]);
+    // Out of range: nothing written.
+    let mut d = board();
+    assert_eq!(mdio_write(&mut d, 32, 0, 0), Err(MdioError::BadAddress));
+    assert_eq!(mdio_write(&mut d, 0, 32, 0), Err(MdioError::BadAddress));
+    assert!(d.ops.is_empty());
+    // A bus that sticks is an error after one command's budget.
+    let mut d = board();
+    d.mdio_stuck = true;
+    assert_eq!(mdio_write(&mut d, 1, 0, 0x8000), Err(MdioError::Busy));
+    assert_eq!(d.delayed_us(), 20_000);
+    // The scan's bus would refuse both writes of it.
+    assert!(!scan_write_allowed(MDIO, 0x043c_8c10) && !scan_write_allowed(MDIO, 0x243c_8c10));
+}
+
+#[test]
+fn setup_is_u_boots_clock_delays_then_its_reset() {
+    let mut d = bcm();
+    let delays = setup(&mut d, 1, BCM).unwrap().expect("a BCM54210E");
+    assert_eq!(
+        d.mdio_log,
+        [
+            // bcm54xx_auxctl_read of shadow 7, then the write back with
+            // the write enable and the receive skew.
+            (true, 0x18, 0x7007),
+            (false, 0x18, 0),
+            (true, 0x18, 0x8177),
+            // bcm_phy_read_shadow of shadow 3, then the write back
+            // without bit 9, the other bit kept.
+            (true, 0x1c, 0x0c00),
+            (false, 0x1c, 0),
+            (true, 0x1c, 0x8c10),
+            // phy_reset, and one read that finds the bit clear.
+            (true, 0x00, 0x8000),
+            (false, 0x00, 0),
+            // Both shadows read back, by the same two selects.
+            (true, 0x18, 0x7007),
+            (false, 0x18, 0),
+            (true, 0x1c, 0x0c00),
+            (false, 0x1c, 0),
+        ]
+    );
+    // What was written is checked before the reset, in the log above.
+    // What is returned is what the PHY holds after it: here a PHY whose
+    // reset keeps the shadows (the low three bits read back are the
+    // shadow's number).
+    assert_eq!(delays, Delays { misc: 0x0177, clk: 0x0010 });
+    assert!(delays.rx_skew() && !delays.tx_delay() && delays.as_written());
+    assert!(d.violations.is_empty(), "{:?}", d.violations);
+    // Every register write was to MDIO_CMD.
+    assert!(d.writes().iter().all(|w| w.0 == MDIO));
+}
+
+#[test]
+fn setup_sets_the_skew_and_clears_the_delay_whatever_was_there() {
+    for (misc, clk) in [(0, 0), (0x0100, 0x0200), (0x7ff8, 0x03ff)] {
+        let mut d = bcm();
+        d.aux[7] = misc;
+        d.shd[3] = clk;
+        let delays = setup(&mut d, 1, BCM).unwrap().unwrap();
+        assert_eq!(d.aux[7], misc | 0x8100, "misc {misc:#x}");
+        assert_eq!(d.shd[3], clk & !0x0200, "clock {clk:#x}");
+        assert!(delays.as_written());
+    }
+}
+
+#[test]
+fn a_reset_that_wipes_the_delays_is_seen_in_what_setup_returns() {
+    // The same writes, and a PHY whose reset puts the shadows back: the
+    // answer is the PHY's state, not what was asked of it.
+    let mut d = bcm();
+    d.reset_wipes = true;
+    let delays = setup(&mut d, 1, BCM).unwrap().unwrap();
+    assert_eq!(delays, Delays { misc: 0x0007, clk: 0x0200 });
+    assert!(!delays.rx_skew() && delays.tx_delay() && !delays.as_written());
+    // The writes themselves were U-Boot's, as in the test above.
+    assert!(d.mdio_log.contains(&(true, 0x18, 0x8177)) && d.mdio_log.contains(&(true, 0x1c, 0x8c10)));
+    // Each half alone is not "as written".
+    assert!(!Delays { misc: 0x0100, clk: 0x0200 }.as_written());
+    assert!(!Delays { misc: 0, clk: 0 }.as_written());
+    assert!(Delays { misc: 0x0100, clk: 0x01ff }.as_written());
+}
+
+#[test]
+fn a_phy_silent_while_it_resets_is_waited_for() {
+    // No answer at all for some polls, flagged or as all ones, and then
+    // the PHY is back: U-Boot's read does not look at the flag either.
+    for reads in [Resetting::Flagged, Resetting::Ones] {
+        let mut d = bcm();
+        d.reset_polls = 40;
+        d.reset_reads = reads;
+        assert!(setup(&mut d, 1, BCM).unwrap().unwrap().as_written(), "{reads:?}");
+        // And one that never comes back is a stuck reset, not "no PHY".
+        let mut d = bcm();
+        d.reset_polls = u32::MAX;
+        d.reset_reads = reads;
+        assert_eq!(setup(&mut d, 1, BCM), Err(SetupError::ResetStuck), "{reads:?}");
+        assert_eq!(d.mdio_log.iter().filter(|c| *c == &(false, 0, 0)).count(), 500);
+    }
+}
+
+#[test]
+fn only_the_ten_bits_of_data_read_back_are_written_back() {
+    // A read that comes back with another selector, or none, above the
+    // data: the write still names shadow 3 and nothing else.
+    for high in [0x7c00, 0x0000, 0x4000] {
+        let mut d = bcm();
+        d.shd_read_high = Some(high);
+        assert_eq!(setup(&mut d, 1, BCM).unwrap().unwrap().clk, 0x0010);
+        assert!(d.mdio_log.contains(&(true, 0x1c, 0x8c10)), "high bits {high:#x}: {:?}", d.mdio_log);
+        assert_eq!(d.shd[3], 0x0010);
+    }
+}
+
+#[test]
+fn another_phy_is_left_alone() {
+    let mut d = bcm();
+    assert_eq!(setup(&mut d, 1, 0x0022_1622), Ok(None));
+    assert!(d.ops.is_empty() && d.reads.is_empty());
+}
+
+#[test]
+fn the_reset_is_waited_for_and_not_for_ever() {
+    // Clear on the last poll: a millisecond after each read that saw it set.
+    let mut d = bcm();
+    d.reset_polls = 499;
+    assert!(setup(&mut d, 1, BCM).unwrap().is_some());
+    assert_eq!(d.mdio_log.iter().filter(|c| *c == &(false, 0, 0)).count(), 500);
+    // One more and it is given up on, after 500 reads and 500 waits.
+    let mut d = bcm();
+    d.reset_polls = 500;
+    assert_eq!(setup(&mut d, 1, BCM), Err(SetupError::ResetStuck));
+    assert_eq!(d.mdio_log.iter().filter(|c| *c == &(false, 0, 0)).count(), 500);
+    // The waits: 500 of a millisecond, and 10 us a poll of each of the
+    // 7 commands before the reset's reads and the 500 reads.
+    assert_eq!(d.delayed_us(), 500 * 1000 + (6 + 1 + 500) * 10);
+}
+
+#[test]
+fn a_bus_that_fails_ends_the_setup_with_the_error() {
+    let mut d = bcm();
+    d.mdio_stuck = true;
+    assert_eq!(setup(&mut d, 1, BCM), Err(SetupError::Mdio(MdioError::Busy)));
+    // The first command's budget and no more: nothing after it was tried.
+    assert_eq!(d.delayed_us(), 20_000);
+    // A PHY that is not at that address: the first read says so.
+    let mut d = bcm();
+    assert_eq!(setup(&mut d, 2, BCM), Err(SetupError::Mdio(MdioError::NoAnswer)));
+    assert!(d.mdio_log.is_empty());
+}
+
+#[test]
+fn the_resolved_link_is_the_phys_own_answer_not_the_advertisements() {
+    // Both ends advertise gigabit, and the PHY settled on 100 full: the
+    // poor cable.
+    let mut d = bcm();
+    d.phy_regs[0x19] = 0x0500;
+    assert_eq!(link(&mut d, 1), Ok(Link::Up { speed: Speed::S1000, full: true }));
+    assert_eq!(link_resolved(&mut d, 1, BCM), Ok(Link::Up { speed: Speed::S100, full: true }));
+    // U-Boot's table, by the field's value; other bits of the register
+    // are not the mode (all but one of them set here: every bit set is
+    // the bus undriven, the next test).
+    for (mode, want) in [
+        (1, Link::Up { speed: Speed::S10, full: false }),
+        (2, Link::Up { speed: Speed::S10, full: true }),
+        (3, Link::Up { speed: Speed::S100, full: false }),
+        (5, Link::Up { speed: Speed::S100, full: true }),
+        (6, Link::Up { speed: Speed::S1000, full: false }),
+        (7, Link::Up { speed: Speed::S1000, full: true }),
+        (0, Link::Unresolved),
+        (4, Link::Unresolved),
+    ] {
+        let mut d = bcm();
+        d.phy_regs[0x19] = (mode << 8) | 0xf8fe;
+        assert_eq!(link_resolved(&mut d, 1, BCM), Ok(want), "mode {mode}");
+        // The status twice and the auxiliary status: three reads, no write.
+        assert_eq!(d.mdio_log, [(false, 1, 0), (false, 1, 0), (false, 0x19, 0)]);
+        for (offset, value) in d.writes() {
+            assert!(scan_write_allowed(offset, value));
+        }
+    }
+}
+
+#[test]
+fn the_resolved_link_is_down_or_negotiating_before_it_is_a_speed() {
+    let mut d = bcm();
+    d.phy_regs[1] = 0x7949;
+    assert_eq!(link_resolved(&mut d, 1, BCM), Ok(Link::Down));
+    assert_eq!(d.mdio_log.len(), 2, "the auxiliary status is not read for a link that is down");
+    let mut d = bcm();
+    d.phy_regs[1] = 0x794d;
+    assert_eq!(link_resolved(&mut d, 1, BCM), Ok(Link::Negotiating));
+    let mut d = bcm();
+    d.mdio_ones = true;
+    assert_eq!(link_resolved(&mut d, 2, BCM), Err(MdioError::NoAnswer));
+    // The latch: the second status reading is the one believed.
+    let mut d = bcm();
+    d.bmsr_first = Some(0x7949);
+    assert_eq!(link_resolved(&mut d, 1, BCM), Ok(Link::Up { speed: Speed::S1000, full: true }));
+}
+
+#[test]
+fn an_auxiliary_status_of_all_ones_is_not_a_gigabit_link() {
+    // The status read a link, and then nothing drove the bus.
+    let mut d = bcm();
+    d.phy_regs[0x19] = 0xffff;
+    assert_eq!(link_resolved(&mut d, 1, BCM), Err(MdioError::NoAnswer));
+    // One bit short of all ones is the PHY's own answer.
+    let mut d = bcm();
+    d.phy_regs[0x19] = 0xfffe;
+    assert_eq!(link_resolved(&mut d, 1, BCM), Ok(Link::Up { speed: Speed::S1000, full: true }));
+}
+
+#[test]
+fn for_another_phy_the_resolved_link_is_the_advertised_one() {
+    let mut d = bcm();
+    d.phy_regs[0x19] = 0x0500;
+    assert_eq!(link_resolved(&mut d, 1, 0x0022_1622), Ok(Link::Up { speed: Speed::S1000, full: true }));
+    assert!(!d.mdio_log.contains(&(false, 0x19, 0)));
 }

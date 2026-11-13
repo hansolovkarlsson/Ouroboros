@@ -4,7 +4,8 @@
 //!
 //! The files: U-Boot `v2024.10` `drivers/net/bcmgenet.c` (U), Linux `v6.6`
 //! `drivers/net/ethernet/broadcom/genet/bcmgenet.h` (L) and
-//! `include/uapi/linux/mii.h` (M). The line numbers were checked against
+//! `include/uapi/linux/mii.h` (M), and U-Boot `v2024.10`
+//! `drivers/net/phy/broadcom.c` (B). The line numbers were checked against
 //! those files by a script on 2026-11-13 (each line holds a `#define` of
 //! the name); the files are not in this tree, so the test below checks the
 //! values and not the lines.
@@ -18,6 +19,7 @@ enum Src {
     U,
     L,
     M,
+    B,
 }
 use Src::*;
 
@@ -45,6 +47,7 @@ const CITED: &[(&str, u64, u64, Src, u32)] = &[
     ("MDIO_START_BUSY", MDIO_START_BUSY as u64, 1 << 29, U, 69),
     ("MDIO_READ_FAIL", MDIO_READ_FAIL as u64, 1 << 28, U, 70),
     ("MDIO_RD", MDIO_RD as u64, 2 << 26, U, 71),
+    ("MDIO_WR", MDIO_WR as u64, 1 << 26, U, 72),
     ("MDIO_PMD_SHIFT", MDIO_PMD_SHIFT as u64, 21, U, 73),
     ("MDIO_REG_SHIFT", MDIO_REG_SHIFT as u64, 16, U, 75),
     ("CMD_TX_EN", CMD_TX_EN as u64, 1 << 0, U, 78),
@@ -133,6 +136,21 @@ const CITED: &[(&str, u64, u64, Src, u32)] = &[
     ("LPA_100FULL", LPA_100FULL as u64, 0x0100, M, 103),
     ("LPA_1000FULL", STAT1000_FULL as u64, 0x0800, M, 163),
     ("LPA_1000HALF", STAT1000_HALF as u64, 0x0400, M, 164),
+    ("MII_BMCR", PHY_BMCR as u64, 0x00, M, 16),
+    ("BMCR_RESET", BMCR_RESET as u64, 0x8000, M, 51),
+    ("MIIM_BCM54xx_AUXCNTL", BCM_AUXCNTL as u64, 0x18, B, 12),
+    ("MIIM_BCM54xx_AUXSTATUS", BCM_AUXSTATUS as u64, 0x19, B, 14),
+    ("MIIM_BCM54xx_AUXSTATUS_LINKMODE_MASK", BCM_AUXSTATUS_LINKMODE_MASK as u64, 0x0700, B, 15),
+    ("MIIM_BCM54xx_AUXSTATUS_LINKMODE_SHIFT", BCM_AUXSTATUS_LINKMODE_SHIFT as u64, 8, B, 16),
+    ("MIIM_BCM54XX_SHD", BCM_SHD as u64, 0x1c, B, 18),
+    ("MIIM_BCM54XX_SHD_WRITE", BCM_SHD_WRITE as u64, 0x8000, B, 19),
+    ("MIIM_BCM54XX_SHD_VAL", BCM_SHD_SEL_SHIFT as u64, 10, B, 20),
+    ("MIIM_BCM54XX_SHD_DATA", BCM_SHD_DATA_MASK as u64, 0x3ff, B, 21),
+    ("MIIM_BCM_AUXCNTL_SHDWSEL_MISC", BCM_AUXCNTL_MISC as u64, 0x0007, B, 31),
+    ("MIIM_BCM_AUXCNTL_SHDWSEL_MISC_RGMII_SKEW_EN", BCM_AUXCNTL_MISC_RGMII_SKEW_EN as u64, 0x0100, B, 34),
+    ("MIIM_BCM_AUXCNTL_MISC_WREN", BCM_AUXCNTL_MISC_WREN as u64, 0x8000, B, 37),
+    ("BCM54810_SHD_CLK_CTL", BCM_SHD_CLK_CTL as u64, 0x3, B, 41),
+    ("BCM54810_SHD_CLK_CTL_GTXCLK_EN", BCM_SHD_CLK_CTL_GTXCLK_EN as u64, 1 << 9, B, 42),
 ];
 
 #[test]
@@ -142,6 +160,7 @@ fn every_constant_has_the_value_its_source_line_gives() {
             U => "U-Boot bcmgenet.c",
             L => "Linux bcmgenet.h",
             M => "Linux mii.h",
+            B => "U-Boot broadcom.c",
         };
         assert_eq!(ours, cited, "{name} ({file} line {line})");
         assert!(line > 0);
