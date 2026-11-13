@@ -70,6 +70,9 @@ struct Dev {
     aux_read: usize,
     shd: [u16; 32],
     shd_sel: usize,
+    /// Bits a read of register 0x1c returns above the ten of data, in
+    /// place of the selector it was given.
+    shd_read_high: Option<u16>,
     /// Reads of the control register that still show the reset bit;
     /// `u32::MAX` is forever.
     reset_polls: u32,
@@ -140,6 +143,7 @@ fn board() -> Dev {
         aux_read: 0,
         shd: [0; 32],
         shd_sel: 0,
+        shd_read_high: None,
         reset_polls: 0,
         reset_left: 0,
         mdio_log: Vec::new(),
@@ -197,7 +201,7 @@ impl Dev {
             }
             1 => self.bmsr_first.take().unwrap_or(self.phy_regs[1]),
             0x18 => (self.aux[self.aux_read] & !0x8000) | self.aux_read as u16,
-            0x1c => ((self.shd_sel as u16) << 10) | self.shd[self.shd_sel],
+            0x1c => self.shd_read_high.unwrap_or((self.shd_sel as u16) << 10) | self.shd[self.shd_sel],
             _ => self.phy_regs[r],
         }
     }
@@ -1120,6 +1124,19 @@ fn setup_sets_the_skew_and_clears_the_delay_whatever_was_there() {
         assert_eq!(setup(&mut d, 1, BCM), Ok(true));
         assert_eq!(d.aux[7], misc | 0x8100, "misc {misc:#x}");
         assert_eq!(d.shd[3], clk & !0x0200, "clock {clk:#x}");
+    }
+}
+
+#[test]
+fn only_the_ten_bits_of_data_read_back_are_written_back() {
+    // A read that comes back with another selector, or none, above the
+    // data: the write still names shadow 3 and nothing else.
+    for high in [0x7c00, 0x0000, 0x4000] {
+        let mut d = bcm();
+        d.shd_read_high = Some(high);
+        assert_eq!(setup(&mut d, 1, BCM), Ok(true));
+        assert!(d.mdio_log.contains(&(true, 0x1c, 0x8c10)), "high bits {high:#x}: {:?}", d.mdio_log);
+        assert_eq!(d.shd[3], 0x0010);
     }
 }
 
