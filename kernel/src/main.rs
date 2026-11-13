@@ -18,6 +18,7 @@ mod fbconsole;
 mod fbdev;
 mod font;
 mod framebuffer;
+mod genetnic;
 mod gic;
 mod gicv2;
 mod gicv3;
@@ -617,6 +618,13 @@ extern "C" fn kernel_main() -> ! {
         None => unsafe { emmc2_from_acpi(rsdp) },
     };
 
+    // The Pi 4's Ethernet, when the ACPI tables declare exactly one GENET
+    // (genetnic.rs, step 5 of docs/roadmap/roadmap-pi-net.md): found here
+    // and brought up after the exit, where `init_net` is. Silent where none
+    // is declared, and no register is touched here.
+    // SAFETY: `rsdp` is the firmware's, found above.
+    let genet_declared = unsafe { genetnic::discover(rsdp) };
+
     // What the firmware says of the SD card's controller (sdscan.rs, step 0
     // of docs/roadmap/roadmap-sd-card.md): read only, no register touched.
     // After the xHCI step so its lines stay next to that step's.
@@ -760,6 +768,16 @@ extern "C" fn kernel_main() -> ! {
             extra_device_count += 1;
         }
     }
+    // The Ethernet's registers, by the same rule as the SD controller's:
+    // when a slot is left, and `genetnic::init` asks the walker before its
+    // first access either way. On the Pi its block is in the 1GB block the
+    // console's PL011 already maps.
+    if let Some(d) = &genet_declared {
+        if extra_device_count < mmu::MAX_EXTRA_DEVICES {
+            extra_devices[extra_device_count] = (d.base, u64::from(genet::BLOCK_LEN));
+            extra_device_count += 1;
+        }
+    }
     // The boot EL0 regions, one per task slot (auto-sized to NUM_TASKS so
     // raising the slot count needs no edit here): slot 0 the loaded program,
     // slot 1 idle, slots 2/3/4 the filesystem/console/network servers ((0, 0)
@@ -784,8 +802,12 @@ extern "C" fn kernel_main() -> ! {
         // to memory for the display engine (Risk 7) - correct on bare
         // metal and under a hypervisor alike, and a scroll reads cached
         // memory rather than uncached.
-        let uncached = [xhci::dma_region()];
-        let uncached_count = usize::from(dma_noncoherent);
+        // The GENET's receive buffers by the same rule (genetnic.rs): its
+        // driver does no cache maintenance either. Both ranges or neither,
+        // whichever device is there, so the map does not depend on what
+        // was found.
+        let uncached = [xhci::dma_region(), genetnic::dma_region()];
+        let uncached_count = if dma_noncoherent { uncached.len() } else { 0 };
         mmu::install_identity_map(
             memory_map,
             el0_regions,
@@ -943,6 +965,22 @@ extern "C" fn kernel_main() -> ! {
         init_entropy(&virtio);
         held
     };
+
+    // The Pi 4's Ethernet (genetnic.rs), when the tables declared one and
+    // no virtio NIC took the cell. Its receive area's mapping is logged
+    // first, on every boot: non-cacheable where the firmware says DMA is
+    // not coherent (the Pi), cacheable everywhere else (the control).
+    genetnic::report_rx_area();
+    if let Some(declared) = genet_declared {
+        if syscall::net_device_installed() {
+            console::println!("Ouroboros kernel: genet: a NIC is already installed: the GENET is left alone");
+        // SAFETY: the identity map is installed, this runs once on the
+        // boot core, and the firmware's driver stopped with boot services.
+        } else if let Some(device) = unsafe { genetnic::init(declared) } {
+            syscall::install_net_device(nic::Nic::Genet(device));
+            console::println!("Ouroboros kernel: NIC installed for the network server");
+        }
+    }
 
     // Third disk path, the SD-card arc, read before the second: an SD card
     // on a controller found before the exit (QEMU's on PCI, the Pi's EMMC2
@@ -1345,16 +1383,13 @@ struct SdController {
 /// # Safety
 /// `rsdp` as `acpi::find_rsdp` returns it.
 unsafe fn emmc2_from_acpi(rsdp: Option<*const u8>) -> Option<SdController> {
-    let mut tables: [&[u8]; amlscan::MAX_TABLES] = [&[]; amlscan::MAX_TABLES];
-    let count = match unsafe { acpi::aml_table_slices(rsdp, &mut tables) } {
-        Ok(count) => count,
+    let found = match unsafe { acpi::declared(rsdp, amlscan::EMMC2_HID) } {
+        Ok(found) => found,
         Err(e) => {
             log::info!("Ouroboros kernel: sd: ACPI tables not read ({e:?}): no EMMC2 is taken");
             return None;
         }
     };
-    let mut found = amlscan::Transports::new();
-    amlscan::declared(&tables[..count], amlscan::EMMC2_HID, &mut found);
     let left_out = found.unreadable + found.absent + found.status_unknown + found.dropped;
     match found.as_slice() {
         [] if left_out == 0 => None,

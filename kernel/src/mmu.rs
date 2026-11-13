@@ -1076,6 +1076,13 @@ pub(crate) fn walks_as_device(va: u64) -> bool {
     walked_attr(va) == Some(MAIR_ATTR_DEVICE_NGNRNE)
 }
 
+/// Whether `va` walks as Normal Non-cacheable memory in the current
+/// tables: for a driver's log line about its own DMA memory, read from
+/// what the MMU does and not from the list `main.rs` handed in.
+pub(crate) fn walks_as_noncacheable(va: u64) -> bool {
+    walked_attr(va) == Some(MAIR_ATTR_NORMAL_NC)
+}
+
 /// Boot-time self-check of the non-cacheable mapping, through the
 /// hardware walker, in EVERY task's view (a view with its task's region
 /// in the same 1GB block reaches a range through its own split, an empty

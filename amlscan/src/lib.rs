@@ -180,6 +180,18 @@ impl Transports {
         self.count == 0
     }
 
+    /// The device, when exactly one was declared present: one kept and
+    /// none dropped. The rule for a device there can only be one of (the
+    /// Pi's EMMC2, its Ethernet): with two, which one is meant would be a
+    /// guess, so none is taken. Declarations this scan could not read, or
+    /// found absent, do not count against the one that is present.
+    pub fn one(&self) -> Option<&Transport> {
+        match self.as_slice() {
+            [t] if self.dropped == 0 => Some(t),
+            _ => None,
+        }
+    }
+
     fn push(&mut self, t: Transport) {
         if self.list[..self.count].contains(&t) {
             return;

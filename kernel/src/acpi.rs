@@ -276,6 +276,23 @@ pub unsafe fn virtio_mmio_transports(rsdp: Option<*const u8>) -> Result<amlscan:
     Ok(found)
 }
 
+/// What the firmware's tables declare present under one `_HID`: every
+/// AML table collected, then `amlscan::declared`. The one place a device
+/// found by its `_HID` is looked for (the Pi's EMMC2 for the SD card, its
+/// GENET for the network and for the `\NETDUMP` scan); each caller words
+/// its own log lines, and `amlscan::Transports::one` is the shared rule
+/// for "exactly one". Before the exit, while the tables are mapped.
+///
+/// # Safety
+/// Same as [`find_table`].
+pub unsafe fn declared(rsdp: Option<*const u8>, hid: &[u8]) -> Result<amlscan::Transports, DiscoveryError> {
+    let mut tables: [&[u8]; amlscan::MAX_TABLES] = [&[]; amlscan::MAX_TABLES];
+    let count = unsafe { aml_table_slices(rsdp, &mut tables) }?;
+    let mut found = amlscan::Transports::new();
+    amlscan::declared(&tables[..count], hid, &mut found);
+    Ok(found)
+}
+
 /// Every AML table the firmware gives, each once and whole (its header
 /// included), into `tables`; returns how many. The one collection
 /// `virtio_mmio_transports` and `sdscan.rs` share.

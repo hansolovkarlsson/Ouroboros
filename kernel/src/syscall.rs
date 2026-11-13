@@ -106,6 +106,12 @@ pub fn install_rng_device(device: crate::virtio_rng::Device) {
     unsafe { *RNG.get() = Some(device) };
 }
 
+/// Whether a NIC is installed: `main.rs` asks before it brings up a second
+/// kind of one.
+pub fn net_device_installed() -> bool {
+    unsafe { (*NET.get()).is_some() }
+}
+
 /// Installs the NIC the `NET_*` syscalls serve (from `main.rs::init_net`).
 pub fn install_net_device(device: crate::nic::Nic) {
     unsafe { *NET.get() = Some(device) };

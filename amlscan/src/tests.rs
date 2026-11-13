@@ -1162,3 +1162,24 @@ fn a_patching_crs_beside_a_local_one_is_unreadable() {
     let alone = [hid(b"BCM6E4E").as_slice(), &patching].concat();
     assert_eq!(genet(&[&table(&[&device(b"ETH0", &alone)])]).as_slice(), &[PI4_EMMC2]);
 }
+
+#[test]
+fn one_is_exactly_one_kept_and_none_dropped() {
+    let t = Transport { base: 0x1000, size: 0x100, intid: Some(48) };
+    let mut found = Transports::new();
+    assert_eq!(found.one(), None);
+    found.push(t);
+    assert_eq!(found.one(), Some(&t));
+    // Declarations not read, absent or of unknown status beside it do not
+    // count against the one that is present.
+    found.unreadable = 2;
+    found.absent = 1;
+    found.status_unknown = 1;
+    assert_eq!(found.one(), Some(&t));
+    // One past the list's room is a second device: which is meant is a guess.
+    let mut dropped = found;
+    dropped.dropped = 1;
+    assert_eq!(dropped.one(), None);
+    found.push(Transport { base: 0x2000, ..t });
+    assert_eq!(found.one(), None);
+}

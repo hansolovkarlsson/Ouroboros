@@ -3,11 +3,12 @@
 //! consoles (an enum and not a trait object, since `Box<dyn ...>` needs the
 //! boot-services allocator that is gone after the exit).
 //!
-//! One arm today, virtio-net. The second is the Pi 4's GENET
-//! (`docs/roadmap/roadmap-pi-net.md`, design 6; this file is that plan's
-//! step 3, which changes no behaviour). The enum exists first so the driver
-//! arrives as an arm and `syscall.rs`, `main.rs` and `netd` do not change
-//! with it.
+//! Two arms: virtio-net, and since the plan's step 5 the Pi 4's GENET
+//! (`docs/roadmap/roadmap-pi-net.md`, design 6; `genetnic.rs`). The enum
+//! came first, in step 3, so the driver arrived as an arm and
+//! `syscall.rs` and `netd` did not change with it. **The GENET arm is
+//! bring-up alone so far:** it answers `mac` and `has_frame`, refuses a
+//! send and returns no frame, until steps 6 and 7.
 //!
 //! What every arm owes its callers, stated here because the callers are in
 //! three files and cannot see a driver:
@@ -27,9 +28,11 @@
 //!   driver below. The syscalls refuse anything longer before a driver sees
 //!   it, and the drivers rely on that: virtio-net's `poll_frame` indexes its
 //!   own buffer by the caller's length. An arm whose device carries less
-//!   refuses the frame in `send_frame` and never returns a longer one. The
-//!   assertion below holds the arm there is to the bound.
+//!   refuses the frame in `send_frame` and never returns a longer one
+//!   (GENET: 1532 to send, 1536 received). The assertions below hold each
+//!   arm to the bound.
 
+use crate::genetnic;
 use crate::virtio_net;
 
 /// One error type across the drivers. `NET_SEND` answers `NET_ERROR` for any
@@ -38,29 +41,37 @@ use crate::virtio_net;
 #[derive(Debug)]
 pub enum Error {
     Virtio(virtio_net::Error),
+    Genet(genet::mac::TxError),
 }
 
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Error::Virtio(e) => write!(f, "virtio-net: {e}"),
+            Error::Genet(e) => write!(f, "genet: {e:?}"),
         }
     }
 }
 
 pub enum Nic {
     Virtio(virtio_net::Device),
+    /// The Pi 4's on-board Ethernet (`genetnic.rs`).
+    Genet(genetnic::Device),
 }
 
 // The ABI's bound against the arm's own: a frame or buffer the syscalls let
 // through is one virtio-net's buffers hold.
 const _: () = assert!(syscall_abi::NET_MAX_FRAME as usize <= virtio_net::MAX_FRAME);
+// GENET carries less than the bound in both directions, so it refuses a
+// longer send itself and returns no frame longer than the bound.
+const _: () = assert!(genet::mac::RX_MAX_FRAME <= syscall_abi::NET_MAX_FRAME as usize);
 
 impl Nic {
     /// The device's MAC address, as `NET_MAC` returns it.
     pub fn mac(&self) -> [u8; 6] {
         match self {
             Nic::Virtio(d) => d.mac(),
+            Nic::Genet(d) => d.mac(),
         }
     }
 
@@ -70,6 +81,10 @@ impl Nic {
     pub fn intid(&self) -> Option<u32> {
         match self {
             Nic::Virtio(d) => d.intid(),
+            // Polled, whatever its `_CRS` names (the plan's design 7): an
+            // INTID reported is one `main.rs` enables, and nothing here
+            // would clear the level-triggered line.
+            Nic::Genet(_) => None,
         }
     }
 
@@ -82,6 +97,8 @@ impl Nic {
     pub unsafe fn ack_interrupt(&self) {
         match self {
             Nic::Virtio(d) => unsafe { d.ack_interrupt() },
+            // No interrupt is reported, so none is taken.
+            Nic::Genet(_) => {}
         }
     }
 
@@ -95,6 +112,8 @@ impl Nic {
     pub unsafe fn send_frame(&mut self, frame: &[u8], timeout_ticks: u64) -> Result<(), Error> {
         match self {
             Nic::Virtio(d) => unsafe { d.send_frame(frame, timeout_ticks) }.map_err(Error::Virtio),
+            // Its own bound on the wait (`genet::mac::TX_POLLS`).
+            Nic::Genet(d) => d.send_frame(frame).map_err(Error::Genet),
         }
     }
 
@@ -106,6 +125,7 @@ impl Nic {
     pub unsafe fn has_frame(&self) -> bool {
         match self {
             Nic::Virtio(d) => unsafe { d.has_frame() },
+            Nic::Genet(d) => d.has_frame(),
         }
     }
 
@@ -120,6 +140,7 @@ impl Nic {
     pub unsafe fn poll_frame(&mut self, out: &mut [u8]) -> Option<usize> {
         match self {
             Nic::Virtio(d) => unsafe { d.poll_frame(out) },
+            Nic::Genet(d) => d.poll_frame(out),
         }
     }
 }

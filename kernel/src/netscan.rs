@@ -82,16 +82,13 @@ impl genet::Bus for Mmio {
 /// `rsdp` as `acpi::find_rsdp` returns it. Any GENET the tables declare
 /// present is mapped by the firmware.
 pub unsafe fn report(rsdp: Option<*const u8>) {
-    let mut tables: [&[u8]; amlscan::MAX_TABLES] = [&[]; amlscan::MAX_TABLES];
-    let count = match unsafe { acpi::aml_table_slices(rsdp, &mut tables) } {
-        Ok(count) => count,
+    let found = match unsafe { acpi::declared(rsdp, amlscan::GENET_HID) } {
+        Ok(found) => found,
         Err(e) => {
             log::info!("Ouroboros kernel: net: ACPI tables not read ({e:?}): no register touched");
             return;
         }
     };
-    let mut found = amlscan::Transports::new();
-    amlscan::declared(&tables[..count], amlscan::GENET_HID, &mut found);
     log::info!(
         "Ouroboros kernel: net: GENET declared present: {} (unreadable {}, absent {}, status unknown {}, dropped {})",
         found.as_slice().len(),
@@ -100,12 +97,9 @@ pub unsafe fn report(rsdp: Option<*const u8>) {
         found.status_unknown,
         found.dropped
     );
-    let c = match found.as_slice() {
-        [c] if found.dropped == 0 => c,
-        _ => {
-            log::info!("Ouroboros kernel: net: not exactly one GENET declared: no register touched");
-            return;
-        }
+    let Some(c) = found.one() else {
+        log::info!("Ouroboros kernel: net: not exactly one GENET declared: no register touched");
+        return;
     };
     log::info!("Ouroboros kernel: net: GENET registers {:#x}, {:#x} bytes, INTID {:?}", c.base, c.size, c.intid);
     if !genet::block_usable(c.base, c.size) {
