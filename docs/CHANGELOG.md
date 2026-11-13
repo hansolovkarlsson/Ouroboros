@@ -11,6 +11,20 @@ here actually works today, see [`architecture.md`](architecture.md) and
 
 **Not yet released.** Changes since v0.25.0, drafted as they land.
 
+**The Pi's Ethernet sends a frame; it does not yet receive (2026-11-13, #463).**
+Step 6 of `docs/roadmap/roadmap-pi-net.md`. With a link, the kernel turns
+the MAC's transmitter on and `NET_SEND` sends through it, from one
+transmit buffer mapped non-cacheable like the receive area. The receiver
+stays off until step 7, so `ping` on the Pi still gets no answer. The
+board ran steps 2 and 5 the same day and both passed: one GENET v5, the
+board's own MAC address, one PHY whose link follows the cable, and the
+SD card mounting on the shared discovery rule. On the board the device
+took its first frame (`genet: first frame sent`); whether the frame
+reached the wire whole has not been seen yet, and the plan's step 6 says
+how it will be. The PHY's log line is now two, the first saying what the
+firmware left in it. On QEMU and Parallels nothing changes but one more
+line at boot, how the transmit buffer walks.
+
 **The kernel brings the Pi's Ethernet up and reads its link; nothing is sent yet (2026-11-13, #457).**
 Step 5 of `docs/roadmap/roadmap-pi-net.md`, built and not yet run on a
 board. `kernel/src/genetnic.rs` takes the one GENET the ACPI tables
