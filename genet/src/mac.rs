@@ -43,7 +43,9 @@
 //!   needs in order to drain. U-Boot resets the MAC and clears the DMAs'
 //!   enable bits afterwards, with no wait, on a device nothing left
 //!   running. A ring is never set up under a DMA that has not said it
-//!   stopped.
+//!   stopped. Where Linux warns of a DMA that did not and goes on, this
+//!   stops for the receive DMA, which writes memory, and gives the
+//!   transmit DMA until after the MAC's reset.
 //! - A received frame shorter than an Ethernet header, or longer than the
 //!   maximum the device was told, is dropped, whatever the device says.
 //!
@@ -195,9 +197,13 @@ pub enum InitError {
     NoMac([u8; 6]),
     /// The receive area's address is zero or runs past 2^64.
     BadBuffers,
-    /// A DMA did not say it stopped (the one exception to "nothing was
-    /// written": the interrupts were masked and the MAC and the DMAs told
-    /// to stop, and no ring or descriptor was touched).
+    /// A DMA did not say it stopped, and no ring or descriptor was
+    /// touched. Which one says how far `init` got: the receive DMA
+    /// (`rdma` false) ends it at the stop, with the interrupts masked and
+    /// the MAC and DMAs told to stop and nothing else written; the
+    /// transmit DMA alone (`tdma` false, `rdma` true) ends it after the
+    /// MAC's reset, when it was asked a last time, so the MAC has been
+    /// reset and its address written back.
     DmaStuck(Stopped),
 }
 
@@ -211,6 +217,7 @@ pub struct Stopped {
 
 impl Stopped {
     /// Both stopped: the device writes to no memory and reads none.
+    /// `rdma` alone is "writes to no memory".
     pub fn both(&self) -> bool {
         self.tdma && self.rdma
     }
@@ -283,9 +290,25 @@ pub struct Genet {
     drops: Drops,
 }
 
-fn set<B: Bus>(bus: &mut B, offset: usize, clear: u32, bits: u32) {
+/// Clears and sets bits of a register, and returns what it read.
+fn set<B: Bus>(bus: &mut B, offset: usize, clear: u32, bits: u32) -> u32 {
     let v = bus.read(offset);
     bus.write(offset, (v & !clear) | bits);
+    v
+}
+
+/// Turns off one of the MAC's enables as Linux's `umac_enable_set` does:
+/// not at all while the MAC is held in software reset (nothing is running
+/// to stop, and the register is the reset's), and with a frame's time
+/// after it, since the MAC stops on a frame boundary. A MAC whose enable
+/// is already off is not written and not waited for.
+fn mac_off<B: Bus>(bus: &mut B, enable: u32) {
+    let cmd = bus.read(reg::UMAC_CMD);
+    if cmd & CMD_SW_RESET != 0 || cmd & enable == 0 {
+        return;
+    }
+    bus.write(reg::UMAC_CMD, cmd & !enable);
+    bus.delay_us(MAC_STOP_US);
 }
 
 /// Polls a `DMA_STATUS` until it says disabled, at most
@@ -314,29 +337,39 @@ fn flush_tx<B: Bus>(bus: &mut B) {
 ///
 /// 1. every interrupt masked (Linux does this last; nothing here takes
 ///    one, so first costs nothing and a firmware's cannot fire meanwhile);
-/// 2. the MAC's **receiver** off, and a frame's time for it to stop on a
-///    frame boundary;
+/// 2. the MAC's **receiver** off (`mac_off`, Linux's `umac_enable_set`);
 /// 3. `bcmgenet_dma_teardown`: the transmit DMA off and polled, the wait
-///    for frames in flight, the receive DMA off and polled;
-/// 4. the MAC's **transmitter** off, and a frame's time. Linux's comment
-///    is "TX DMA disabled must be done before this": a transmit DMA with a
-///    frame still queued drains it through the MAC, and with the
-///    transmitter already off it may never say it stopped;
+///    for frames in flight, the receive DMA off and polled. A transmit DMA
+///    that had not said it stopped before that wait is **asked again
+///    after it**: the wait is the time it was given to finish;
+/// 4. the MAC's **transmitter** off. Linux's comment is "TX DMA disabled
+///    must be done before this": a transmit DMA with a frame still queued
+///    drains it through the MAC;
 /// 5. U-Boot's flush of the transmit FIFO.
 ///
+/// The wait for frames in flight is skipped when both DMAs were already
+/// off, so stopping a stopped device costs no time.
+///
 /// [`quiet`], [`Genet::init`] and [`Genet::stop`] all stop the device
-/// through this, so the order is in one place.
+/// through this, so the order is in one place. **What the answer means is
+/// each caller's:** a receive DMA that did not stop may still write
+/// memory; a transmit DMA that did not only reads it, and Linux warns of
+/// either and goes on.
 fn halt<B: Bus>(bus: &mut B) -> Stopped {
     mask_interrupts(bus);
-    set(bus, reg::UMAC_CMD, CMD_RX_EN, 0);
-    bus.delay_us(MAC_STOP_US);
-    set(bus, reg::TDMA_CTRL, DMA_EN, 0);
-    let tdma = dma_stopped(bus, reg::TDMA_STATUS);
-    bus.delay_us(DMA_DRAIN_US);
+    mac_off(bus, CMD_RX_EN);
+    let tdma_was_on = set(bus, reg::TDMA_CTRL, DMA_EN, 0) & DMA_EN != 0;
+    let mut tdma = dma_stopped(bus, reg::TDMA_STATUS);
+    let rdma_was_on = bus.read(reg::RDMA_CTRL) & DMA_EN != 0;
+    if tdma_was_on || rdma_was_on {
+        bus.delay_us(DMA_DRAIN_US);
+    }
     set(bus, reg::RDMA_CTRL, DMA_EN, 0);
     let rdma = dma_stopped(bus, reg::RDMA_STATUS);
-    set(bus, reg::UMAC_CMD, CMD_TX_EN, 0);
-    bus.delay_us(MAC_STOP_US);
+    if !tdma {
+        tdma = dma_stopped(bus, reg::TDMA_STATUS);
+    }
+    mac_off(bus, CMD_TX_EN);
     flush_tx(bus);
     Stopped { tdma, rdma }
 }
@@ -354,10 +387,13 @@ fn mask_interrupts<B: Bus>(bus: &mut B) {
 /// design 4): its interrupts masked, the MAC and both DMAs stopped in the
 /// order `halt` gives, each DMA polled until it says so. Does it only to
 /// GENET v5: `None` is any other version, with nothing written. **Only
-/// when the answer's `both()` is true does the device write to no
-/// memory**; otherwise a DMA was told to stop and did not say it had, and
-/// the caller must not take the memory the firmware gave it. About 14 ms
-/// on a device that stops, 24 ms on one that does not.
+/// when the answer's `rdma` is true does the device write to no memory**:
+/// the receive DMA is the one that writes, and a caller must not take the
+/// memory the firmware gave it while that DMA has not said it stopped. A
+/// transmit DMA that has not (`tdma` false) only reads memory;
+/// [`Genet::init`] asks it once more after its reset. About 14 ms on a
+/// running device that stops, 29 ms on one that does not, and no wait at
+/// all on one already stopped.
 pub fn quiet<B: Bus>(bus: &mut B) -> Option<Stopped> {
     if version(bus.read(reg::SYS_REV_CTRL)).0 != MAJOR_V5 {
         return None;
@@ -392,9 +428,11 @@ impl Genet {
         // Stopped first, in the order a running device stops in, before the
         // reset below takes the MAC away from a transmit DMA that may
         // still have a frame for it. U-Boot resets and then clears the
-        // DMAs' enables, on a device nothing left running.
+        // DMAs' enables, on a device nothing left running. A receive DMA
+        // that will not stop ends it here, with nothing reset: it may
+        // still be writing memory.
         let stopped = halt(bus);
-        if !stopped.both() {
+        if !stopped.rdma {
             return Err(InitError::DmaStuck(stopped));
         }
 
@@ -428,14 +466,15 @@ impl Genet {
         bus.write(reg::UMAC_MAC0, u32::from_be_bytes([address[0], address[1], address[2], address[3]]));
         bus.write(reg::UMAC_MAC1, u32::from_be_bytes([0, 0, address[4], address[5]]));
 
-        // bcmgenet_disable_dma. The DMAs stopped above; this is U-Boot's
-        // place for it, kept so the sequence from here on is U-Boot's, and
-        // each is asked once more before its ring is touched.
+        // bcmgenet_disable_dma, in U-Boot's place, so the sequence from
+        // here on is U-Boot's. The receive DMA stopped above. A transmit
+        // DMA that had not said so (a frame it could not drain) is asked
+        // again now that the MAC has been reset and the FIFO flushed, and
+        // its ring is not touched unless it has.
         set(bus, reg::TDMA_CTRL, DMA_EN, 0);
         set(bus, reg::RDMA_CTRL, DMA_EN, 0);
         flush_tx(bus);
-        let stopped = Stopped { tdma: dma_stopped(bus, reg::TDMA_STATUS), rdma: dma_stopped(bus, reg::RDMA_STATUS) };
-        if !stopped.both() {
+        if !stopped.tdma && !dma_stopped(bus, reg::TDMA_STATUS) {
             return Err(InitError::DmaStuck(stopped));
         }
 

@@ -35,7 +35,7 @@
 use core::cell::UnsafeCell;
 
 use genet::mac::{Genet, InitError, TxError, RX_AREA_LEN};
-use genet::phy::{self, Link};
+use genet::phy::{self, Link, ReadBack};
 
 use crate::{acpi, console, mmu, timer};
 
@@ -178,6 +178,9 @@ pub(crate) unsafe fn discover(rsdp: Option<*const u8>) -> Option<Declared> {
 /// may be a link still coming up), so the wait is not skipped on a guess.
 const LINK_WAIT_MS: u64 = 5000;
 const LINK_POLL_MS: u64 = 100;
+/// How many link reads running may find the MDIO bus stuck busy before the
+/// wait gives up on it.
+const STUCK_READS: u32 = 3;
 
 /// The declared device, made quiet: [`quiet`]'s answer, and what [`init`]
 /// takes, so the device cannot be set up without having been stopped.
@@ -196,7 +199,8 @@ pub(crate) struct Quieted {
 /// `None`, each with its line, when that could not be done: the block is
 /// not mapped as a device (nothing is touched, and **the device is left
 /// as the firmware left it**), the version is not v5 (nothing is
-/// written), or a DMA was told to stop and did not say it had.
+/// written), or the receive DMA was told to stop and did not say it had.
+/// A transmit DMA that has not yet said so is noted and not refused.
 ///
 /// # Safety
 /// After `mmu::install_identity_map`, once, on the boot core, with nothing
@@ -223,15 +227,25 @@ pub(crate) unsafe fn quiet(declared: Declared) -> Option<Quieted> {
             );
             None
         }
-        Some(stopped) if !stopped.both() => {
+        // The receive DMA is the one that writes memory: one that has not
+        // said it stopped is not set up over.
+        Some(stopped) if !stopped.rdma => {
             console::println!(
-                "Ouroboros kernel: genet: WARNING: the device was told to stop and did not say it had (transmit DMA stopped {}, receive DMA stopped {}): the Ethernet is not brought up",
-                stopped.tdma,
-                stopped.rdma
+                "Ouroboros kernel: genet: WARNING: the receive DMA was told to stop and did not say it had (transmit DMA stopped {}): the Ethernet is not brought up",
+                stopped.tdma
             );
             None
         }
-        Some(_) => Some(Quieted { bus, sys_rev }),
+        Some(stopped) => {
+            if !stopped.tdma {
+                // It only reads memory, and Linux goes on from here too.
+                // The set-up asks it once more, after the MAC's reset.
+                console::println!(
+                    "Ouroboros kernel: genet: the transmit DMA was told to stop and has not yet said it had: it is asked again after the MAC's reset"
+                );
+            }
+            Some(Quieted { bus, sys_rev })
+        }
     }
 }
 
@@ -316,7 +330,12 @@ impl Device {
             }
         };
         match phy::setup(&mut self.bus, addr, id) {
-            Ok(Some(d)) => console::println!(
+            // The set-up was done; its read-back only could not be read.
+            // The link is still asked for.
+            Ok(Some(ReadBack::Failed(e))) => console::println!(
+                "Ouroboros kernel: genet: PHY at MDIO address {addr}, id {id:#010x}: set up and reset; its delays did not read back ({e:?}), so what it holds after the reset is not known"
+            ),
+            Ok(Some(ReadBack::Read(d))) => console::println!(
                 "Ouroboros kernel: genet: PHY at MDIO address {addr}, id {id:#010x}: set up and reset; after the reset its receive clock skew is {} and its transmit clock delay {} (shadows {:#06x}, {:#06x}): {}",
                 if d.rx_skew() { "on" } else { "off" },
                 if d.tx_delay() { "on" } else { "off" },
@@ -335,12 +354,18 @@ impl Device {
         // Asked until the link is up or the time is: a read that says
         // down or negotiating, or that the PHY does not answer (it may
         // still be coming out of its reset), is asked again. A bus whose
-        // command never finishes ends the wait at once: asking again
-        // would write a new command over the one still busy. Only the
-        // last answer is reported.
+        // command never finishes is asked again too, but only
+        // `STUCK_READS` times running: each new command is written over
+        // the one still busy, and one overrun in a wait of seconds is not
+        // a stuck bus. Only the last answer is reported.
         let deadline = timer::deadline_us(LINK_WAIT_MS * 1000);
+        let mut stuck = 0;
         let mut link = phy::link_resolved(&mut self.bus, addr, id);
-        while !matches!(link, Ok(Link::Up { .. }) | Err(genet::MdioError::Busy)) && timer::now_ticks() < deadline {
+        loop {
+            stuck = if matches!(link, Err(genet::MdioError::Busy)) { stuck + 1 } else { 0 };
+            if matches!(link, Ok(Link::Up { .. })) || stuck == STUCK_READS || timer::now_ticks() >= deadline {
+                break;
+            }
             timer::delay_us(LINK_POLL_MS * 1000);
             link = phy::link_resolved(&mut self.bus, addr, id);
         }
@@ -353,7 +378,9 @@ impl Device {
             Ok(Link::Down) => console::println!("Ouroboros kernel: genet: link down (waited {LINK_WAIT_MS} ms)"),
             Ok(Link::Negotiating) => console::println!("Ouroboros kernel: genet: link still negotiating (waited {LINK_WAIT_MS} ms)"),
             Ok(Link::Unresolved) => console::println!("Ouroboros kernel: genet: link up at a speed the PHY does not name (waited {LINK_WAIT_MS} ms)"),
-            Err(genet::MdioError::Busy) => console::println!("Ouroboros kernel: genet: the link did not read: the MDIO bus is stuck busy (not waited for)"),
+            Err(genet::MdioError::Busy) if stuck == STUCK_READS => console::println!(
+                "Ouroboros kernel: genet: the link did not read: the MDIO bus stayed busy for {STUCK_READS} reads running, and the wait was ended there"
+            ),
             Err(e) => console::println!("Ouroboros kernel: genet: the link did not read ({e:?}, waited {LINK_WAIT_MS} ms)"),
         }
     }

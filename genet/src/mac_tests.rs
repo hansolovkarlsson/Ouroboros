@@ -96,6 +96,12 @@ struct Dev {
     fw_tx_pending: bool,
     /// The auxiliary control register reads all ones: nothing drives it.
     aux_reads_ones: bool,
+    /// The same, but only once the PHY has been reset.
+    aux_reads_ones_after_reset: bool,
+    resets: u32,
+    /// A transmit DMA that has not stopped does once the transmit FIFO is
+    /// flushed (ours, for a DMA the MAC's reset and flush release).
+    tdma_freed_by_flush: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -178,7 +184,18 @@ fn board() -> Dev {
         dma_stop_left: (0, 0),
         fw_tx_pending: false,
         aux_reads_ones: false,
+        aux_reads_ones_after_reset: false,
+        resets: 0,
+        tdma_freed_by_flush: false,
     }
+}
+
+/// [`left_running`], with a transmit DMA that stops only at a flush.
+fn left_running_stuck_until_flush() -> Dev {
+    let mut d = left_running();
+    d.dma_stop_lag = (u32::MAX, 0);
+    d.tdma_freed_by_flush = true;
+    d
 }
 
 /// The board as a firmware that used the device might leave it: running,
@@ -204,6 +221,7 @@ impl Dev {
         self.mdio_log.push((true, r as u8, value));
         match r {
             0 if value & 0x8000 != 0 => {
+                self.resets += 1;
                 self.reset_left = self.reset_polls;
                 if self.reset_wipes {
                     (self.aux[7], self.shd[3]) = SHADOW_DEFAULTS;
@@ -234,7 +252,7 @@ impl Dev {
                 }
             }
             1 => self.bmsr_first.take().unwrap_or(self.phy_regs[1]),
-            0x18 if self.aux_reads_ones => 0xffff,
+            0x18 if self.aux_reads_ones || (self.aux_reads_ones_after_reset && self.resets > 0) => 0xffff,
             0x18 => (self.aux[self.aux_read] & !0x8000) | self.aux_read as u16,
             0x1c => self.shd_read_high.unwrap_or((self.shd_sel as u16) << 10) | self.shd[self.shd_sel],
             _ => self.phy_regs[r],
@@ -337,6 +355,9 @@ impl Bus for Dev {
         if offset == RDMA_CTL && self.reg(RDMA_CTL) & 1 != 0 && value & 1 == 0 {
             self.dma_stop_left.1 = self.dma_stop_lag.1;
         }
+        if offset == 0xb34 && value == 1 && self.tdma_freed_by_flush {
+            self.dma_stop_left.0 = 0;
+        }
         match offset {
             // The two indexes the device owns.
             RDMA_PROD | TDMA_CONS => {}
@@ -429,10 +450,9 @@ fn init_is_u_boots_sequence_write_for_write() {
     let head = [
         // Every interrupt masked and cleared (Linux's bcmgenet_intr_disable).
         W(0x210, 0xffff_ffff), W(0x208, 0xffff_ffff), W(0x250, 0xffff_ffff), W(0x248, 0xffff_ffff),
-        // Stopped in Linux's order: the receiver, the transmit DMA, the
-        // drain, the receive DMA, the transmitter, the flush.
-        W(0x808, 0), D(2000), W(0x5044, 0), D(10_000), W(0x3044, 0), W(0x808, 0), D(2000),
-        W(0xb34, 1), D(10), W(0xb34, 0),
+        // Stopped: on a board with nothing running, the two DMAs' enables
+        // and the flush, with no MAC write and no wait.
+        W(0x5044, 0), W(0x3044, 0), W(0xb34, 1), D(10), W(0xb34, 0),
         // bcmgenet_eth_probe.
         W(0x04, 3), W(0x08, 0), D(10), W(0x808, 0), W(0x808, 0xa000),
         // bcmgenet_umac_reset.
@@ -582,6 +602,36 @@ fn a_dma_is_waited_for_until_it_says_it_stopped() {
     assert_eq!(stopped, Stopped { tdma: false, rdma: true });
     assert!(!stopped.both());
     assert!(quiet(&mut left_running()).unwrap().both());
+    // A transmit DMA slower than its first 5 ms of polls is asked again
+    // after the wait it was given to drain, and has stopped by then.
+    let mut d = left_running();
+    d.dma_stop_lag = (7000, 0);
+    assert_eq!(quiet(&mut d), Some(Stopped { tdma: true, rdma: true }));
+    assert_eq!(d.delayed_us(), 2000 + 5000 + 10_000 + 2000 + 2000 + 10);
+    // Asked twice and no more: 10,000 polls is the most it gets.
+    let mut d = left_running();
+    d.dma_stop_lag = (10_000, 0);
+    assert_eq!(quiet(&mut d), Some(Stopped { tdma: false, rdma: true }));
+}
+
+#[test]
+fn stopping_a_stopped_device_costs_no_wait() {
+    let mut d = board();
+    assert_eq!(quiet(&mut d), Some(Stopped { tdma: true, rdma: true }));
+    // Only the flush's own 10 us, and the MAC's register is not written.
+    assert_eq!(d.delayed_us(), 10);
+    assert!(!d.writes().iter().any(|w| w.0 == UMAC_CMD));
+}
+
+#[test]
+fn a_mac_held_in_reset_is_left_alone() {
+    // Linux's umac_enable_set returns at once when CMD_SW_RESET is set.
+    let mut d = left_running();
+    d.regs.insert(UMAC_CMD, 0x200b);
+    assert_eq!(quiet(&mut d), Some(Stopped { tdma: true, rdma: true }));
+    assert!(!d.writes().iter().any(|w| w.0 == UMAC_CMD), "{:?}", d.writes());
+    // The DMAs' drain is still waited for, the MAC's frame times are not.
+    assert_eq!(d.delayed_us(), 10_000 + 10);
 }
 
 #[test]
@@ -594,10 +644,24 @@ fn init_touches_no_ring_of_a_dma_that_did_not_stop() {
         assert!(d.violations.is_empty(), "{:?}", d.violations);
         // Nothing at or past the receive descriptors but the two controls.
         assert!(d.writes().iter().all(|w| w.0 < 0x2000 || w.0 == 0x3044 || w.0 == 0x5044), "{:?}", d.writes());
-        // And it ended at the stop: the MAC was not reset, nor the port
-        // mode written, under a DMA still running.
-        assert!(!d.writes().iter().any(|w| *w == (0x808, 0xa000) || w.0 == 0x04), "{:?}", d.writes());
+        let reset = d.writes().iter().any(|w| *w == (0x808, 0xa000) || w.0 == 0x04);
+        if stopped.rdma {
+            // The transmit DMA alone: it was given until after the MAC's
+            // reset, and asked a last time there.
+            assert!(reset, "{:?}", d.writes());
+        } else {
+            // The receive DMA may still write memory: it ended at the
+            // stop, the MAC not reset nor the port mode written.
+            assert!(!reset, "{:?}", d.writes());
+        }
     }
+    // A transmit DMA the reset and the flush release is set up.
+    let mut d = left_running();
+    d.dma_stop_lag = (u32::MAX, 0);
+    d.tdma_freed_by_flush = true;
+    assert_eq!(quiet(&mut left_running_stuck_until_flush()), Some(Stopped { tdma: false, rdma: true }));
+    assert!(Genet::init(&mut d, RX_BASE).is_ok());
+    assert!(d.violations.is_empty(), "{:?}", d.violations);
     // A DMA slow to stop is waited for, and then set up.
     let mut d = left_running();
     d.dma_stop_lag = (300, 300);
@@ -1179,7 +1243,7 @@ fn an_mdio_write_is_u_boots_command_in_two_writes() {
 #[test]
 fn setup_is_u_boots_clock_delays_then_its_reset() {
     let mut d = bcm();
-    let delays = setup(&mut d, 1, BCM).unwrap().expect("a BCM54210E");
+    let delays = setup(&mut d, 1, BCM).unwrap().expect("a BCM54210E").delays().expect("read back");
     assert_eq!(
         d.mdio_log,
         [
@@ -1220,7 +1284,7 @@ fn setup_sets_the_skew_and_clears_the_delay_whatever_was_there() {
         let mut d = bcm();
         d.aux[7] = misc;
         d.shd[3] = clk;
-        let delays = setup(&mut d, 1, BCM).unwrap().unwrap();
+        let delays = setup(&mut d, 1, BCM).unwrap().unwrap().delays().unwrap();
         assert_eq!(d.aux[7], misc | 0x8100, "misc {misc:#x}");
         assert_eq!(d.shd[3], clk & !0x0200, "clock {clk:#x}");
         assert!(delays.as_written());
@@ -1233,7 +1297,7 @@ fn a_reset_that_wipes_the_delays_is_seen_in_what_setup_returns() {
     // answer is the PHY's state, not what was asked of it.
     let mut d = bcm();
     d.reset_wipes = true;
-    let delays = setup(&mut d, 1, BCM).unwrap().unwrap();
+    let delays = setup(&mut d, 1, BCM).unwrap().unwrap().delays().unwrap();
     assert_eq!(delays, Delays { misc: 0x0007, clk: 0x0200 });
     assert!(!delays.rx_skew() && delays.tx_delay() && !delays.as_written());
     // The writes themselves were U-Boot's, as in the test above.
@@ -1252,7 +1316,7 @@ fn a_phy_silent_while_it_resets_is_waited_for() {
         let mut d = bcm();
         d.reset_polls = 40;
         d.reset_reads = reads;
-        assert!(setup(&mut d, 1, BCM).unwrap().unwrap().as_written(), "{reads:?}");
+        assert!(setup(&mut d, 1, BCM).unwrap().unwrap().delays().unwrap().as_written(), "{reads:?}");
         // And one that never comes back is a stuck reset, not "no PHY".
         let mut d = bcm();
         d.reset_polls = u32::MAX;
@@ -1285,13 +1349,27 @@ fn a_shadow_that_reads_all_ones_is_no_answer_not_every_setting_on() {
 }
 
 #[test]
+fn a_read_back_that_gets_no_answer_is_not_a_failed_setup() {
+    // The PHY took both writes and came out of its reset; only the look
+    // afterwards went unanswered. The set-up stands, and says the
+    // read-back failed, where an all-ones value would have said "on".
+    let mut d = bcm();
+    d.aux_reads_ones_after_reset = true;
+    let read_back = setup(&mut d, 1, BCM).unwrap().unwrap();
+    assert_eq!(read_back, ReadBack::Failed(MdioError::NoAnswer));
+    assert_eq!(read_back.delays(), None);
+    assert!(d.mdio_log.contains(&(true, 0x18, 0x8177)) && d.mdio_log.contains(&(true, 0x1c, 0x8c10)));
+    assert_eq!(d.resets, 1);
+}
+
+#[test]
 fn only_the_ten_bits_of_data_read_back_are_written_back() {
     // A read that comes back with another selector, or none, above the
     // data: the write still names shadow 3 and nothing else.
     for high in [0x7c00, 0x0000, 0x4000] {
         let mut d = bcm();
         d.shd_read_high = Some(high);
-        assert_eq!(setup(&mut d, 1, BCM).unwrap().unwrap().clk, 0x0010);
+        assert_eq!(setup(&mut d, 1, BCM).unwrap().unwrap().delays().unwrap().clk, 0x0010);
         assert!(d.mdio_log.contains(&(true, 0x1c, 0x8c10)), "high bits {high:#x}: {:?}", d.mdio_log);
         assert_eq!(d.shd[3], 0x0010);
     }

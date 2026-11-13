@@ -959,6 +959,9 @@ extern "C" fn kernel_main() -> ! {
     // no virtio NIC took the cell. Its receive area's mapping is logged
     // first, on every boot: non-cacheable where the firmware says DMA is
     // not coherent (the Pi), cacheable everywhere else (the control).
+    // A device region the list had no room for, said where every console
+    // is up (`ExtraDevices::push` said it once already where one was).
+    extra.report_left_out();
     genetnic::report_rx_area();
     // A declared GENET is made quiet whether or not it is then used: one
     // the firmware left receiving would go on writing into memory that is
@@ -1377,24 +1380,52 @@ struct SdController {
 struct ExtraDevices {
     list: [(u64, u64); mmu::MAX_EXTRA_DEVICES],
     count: usize,
+    left_out: Option<(&'static str, u64)>,
+    left_out_count: usize,
 }
 
 impl ExtraDevices {
     fn new() -> Self {
-        Self { list: [(0, 0); mmu::MAX_EXTRA_DEVICES], count: 0 }
+        Self { list: [(0, 0); mmu::MAX_EXTRA_DEVICES], count: 0, left_out: None, left_out_count: 0 }
     }
 
-    /// After the exit, where the console is the kernel's own.
-    fn push(&mut self, what: &str, base: u64, size: u64) {
+    /// After the exit, where the console is the kernel's own. A region
+    /// left out is said here when there is a console to say it on, and
+    /// kept in `left_out` for [`report_left_out`](Self::report_left_out),
+    /// since a machine whose only console is the framebuffer has none
+    /// until the map these regions are for is installed.
+    fn push(&mut self, what: &'static str, base: u64, size: u64) {
         if self.count < mmu::MAX_EXTRA_DEVICES {
             self.list[self.count] = (base, size);
             self.count += 1;
         } else {
-            console::println!(
-                "Ouroboros kernel: WARNING: {what} @ {base:#x} is given no mapping of its own: the list of device regions is full ({} of them)",
-                mmu::MAX_EXTRA_DEVICES
-            );
+            console::println!("{}", LeftOut(what, base));
+            self.left_out.get_or_insert((what, base));
+            self.left_out_count += 1;
         }
+    }
+
+    /// Says again, once every console is up and through the quiet a boot
+    /// may have set, the first region left out and how many there were.
+    fn report_left_out(&self) {
+        if let Some((what, base)) = self.left_out {
+            console::println_force!("{} ({} region(s) left out in all)", LeftOut(what, base), self.left_out_count);
+        }
+    }
+}
+
+/// The line for a device region the list had no room for.
+struct LeftOut(&'static str, u64);
+
+impl core::fmt::Display for LeftOut {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "Ouroboros kernel: WARNING: {} @ {:#x} is given no mapping of its own: the list of device regions is full ({} of them)",
+            self.0,
+            self.1,
+            mmu::MAX_EXTRA_DEVICES
+        )
     }
 }
 
