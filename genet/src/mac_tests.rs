@@ -140,6 +140,8 @@ const RX_BASE: u64 = 0x1_2340_0000;
 const ADDRESS: [u8; 6] = [0xdc, 0xa6, 0x32, 0x01, 0x02, 0x03];
 
 /// The board out of reset, as predicted: v5, an address, everything off.
+/// (The Pi's firmware hands it over with the MAC and both DMAs on, read
+/// 2026-11-13; the tests of the stop set that up themselves.)
 fn board() -> Dev {
     let mut phy_regs = [0u16; 32];
     phy_regs[1] = 0x796d; // link, negotiated, the gigabit registers present

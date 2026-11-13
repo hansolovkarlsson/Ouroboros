@@ -13,8 +13,9 @@
 //!
 //! **The Pi 4's PHY** (the plan's decision D7, settled 2026-11-13: do what
 //! U-Boot does), from U-Boot's `drivers/net/phy/broadcom.c` at `v2024.10`.
-//! The board's PHY is predicted to be a BCM54213PE; what this file goes
-//! by is the identifier, and the PHYs it takes are the ones U-Boot's
+//! The board's PHY is taken to be a BCM54213PE; its identifier read
+//! `0x600d84a2` on the board (2026-11-13), and what this file goes by is
+//! the identifier, and the PHYs it takes are the ones U-Boot's
 //! BCM54210E driver takes ([`is_bcm54210e`]), which is the driver U-Boot
 //! runs on this board.
 //!

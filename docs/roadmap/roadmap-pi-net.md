@@ -1010,7 +1010,8 @@ Each has a recommendation; none blocks step 2.
      `no NIC this boot`. With the cable in, `ping 192.168.0.1` said
      `unreachable (no ARP reply)`: for want of an answer, not for want of
      a NIC, as the check asks. (That ping could not have been answered
-     with the MAC on either: `netd`'s address is still SLIRP's, step 8.)
+     with the MAC on either: `netd`'s address is still in SLIRP's
+     range, `10.0.2.34` on this board, step 8.)
    - No `EXCEPTION` line in any of the three boots, each run to a login
      and a `shutdown`. None was left running long, so "a sustained boot
      shows no fault" is not yet shown.
@@ -1035,6 +1036,68 @@ Each has a recommendation; none blocks step 2.
    request with the board's MAC address as its source and a whole frame
    (the Mac's interface counts no CRC errors). A check that can fail: with
    the transmit enable left out, `tcpdump` shows nothing.
+
+   **Built 2026-11-13, not yet run on the board.** The transmitter
+   alone: this step turns on half of what U-Boot's start turns on.
+   - *In the crate,* `Genet::start` takes a third argument,
+     `Receiver::Off` or `Receiver::On`, with no default, so a receiver is
+     never on because nobody said otherwise. With `Off` the writes are
+     U-Boot's but the last, which sets the transmit enable alone;
+     `has_frame` says no until a start with `On`, without asking the
+     device. **Why the receiver waits for step 7:** once it is on the
+     receive DMA writes frames to the addresses the descriptors hold, and
+     that the device takes a CPU address as its own is still a prediction
+     ("What is known"). The transmit DMA only reads: a wrong address
+     there is a wrong frame on the wire, which `tcpdump` shows, and no
+     memory written.
+   - *In the kernel,* `genetnic.rs` starts the MAC when the boot finds a
+     link, and `send_frame` sends: the length checked, `tx_idle` asked
+     before the copy, the frame copied into `TX_AREA` (one page of its
+     own, mapped non-cacheable by the rule the receive area is, refused
+     at `init` where it does not walk so), a `dsb sy`, then the crate's
+     `tx_send`. The barrier is the one `xhci.rs` puts before a doorbell:
+     the copy is a Normal store that nothing else orders against the
+     register write that tells the device to read it. A boot that found
+     no link starts nothing, and the first send reads the link once, with
+     no wait, and starts the MAC if it is up (D3, as recommended).
+   - *The PHY's line is two now.* `phy::setup` returns the two shadows as
+     it found them, before any write (the reads it already made, so no
+     MDIO command more), and the kernel prints them: what the firmware
+     left. The line after the reset ends `as U-Boot leaves it` for the
+     state the board read, and says which clock has no delay otherwise.
+   **Checked without the board:** `make test` 443 tests (3 new, of the
+   start with the receiver off, and the found values asserted in two
+   more); 11 mutations of the new lines in the crate, each failed by a
+   test; `make test-netdump` exit 0, with the transmit buffer's line
+   added to the two a machine with no GENET may print, cacheable on QEMU.
+   **Not checked by anything here:** `send_frame`. No QEMU machine has
+   the device, so the kernel's half of a send has run nowhere. It is
+   about 60 lines, and the board is its first run.
+   **On the board.** A card from this tree, no flag needed; the cable in
+   before power. A direct cable from the Pi to the Mac's Ethernet is the
+   best observer: a switch drops a frame with a bad checksum, so through
+   one "nothing arrived" does not tell a bad frame from none.
+   1. On the Mac, with its interface named (`en0` here):
+      `sudo tcpdump -i en0 -e -n -xx ether src d8:3a:dd:85:24:22`.
+   2. Boot, log in, `ping 192.168.0.1` (any address: `netd` still has
+      SLIRP's, so it asks for its gateway, `10.0.2.2`).
+   3. **A pass:** `tcpdump` shows an ARP request, broadcast, from
+      `d8:3a:dd:85:24:22`, asking who has `10.0.2.2`, told by
+      `10.0.2.34` (`netd` takes its last octet from the MAC's, `0x22`),
+      60 bytes (the device pads the 42 `netd` sends); the
+      serial log has `genet: the MAC's transmitter is on at 1000 Mb/s`
+      and `genet: first frame sent: 42 bytes, taken by the device`; the
+      Mac's `netstat -I en0` counts no new input errors. `ping` still
+      says `no ARP reply`: nothing is received yet.
+   4. **What a failure looks like, and where to look:** `handed to the
+      device and not taken in 100 ms`, then `a send refused`, is the
+      transmit DMA not consuming (the ring, or the transmitter); the
+      first-frame line with nothing on the Mac and its error count
+      rising is a bad frame, and the clock delay's other pairing is next
+      (step 4b); the first-frame line with nothing and no errors, through
+      a switch, says little, which is why the direct cable.
+   The serial log's two PHY lines are the other reading this boot is
+   for: `found with ...` is what the firmware left in the PHY.
 
 7. **The board: receive, polled.** The ARP reply and the echo reply come
    back through `NET_RECV`.

@@ -5,6 +5,8 @@
 //! drives nothing, and its lines settle what the plan lists as predicted
 //! (the version, the address the firmware left, the PHY and where it
 //! answers, whether the firmware has the device running at this point).
+//! Run on the board on 2026-11-13: the plan's "From the board's
+//! registers" has what it said, the firmware's device running among it.
 //! That last is read **before the exit**: the firmware's driver may change
 //! the enables in its own exit notification, so it is not the state the
 //! kernel inherits, and step 5 quiets the device whatever it reads.
