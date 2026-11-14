@@ -6,9 +6,10 @@
 //! Two arms: virtio-net, and since the plan's step 5 the Pi 4's GENET
 //! (`docs/roadmap/roadmap-pi-net.md`, design 6; `genetnic.rs`). The enum
 //! came first, in step 3, so the driver arrived as an arm and
-//! `syscall.rs` and `netd` did not change with it. **The GENET arm is
-//! bring-up alone so far:** it answers `mac` and `has_frame`, refuses a
-//! send and returns no frame, until steps 6 and 7.
+//! `syscall.rs` and `netd` did not change with it. **The GENET arm sends
+//! and does not yet receive** (step 6): it answers `mac`, sends a frame
+//! once it has a link, says no to `has_frame` and returns no frame, until
+//! step 7.
 //!
 //! What every arm owes its callers, stated here because the callers are in
 //! three files and cannot see a driver:
@@ -37,7 +38,9 @@ use crate::virtio_net;
 
 /// One error type across the drivers. `NET_SEND` answers `NET_ERROR` for any
 /// of them and nothing prints one today, so the `Display` below has no
-/// caller yet: a send that times out leaves no line.
+/// caller yet. virtio-net's send that times out leaves no line; the
+/// GENET's says its first timeout, its first busy refusal and its first
+/// link that did not read itself (`genetnic.rs`).
 #[derive(Debug)]
 pub enum Error {
     Virtio(virtio_net::Error),

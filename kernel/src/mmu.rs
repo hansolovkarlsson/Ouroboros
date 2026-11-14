@@ -155,7 +155,8 @@
 //! `install_identity_map` is given in `uncached`, and of those only the
 //! ones inside RAM: `main.rs` passes the xHCI/USB DMA pool
 //! (`xhci::dma_region`) and, since 2026-11-13, the Pi's Ethernet's receive
-//! buffers (`genetnic::dma_region`) only when the firmware's ACPI declares DMA
+//! buffers and its transmit buffer (`genetnic::dma_region`,
+//! `genetnic::tx_region`) only when the firmware's ACPI declares DMA
 //! non-coherent (`_CCA 0`, `acpi::dma_noncoherent`) - under a hypervisor
 //! that emulates the device, a guest-side non-cacheable mapping could
 //! disagree with the host's cacheable one, so coherent platforms keep the
@@ -433,9 +434,11 @@ static EL0_L3_TABLES: [Table; MAX_EL0_REGIONS] =
     [const { Table(SyncCell::new([0; ENTRIES_PER_TABLE])) }; MAX_EL0_REGIONS];
 
 /// The most non-cacheable ranges [`install_identity_map`] takes
-/// (`uncached`): today the xHCI/USB DMA pool and the Pi's Ethernet's
-/// receive buffers, where the firmware declares DMA non-coherent, with
-/// room to spare.
+/// (`uncached`): today three, the xHCI/USB DMA pool and the Pi's
+/// Ethernet's receive buffers and transmit buffer, where the firmware
+/// declares DMA non-coherent. One slot is spare, and a range past the
+/// last is dropped without a word (`build_identity_map`), so raise this
+/// with the fifth.
 const MAX_UNCACHED: usize = 4;
 /// Every range an [`NcPlan`] can hold: exactly the explicit ones. Nothing
 /// is made non-cacheable implicitly - an automatic "every device region

@@ -24,11 +24,12 @@ ESP, each graded from the serial console and from QEMU's own trace:
 
 Since the plan's step 5 the kernel also has the driver's own half
 (kernel/src/genetnic.rs), and both boots hold the same for it: with no
-GENET declared it says one thing on every boot and nothing else. The one
-line is how its receive buffers walk in the running tables, which on QEMU,
-where nothing declares non-coherent DMA, must be cacheable on all 128
-pages. That is the control for the line that must say non-cacheable on the
-Pi. No other `genet:` line may appear: the device is not looked for past
+GENET declared it says two things on every boot and nothing else: how its
+receive buffers walk in the running tables, which on QEMU, where nothing
+declares non-coherent DMA, must be cacheable on all 128 pages, and since
+step 6 the same of its one-page transmit buffer. Each is the control for
+the line that must say non-cacheable on the Pi. No other `genet:` line may
+appear: the device is not looked for past
 the tables, and no register of it is touched.
 
 What the scan reads from a real GENET (the registers, the MDIO bus, the
@@ -57,12 +58,15 @@ _spec.loader.exec_module(early)
 # netscan.rs is refused here without this list hearing of it.
 SCAN_LINE = r"Ouroboros kernel: net: "
 BEYOND_THE_DECLARATION = SCAN_LINE + r"(?!GENET declared present: |not exactly one GENET declared: no register touched)"
-# The driver's lines, and of those any but the one a machine with no GENET
-# prints: how its receive area walks. Named by what is allowed, as above.
+# The driver's lines, and of those any but the two a machine with no GENET
+# prints: how its receive area and its transmit buffer (step 6) walk. Named
+# by what is allowed, as above.
 DRIVER_LINE = r"Ouroboros kernel: genet: "
-BEYOND_THE_AREA = DRIVER_LINE + r"(?!receive area )"
+BEYOND_THE_AREA = DRIVER_LINE + r"(?!receive area |transmit buffer )"
 AREA_CACHEABLE = r"genet: receive area 0x[0-9a-f]+, 0x80000 bytes: walks as cacheable memory \(0 of 128 pages non-cacheable\)"
-NO_DRIVER = [("the receive area walks cacheable, all 128 pages", AREA_CACHEABLE)]
+TX_CACHEABLE = r"genet: transmit buffer 0x[0-9a-f]+, 0x1000 bytes: walks as cacheable memory\r?$"
+NO_DRIVER = [("the receive area walks cacheable, all 128 pages", AREA_CACHEABLE),
+             ("the transmit buffer walks cacheable", TX_CACHEABLE)]
 FAULTS = early.CLEAN_BOOT_MUST_NOT
 
 

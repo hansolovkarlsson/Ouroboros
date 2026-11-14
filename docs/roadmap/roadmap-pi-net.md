@@ -172,10 +172,18 @@ tree, so the values are copied here):
   clock skew on, transmit clock delay on** (shadows `0x71e7` and
   `0x0200`), the same in all three boots. The set-up wrote the transmit
   clock delay off, so the line ends `NOT as written`. The read-back alone
-  does not say whether the reset put the delay back or the write never
-  took: the value before the reset is read by `setup` but not logged.
-  **What this means for a frame is not worked out, and step 6 does not
-  start before it is.**
+  did not say whether the reset put the delay back or the write never
+  took; the next bullet does.
+- **The firmware leaves the PHY with its receive clock skew on and its
+  transmit clock delay off** (shadows `0x73e7`, `0x0000`), read before
+  any write of ours, on a fourth boot the same day (build
+  `fff04bf2e4a9`, step 6's). With its MAC's `ID_MODE_DIS` clear, that is
+  Linux's pairing. **And the reset is what turns the delay on:** it was
+  off when found, the set-up wrote it off, and after the reset it read on
+  (`0x71e7`, `0x0200`, as in the three boots before).
+  **What this means for a frame was worked out the same day** (step 4b,
+  "The transmit clock delay, worked out"): it is the state U-Boot's
+  pairing needs, and step 6 goes ahead on it.
 - **The link the driver reads:** up, 1000 Mb/s, full duplex, with the
   cable in; down after the whole 5000 ms wait with it out.
 - **The receive area walks as non-cacheable** in the running tables, 128
@@ -718,8 +726,52 @@ Each has a recommendation; none blocks step 2.
    three). So what U-Boot's order leaves on this PHY is not what its
    delay function writes, at least for the transmit side. Whether these
    are the right delays is still open, and only a frame on the wire
-   answers it (step 6's `tcpdump`); what the reading means for the MAC's
-   side of the delay is to be worked out before step 6 is written.
+   answers it (step 6's `tcpdump`).
+
+   **The transmit clock delay, worked out (2026-11-13, from the two
+   fetched sources and the reading above; no frame has been sent).**
+   RGMII wants the transmit clock delayed about 2 ns once, by the MAC or
+   by the PHY. The two drivers that run this board split it differently
+   for `rgmii-rxid`:
+   - *Linux* (`bcmmii.c`, `bcmgenet_mii_config`, and its
+     `bcm54xx_config_clock_delay`): the MAC delays (`ID_MODE_DIS` clear),
+     the PHY's transmit delay is written off, and the PHY is reset
+     *before* the write, so the write stands.
+   - *U-Boot* (`bcmgenet.c`, `bcmgenet_adjust_link`, and `broadcom.c`,
+     `bcm54210e_config`): the MAC does not delay (`ID_MODE_DIS` set), the
+     PHY's transmit delay is written off, and the PHY is reset *after*
+     the write.
+   Read as written, U-Boot's pairing has no delay anywhere, and U-Boot
+   works on this board. The board's reading is what squares it: in
+   U-Boot's order the PHY ends with its transmit delay **on**. So what
+   U-Boot runs is the PHY's delay on and the MAC's off, one delay, and
+   this driver ends in the same state: the PHY as the board printed it,
+   and `Genet::start` setting `ID_MODE_DIS` as U-Boot does.
+   **So `NOT as written` is the state to expect on this board**, and the
+   line says `as U-Boot leaves it` for it since step 6. **It is not to be
+   repaired:** the delay written off again after the reset, with
+   `ID_MODE_DIS` still set, is no delay at all, the one pairing that is
+   surely wrong. **The other pairing, if step 6's frames are bad, is
+   Linux's whole:** reset first, the delay off after it, `ID_MODE_DIS`
+   clear (which is also how the firmware had the MAC before the exit,
+   `EXT_RGMII_OOB_CTRL` `0x00f00050`).
+   **Not known from this, when it was written:** whether the reset put
+   the delay back or the write never took, and what the firmware left in
+   the PHY. `setup` reads both shadows before it writes them, and step 6
+   logs those values, at no cost in MDIO commands.
+   **Both answered by step 6's first boot (2026-11-13, build
+   `fff04bf2e4a9`).** The line `found with its receive clock skew on and
+   its transmit clock delay off (shadows 0x73e7, 0x0000)` is what the
+   firmware left: with its MAC delaying (`ID_MODE_DIS` clear), Linux's
+   pairing. The delay was off when found, was written off, and read on
+   after the reset, so **the reset restores it**; the write took or did
+   not, and it makes no difference. That makes "U-Boot ends where this
+   driver does" sure whatever U-Boot's boot chain leaves in the PHY: its
+   reset comes last too. So both pairings are seen on this board, the
+   firmware in Linux's and this driver in U-Boot's. Which of them puts a
+   good frame on the wire is still step 6's to show; the firmware's
+   network boot working would speak for Linux's, and U-Boot's for the
+   other, and neither has been watched here.
 
 5. **The board: bring-up and link.** One helper in `acpi.rs` for "the one
    device of this `_HID` declared present", used by this driver, the scan
@@ -976,7 +1028,8 @@ Each has a recommendation; none blocks step 2.
      `no NIC this boot`. With the cable in, `ping 192.168.0.1` said
      `unreachable (no ARP reply)`: for want of an answer, not for want of
      a NIC, as the check asks. (That ping could not have been answered
-     with the MAC on either: `netd`'s address is still SLIRP's, step 8.)
+     with the MAC on either: `netd`'s address is still in SLIRP's
+     range, `10.0.2.34` on this board, step 8.)
    - No `EXCEPTION` line in any of the three boots, each run to a login
      and a `shutdown`. None was left running long, so "a sustained boot
      shows no fault" is not yet shown.
@@ -990,9 +1043,9 @@ Each has a recommendation; none blocks step 2.
    root mounted, in all three boots. `acpi::declared` and
    `Transports::one` gave the SD card's discovery the answer its own
    copy did.
-   **Left open by the run:** the transmit clock delay (step 4b, and
-   before step 6);
-   `LINK_WAIT_MS`, whose 5 s the cable-out boot paid in full.
+   **Left open by the run:** `LINK_WAIT_MS`, whose 5 s the cable-out
+   boot paid in full. The transmit clock delay was worked out the same
+   day (step 4b).
 
 6. **The board: transmit.** `netd` sends what it sends now. With the
    address file in place (step 8 may come first if that is simpler), a
@@ -1001,6 +1054,143 @@ Each has a recommendation; none blocks step 2.
    request with the board's MAC address as its source and a whole frame
    (the Mac's interface counts no CRC errors). A check that can fail: with
    the transmit enable left out, `tcpdump` shows nothing.
+
+   **Built 2026-11-13, not yet run on the board.** The transmitter
+   alone: this step turns on half of what U-Boot's start turns on.
+   - *In the crate,* `Genet::start` takes a third argument,
+     `Receiver::Off` or `Receiver::On`, with no default, so a receiver is
+     never on because nobody said otherwise. With `Off` the writes are
+     U-Boot's but the last, which sets the transmit enable alone;
+     `has_frame` says no until a start with `On`, without asking the
+     device. **Why the receiver waits for step 7:** once it is on the
+     receive DMA writes frames to the addresses the descriptors hold, and
+     that the device takes a CPU address as its own is still a prediction
+     ("What is known"). The transmit DMA only reads: a wrong address
+     there is a wrong frame on the wire, which `tcpdump` shows, and no
+     memory written.
+   - *In the kernel,* `genetnic.rs` starts the MAC when the boot finds a
+     link, and `send_frame` sends: the length checked, `tx_idle` asked
+     before the copy, the frame copied into `TX_AREA` (one page of its
+     own, mapped non-cacheable by the rule the receive area is, refused
+     at `init` where it does not walk so), a `dsb sy`, then the crate's
+     `tx_send`. The barrier is the one `xhci.rs` puts before a doorbell:
+     the copy is a Normal store that nothing else orders against the
+     register write that tells the device to read it. A boot that found
+     no link starts nothing, and the first send reads the link once, with
+     no wait, and starts the MAC if it is up (D3, as recommended).
+   - *The PHY's line is two now.* `phy::setup` returns the two shadows as
+     it found them, before any write (the reads it already made, so no
+     MDIO command more), and the kernel prints them: what the firmware
+     left. The line after the reset ends `as U-Boot leaves it` for the
+     state the board read, and says which clock has no delay otherwise.
+   **Checked without the board:** `make test` 443 tests (3 new, of the
+   start with the receiver off, and the found values asserted in two
+   more); 11 mutations of the new lines in the crate, each failed by a
+   test; `make test-netdump` exit 0, with the transmit buffer's line
+   added to the two a machine with no GENET may print, cacheable on QEMU.
+   **Not checked by anything here:** `send_frame`. No QEMU machine has
+   the device, so the kernel's half of a send has run nowhere. It is
+   about 60 lines, and the board is its first run.
+   **On the board.** A card from this tree, no flag needed; the cable in
+   before power. A direct cable from the Pi to the Mac's Ethernet is the
+   best observer: a switch drops a frame with a bad checksum, so through
+   one "nothing arrived" does not tell a bad frame from none.
+   1. On the Mac, with its interface named (`en0` here):
+      `sudo tcpdump -i en0 -e -n -xx ether src d8:3a:dd:85:24:22`.
+   2. Boot, log in, `ping 192.168.0.1` (any address: `netd` still has
+      SLIRP's, so it asks for its gateway, `10.0.2.2`).
+   3. **A pass:** `tcpdump` shows an ARP request, broadcast, from
+      `d8:3a:dd:85:24:22`, asking who has `10.0.2.2`, told by
+      `10.0.2.34` (`netd` takes its last octet from the MAC's, `0x22`),
+      60 bytes (the device pads the 42 `netd` sends); the
+      serial log has `genet: the MAC's transmitter is on at 1000 Mb/s`
+      and `genet: first frame sent: 42 bytes, taken by the device`; the
+      Mac's `netstat -I en0` counts no new input errors. `ping` still
+      says `no ARP reply`: nothing is received yet.
+   4. **What a failure looks like, and where to look:** `handed to the
+      device and not taken in 100 ms`, then `a send refused`, is the
+      transmit DMA not consuming (the ring, or the transmitter); the
+      first-frame line with nothing on the Mac and its error count
+      rising is a bad frame, and the clock delay's other pairing is next
+      (step 4b); the first-frame line with nothing and no errors, through
+      a switch, says little, which is why the direct cable.
+   The serial log's two PHY lines are the other reading this boot is
+   for: `found with ...` is what the firmware left in the PHY.
+
+   **First run on the board, 2026-11-13, by Hans (build
+   `fff04bf2e4a9`): the kernel's half passed, the wire is not yet
+   seen.** The transmit buffer walks non-cacheable; the link came up at
+   1000 Mb/s full duplex; `the MAC's transmitter is on at 1000 Mb/s`;
+   and at `ping 192.168.0.1`, `first frame sent: 42 bytes, taken by the
+   device`, with no timeout and no busy refusal after it. So
+   `send_frame` ran, and the transmit DMA consumed a descriptor. The PHY's
+   two lines are in step 4b.
+   **`tcpdump` showed nothing, and that says nothing:** the Mac was on
+   wireless, behind the router. A frame with a bad checksum is dropped
+   by the router's switch, and a good ARP request for an address outside
+   the router's subnet may not be passed to the wireless side. The check
+   is still owed, over a direct cable to a USB Ethernet adapter on the
+   Mac, with the adapter's interface in the `tcpdump` and `netstat`
+   commands above.
+
+   **The review of the step (#463, read after the first boot, nothing
+   run by it).** Nine findings, none in the path a frame takes. Fixed,
+   the ones Hans chose:
+   - *A send checked its length after it had read the link*, and on a
+     boot with no link could start the MAC for a frame it then refused.
+     The old code matched its doc's order, the link first; what it
+     broke was the doc's "the length is checked before anything is
+     written", since starting the MAC writes registers. The length is
+     checked first now, and the doc's order is the code's.
+   - *A link that did not read at a send was returned as "not
+     started"*, the same as a link that is down. A PHY that does not
+     answer, or a stuck bus, has a line now, once.
+   - *The PHY's line named one missing delay where two were missing*
+     (both off said only the transmit clock), and the `no link` line was
+     also printed under "link up at a speed the PHY does not name". Four
+     cases worded, and the line says `no link read as up at a speed`.
+   - *`Delays::as_written` had no caller but the tests* once the kernel
+     printed the other question, and its doc called false "the fact the
+     board run is asked for". It is the tests' alone now
+     (`#[cfg(test)]`), so nothing can take the board's right state for a
+     fault through it.
+   - Stale lines: `mmu.rs` named two non-cacheable ranges where there
+     are three of four, `nic.rs` said a send that times out leaves no
+     line, and the source map and `ROADMAP.md` said step 6 had not run.
+   **Not fixed, and open:**
+   - *A link that changes after the MAC is started is never seen.* A
+     send asks the PHY only while the MAC was never started, so a cable
+     moved from a gigabit port to a 100 Mb one leaves `UMAC_CMD` at the
+     old speed, every frame clocked wrong and still counted as taken.
+     D3's "again whenever a send finds the link down" is built for the
+     boot that found none and no further.
+   - *With no link, every send reads the PHY under the kernel lock*, and
+     on a stuck MDIO bus that is 20 ms with interrupts masked, per send,
+     for the rest of the boot. Nothing remembers that the last read
+     failed.
+   - *Nothing guards the `dsb sy`.* The xHCI's barrier is a fixed
+     function `make check-xhci-barriers` finds in the built image; this
+     one is an inline instruction a later edit can drop with every check
+     green.
+   - *The send-time lines are said through the console that goes quiet
+     once `cond` owns a framebuffer* (the review's reading, not checked
+     here), so on a board with no serial console the first-frame line
+     and both failure lines may never show, with their said-once flags
+     spent.
+   - The on/off wording of a `Delays` is written out four times, and
+     the receive area and the transmit buffer have a walker each.
+   **Checked after the fixes:** `make test` exit 0, 443 tests;
+   `make test-netdump` exit 0. `send_frame` changed (the order of its
+   first two checks, and one line), so the board's one run of it was of
+   the code before the review: the adapter run is on a card staged
+   after it.
+   **A second review, of the fix alone** (commit `dd245c3b`, by
+   reading): no fault in the code, nothing on a frame's path, and three
+   statements of mine corrected: the first fix's sentence above, which had
+   the old doc saying what it did not; "the link is read once, with no wait" in
+   `genetnic.rs`, which is up to three MDIO reads on every send while
+   the MAC is not started; and three lists of the lines said once, each
+   one short of the line the fix added.
 
 7. **The board: receive, polled.** The ARP reply and the echo reply come
    back through `NET_RECV`.
