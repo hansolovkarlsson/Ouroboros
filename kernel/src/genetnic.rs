@@ -18,9 +18,13 @@
 //! board (one variable a round trip): until then the receive DMA writes
 //! nothing, so an address the device takes differently from the CPU
 //! (nothing has shown they are the same) costs a wrong frame on the wire
-//! and no memory. A boot with no link starts nothing; the first send
-//! after it reads the link once more, so a cable put in later works at
-//! the next send (the plan's decision D3, as recommended).
+//! and no memory. A boot with no link starts nothing; every send after
+//! it asks the PHY for the link, until one finds it up and starts the
+//! MAC, so a cable put in later works at the next send (the plan's
+//! decision D3, as recommended). That asking is up to three MDIO reads
+//! under the kernel lock on each such send, and each read may poll for
+//! 20 ms on a bus that does not answer; nothing remembers that the last
+//! one failed (open in the plan's step 6).
 //!
 //! **Found, never assumed** (the plan's design 1): [`discover`] takes the
 //! one GENET the ACPI tables declare present, before the exit, and nothing
@@ -513,9 +517,12 @@ impl Device {
     /// In order, and the order is the point of each:
     /// 1. The length is checked before anything is read or written.
     /// 2. A MAC not started is a boot that found no link. The link is
-    ///    read once, with no wait, and the MAC started if it is up
+    ///    asked for once in this send, with no wait for it to come up (up
+    ///    to three MDIO reads, each of which may poll for 20 ms on a bus
+    ///    that does not answer), and the MAC started if it is up
     ///    (decision D3); otherwise the send is refused, and a link that
-    ///    did not read at all has a line, once.
+    ///    did not read at all has a line, once. Every send asks again
+    ///    while the MAC is not started.
     /// 3. `tx_idle` is asked **before the copy**: the buffer is the one
     ///    the device may still be reading the last frame from, after a
     ///    send that timed out.
@@ -523,8 +530,9 @@ impl Device {
     ///    barrier is what orders the buffer's stores before the write
     ///    that tells the device to read them.
     ///
-    /// The first frame the device takes has a line, and so has the first
-    /// send that times out and the first refused as busy.
+    /// Four things are said, once each: the first frame the device
+    /// takes, the first send that times out, the first refused as busy,
+    /// and the first whose link did not read.
     pub(crate) fn send_frame(&mut self, frame: &[u8]) -> Result<(), TxError> {
         let len = frame.len();
         if !(TX_MIN_FRAME..=TX_MAX_FRAME).contains(&len) {

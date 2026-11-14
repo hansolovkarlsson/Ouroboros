@@ -1138,7 +1138,10 @@ Each has a recommendation; none blocks step 2.
    the ones Hans chose:
    - *A send checked its length after it had read the link*, and on a
      boot with no link could start the MAC for a frame it then refused.
-     The length is checked first, as the function's own doc said.
+     The old code matched its doc's order, the link first; what it
+     broke was the doc's "the length is checked before anything is
+     written", since starting the MAC writes registers. The length is
+     checked first now, and the doc's order is the code's.
    - *A link that did not read at a send was returned as "not
      started"*, the same as a link that is down. A PHY that does not
      answer, or a stuck bus, has a line now, once.
@@ -1181,6 +1184,13 @@ Each has a recommendation; none blocks step 2.
    first two checks, and one line), so the board's one run of it was of
    the code before the review: the adapter run is on a card staged
    after it.
+   **A second review, of the fix alone** (commit `dd245c3b`, by
+   reading): no fault in the code, nothing on a frame's path, and three
+   statements of mine corrected: the first fix's sentence above, which had
+   the old doc saying what it did not; "the link is read once, with no wait" in
+   `genetnic.rs`, which is up to three MDIO reads on every send while
+   the MAC is not started; and three lists of the lines said once, each
+   one short of the line the fix added.
 
 7. **The board: receive, polled.** The ARP reply and the echo reply come
    back through `NET_RECV`.
