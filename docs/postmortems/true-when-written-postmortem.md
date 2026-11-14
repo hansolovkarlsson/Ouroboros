@@ -1345,6 +1345,49 @@ is, and they need what a test needs: the thing itself opened, not
 remembered or deduced. A citation the build asks for is one way to force
 that; a read-back is another.**
 
+## The record of a fix, written from the fix (2026-11-13, written 2026-11-14)
+
+The same evening, #463 (the transmitter, step 6 of the Pi's Ethernet) was
+reviewed twice. The first review read the whole branch and found nine
+things; five were fixed in `dd245c3b`. The second read that fix alone,
+found no fault in its code, and found three statements of mine false.
+All three were hours old, and all three were written while fixing.
+
+*"The length is checked first, as the function's own doc said."* The
+plan's record of the first fix. `send_frame`'s doc had said the link
+first, and the old code did what it said. What the old code broke was a
+different sentence of the same doc, that the length is checked before
+anything is written, since starting the MAC writes registers. I had the
+fix in front of me and described the doc as the fix needed it to have
+been. The doc was thirty lines up, in the diff I was summarising.
+
+*"The link is read once, with no wait."* In `send_frame`'s doc and the
+module doc of `genetnic.rs`. Once in one send, which is not what a reader
+takes from it: every send asks again while the MAC is not started, each
+asking is up to three MDIO reads under the kernel lock, and each read may
+poll for 20 ms on a bus that does not answer. The sentence was true of
+the design as decision D3 put it and was copied from there. The review's
+own open finding, that a send with no link reads the PHY every time, was
+in the plan four paragraphs from a comment saying it did not.
+
+*Three lists of the lines said once, each one short.* The fix added a
+fourth line, for a link that does not read. `send_frame`'s doc,
+`nic.rs`'s doc on its error type and the source map each listed the
+three there had been. This is the file's oldest shape, a list in three
+copies and an edit that knew of none of them, except that the edit and
+the lists were in one commit by one author.
+
+None of the three was on a frame's path, and no test could have failed
+for any of them. What they share is when they were written: after the
+code was right and the checks were green, in the minutes when the work
+feels finished. The first review's fixes were checked by `make test`,
+`make test-netdump` and eleven mutations. The sentences describing them
+were checked by nothing until a second reader opened the files.
+**The record of a fix is a claim about two versions of the code, the one
+before and the one after, and it is written with only the second on the
+screen. Read the old lines before saying what they did; and when a fix
+adds a case, grep for the lists of the cases there were.**
+
 ## What actually worked
 
 Three things, none of them "be more careful".
