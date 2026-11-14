@@ -48,8 +48,8 @@
 //! non-coherent DMA, cacheable. Non-cacheable is not the whole of it: a
 //! store to the buffer is a Normal access that nothing orders against the
 //! register write that tells the device to read it, so every register
-//! write this driver makes has a `dsb sy` in front of it
-//! ([`genet_write32`], the one store [`Mmio`] writes through), the barrier
+//! write this driver's bus makes has a `dsb sy` in front of it
+//! (`genet_write32`, the one store [`Mmio`] writes through), the barrier
 //! `xhci.rs` puts before every doorbell. `make check-xhci-barriers` finds
 //! it in the built image.
 
@@ -141,55 +141,93 @@ pub(crate) fn report_rx_area() {
     );
 }
 
-/// The device's registers, the kernel's delay, and every write the crate
-/// makes (the scan's bus in `netscan.rs` lets through MDIO reads alone;
-/// this one is the driver's).
-#[derive(Clone, Copy)]
-struct Mmio {
-    base: usize,
+/// The driver's bus, in a module of its own so that the barrier store has
+/// one caller **by privacy and not by a comment**: `genet_write32` is
+/// private to this module, whose one use of it is [`Mmio::write`], so a
+/// second caller elsewhere in this file does not compile. The image check
+/// needs exactly that: it asks for the store once and at least one call to
+/// it, and with a second caller `Mmio::write` could be routed around the
+/// barrier with the check still green (the review of this change,
+/// 2026-11-14; `xhci.rs` keeps its barrier stores in `mod reg` for the
+/// same reason). What privacy does not stop: a raw `write_volatile` to a
+/// register, written anywhere in this file. There is none, and the check
+/// does not see one.
+mod bus {
+    use crate::timer;
+
+    /// The device's registers, the kernel's delay, and every write the
+    /// crate makes (the scan's bus in `netscan.rs` lets through MDIO
+    /// reads alone and has its own store; this one is the driver's).
+    #[derive(Clone, Copy)]
+    pub(super) struct Mmio {
+        base: usize,
+    }
+
+    impl Mmio {
+        /// # Safety
+        /// `base` is the 64 KB block the firmware declares, usable by
+        /// `genet::block_usable` and seen to walk as device memory at
+        /// both ends. `quiet` is the one place a bus is built.
+        pub(super) unsafe fn new(base: usize) -> Self {
+            Self { base }
+        }
+
+        pub(super) fn base(&self) -> usize {
+            self.base
+        }
+    }
+
+    impl genet::Bus for Mmio {
+        fn read(&mut self, offset: usize) -> u32 {
+            assert!(offset.is_multiple_of(4) && offset + 4 <= genet::BLOCK_LEN as usize);
+            // SAFETY: inside the block `new` was promised; 32-bit and
+            // aligned, the base by `genet::block_usable` and the offset
+            // by the assert.
+            unsafe { core::ptr::read_volatile((self.base + offset) as *const u32) }
+        }
+
+        fn write(&mut self, offset: usize, value: u32) {
+            assert!(offset.is_multiple_of(4) && offset + 4 <= genet::BLOCK_LEN as usize);
+            // SAFETY: as `read`. The one call to `genet_write32`.
+            unsafe { genet_write32(self.base, value, offset) }
+        }
+
+        fn delay_us(&mut self, us: u32) {
+            timer::delay_us(u64::from(us));
+        }
+    }
+
+    /// A register write of this bus, with its barrier: `dsb sy; str w1,
+    /// [x0, x2]; ret`, so each store the CPU made before it (a frame
+    /// copied into the transmit buffer) is complete before the device
+    /// sees the write that may tell it to read them. Naked, like
+    /// `xhci.rs`'s `mmio_write32`, so the image holds these fixed
+    /// instructions whatever the profile, no edit can put a store between
+    /// the two, and `scripts/check-xhci-barriers.py` can find them. The
+    /// base and offset are two operands on purpose: the sequence is then
+    /// not the xHCI's, and that check wants each exactly once. Until
+    /// 2026-11-14 the barrier was an inline `dsb sy` in `send_frame`,
+    /// which a later edit could drop with every check green (the review
+    /// of #463).
+    ///
+    /// # Safety
+    /// `base + offset` is a 32-bit register of the device, mapped as
+    /// device memory (`Mmio::write`'s assert and `Mmio::new`'s promise).
+    #[unsafe(naked)]
+    unsafe extern "C" fn genet_write32(base: usize, value: u32, offset: usize) {
+        core::arch::naked_asm!("dsb sy", "str w1, [x0, x2]", "ret");
+    }
 }
+use bus::Mmio;
 
-impl genet::Bus for Mmio {
-    fn read(&mut self, offset: usize) -> u32 {
-        assert!(offset.is_multiple_of(4) && offset + 4 <= genet::BLOCK_LEN as usize);
-        // SAFETY: inside the 64 KB block the firmware declares, which
-        // `quiet` saw walk as device memory at both ends before it built
-        // this bus, the only place one is built (`init` is handed
-        // `quiet`'s); 32-bit and aligned, the base by
-        // `genet::block_usable` and the offset by the assert.
-        unsafe { core::ptr::read_volatile((self.base + offset) as *const u32) }
-    }
-
-    fn write(&mut self, offset: usize, value: u32) {
-        assert!(offset.is_multiple_of(4) && offset + 4 <= genet::BLOCK_LEN as usize);
-        // SAFETY: as `read`. Through `genet_write32` and nothing else:
-        // it has this one caller, so the image check fails if this write
-        // is routed around its barrier.
-        unsafe { genet_write32(self.base, value, offset) }
-    }
-
-    fn delay_us(&mut self, us: u32) {
-        timer::delay_us(u64::from(us));
-    }
-}
-
-/// Every register write, with its barrier: `dsb sy; str w1, [x0, x2]; ret`,
-/// so each store the CPU made before it (a frame copied into the transmit
-/// buffer) is complete before the device sees the write that may tell it
-/// to read them. Naked, like `xhci.rs`'s `mmio_write32`, so the image holds
-/// these fixed instructions whatever the profile, no edit can put a store
-/// between the two, and `scripts/check-xhci-barriers.py` can find them.
-/// The base and offset are two operands on purpose: the sequence is then
-/// not the xHCI's, and that check wants each exactly once. Until
-/// 2026-11-14 the barrier was an inline `dsb sy` in `send_frame`, which a
-/// later edit could drop with every check green (the review of #463).
-///
-/// # Safety
-/// `base + offset` is a 32-bit register of the device, mapped as device
-/// memory ([`Mmio::write`]'s assert and `quiet`'s walk).
-#[unsafe(naked)]
-unsafe extern "C" fn genet_write32(base: usize, value: u32, offset: usize) {
-    core::arch::naked_asm!("dsb sy", "str w1, [x0, x2]", "ret");
+/// Microseconds since `began`, a [`timer::now_ticks`] reading. Zero where
+/// the counter's frequency reads 0: the division is checked because this
+/// is asked around the stop, and a firmware that left `CNTFRQ_EL0` unset
+/// must not be able to end the boot there (`timer::monotonic_us` divides
+/// unchecked).
+fn elapsed_us(began: u64) -> u64 {
+    let ticks = timer::now_ticks().saturating_sub(began);
+    ticks.saturating_mul(1_000_000).checked_div(timer::frequency_hz()).unwrap_or(0)
 }
 
 /// The GENET the ACPI tables declare, as [`discover`] took it.
@@ -292,9 +330,13 @@ pub(crate) unsafe fn quiet(declared: Declared) -> Option<Quieted> {
         );
         return None;
     }
-    let mut bus = Mmio { base: base as usize };
+    // SAFETY: `discover` held the block to `genet::block_usable`, and both
+    // of its ends walk as device memory, just above.
+    let mut bus = unsafe { Mmio::new(base as usize) };
     let sys_rev = genet::Bus::read(&mut bus, genet::reg::SYS_REV_CTRL);
-    let began = timer::monotonic_us();
+    // Ticks alone before the stop: nothing that can fail stands between
+    // here and it.
+    let began = timer::now_ticks();
     match genet::mac::quiet(&mut bus) {
         None => {
             let (major, minor) = genet::version(sys_rev);
@@ -307,27 +349,28 @@ pub(crate) unsafe fn quiet(declared: Declared) -> Option<Quieted> {
         // said it stopped is not set up over.
         Some(stopped) if !stopped.rdma => {
             console::println!(
-                "Ouroboros kernel: genet: WARNING: the receive DMA was told to stop and did not say it had (transmit DMA stopped {}): the Ethernet is not brought up",
-                stopped.tdma
+                "Ouroboros kernel: genet: WARNING: the receive DMA was told to stop and did not say it had (transmit DMA stopped {}, after {} us): the Ethernet is not brought up",
+                stopped.tdma,
+                elapsed_us(began)
             );
             None
         }
         Some(stopped) => {
             // Said when it works too: until 2026-11-14 a stop that worked
             // printed nothing, and "it stopped" was read from the absence
-            // of a line (the board's first runs, the plan's step 5).
+            // of a line (the board's first runs, the plan's step 5). A
+            // transmit DMA that has not said so is a note and not a
+            // refusal: it only reads memory, Linux goes on from here too,
+            // and the set-up asks it once more after the MAC's reset.
             console::println!(
                 "Ouroboros kernel: genet: made quiet in {} us: receive DMA stopped, transmit DMA {}",
-                timer::monotonic_us().saturating_sub(began),
-                if stopped.tdma { "stopped" } else { "not yet" }
+                elapsed_us(began),
+                if stopped.tdma {
+                    "stopped"
+                } else {
+                    "told to stop and has not yet said it had: it is asked again after the MAC's reset"
+                }
             );
-            if !stopped.tdma {
-                // It only reads memory, and Linux goes on from here too.
-                // The set-up asks it once more, after the MAC's reset.
-                console::println!(
-                    "Ouroboros kernel: genet: the transmit DMA was told to stop and has not yet said it had: it is asked again after the MAC's reset"
-                );
-            }
             Some(Quieted { bus, sys_rev })
         }
     }
@@ -367,7 +410,7 @@ pub(crate) struct Device {
 /// As [`quiet`], which made `quieted`.
 pub(crate) unsafe fn init(quieted: Quieted, dma_noncoherent: bool) -> Option<Device> {
     let Quieted { mut bus, sys_rev } = quieted;
-    let base = bus.base;
+    let base = bus.base();
     let (area, _) = dma_region();
     let (nc, pages) = rx_area_noncacheable_pages();
     if dma_noncoherent && (nc != pages || !tx_area_noncacheable()) {
@@ -559,7 +602,7 @@ impl Device {
     ///    the device may still be reading the last frame from, after a
     ///    send that timed out.
     /// 4. The copy, then the crate's register writes, each with its
-    ///    `dsb sy` in front of it ([`genet_write32`]): the barrier is what
+    ///    `dsb sy` in front of it (`bus`'s `genet_write32`): the barrier is what
     ///    orders the buffer's stores before the write that tells the
     ///    device to read them.
     ///

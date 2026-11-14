@@ -37,14 +37,21 @@ Since 2026-11-14 it also holds the Pi 4's Ethernet driver's one barrier,
 by the same method and for the same reason (no emulator models the GENET at
 all, so nothing but the board runs the path):
 
-    genet_write32:       dsb sy;    str w1, [x0, x2]; ret                (every GENET register write)
+    genet_write32:       dsb sy;    str w1, [x0, x2]; ret                (the GENET driver's register writes)
 
-`kernel/src/genetnic.rs` writes every register through it, from one caller
-(`Mmio::write`, the bus the `genet` crate is lent), so the frame copied into
-the transmit buffer is ordered before the write that hands it to the device.
-The base and the offset are two operands so that the sequence is not
-`mmio_write32`'s. A raw `write_volatile` to a GENET register added beside
-`Mmio::write` is not seen, as for the xHCI below.
+`kernel/src/genetnic.rs`'s driver bus writes every register through it, from
+one caller (`Mmio::write`, the bus the `genet` crate is lent), so the frame
+copied into the transmit buffer is ordered before the write that hands it to
+the device. The function is private to that file's `mod bus`, so a second
+caller does not compile, which is what "at least one call" needs to mean
+anything. The base and the offset are two operands so that the sequence is
+not `mmio_write32`'s. Not held: the scan's one MDIO write in
+`kernel/src/netscan.rs`, a raw store of its own that hands the device no
+memory; and a raw `write_volatile` to a GENET register added anywhere in
+`genetnic.rs`, as for the xHCI below. Telling the functions apart by their
+instructions is why this one's operands are shaped by the check; finding
+them by symbol (a link map, or the objects before the link) would lift
+that, and has not been needed for two drivers.
 
 What it cannot see: ONE new raw `write_volatile` to a register somewhere
 else in `xhci.rs`. The functions are still called by everything else, so

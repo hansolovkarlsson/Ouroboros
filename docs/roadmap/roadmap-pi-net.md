@@ -1038,9 +1038,15 @@ Each has a recommendation; none blocks step 2.
    the transmit DMA's note or a refusal. That is read from the absence of
    a line: the driver prints nothing when a DMA says it stopped, so the
    log does not show the status it read or how long the stop took.
-   **Since 2026-11-14 `quiet` says it:** `genet: made quiet in N us:
-   receive DMA stopped, transmit DMA stopped` (or `not yet`), on every
-   boot that stops the device. Not yet seen on the board.
+   **Since 2026-11-14 `quiet` says how long:** `genet: made quiet in N
+   us: receive DMA stopped, transmit DMA stopped`, on every boot that
+   stops the device, and the refusal for a receive DMA that did not stop
+   has its time too. The transmit DMA's note above is now the end of
+   that line (`transmit DMA told to stop and has not yet said it had:
+   it is asked again after the MAC's reset`) and not a line of its own.
+   **Still not shown: the status the stop read.** `genet::mac::quiet`
+   answers two booleans, and printing the registers behind them is a
+   change to the crate. Not yet seen on the board.
    **The SD path changed by #457 works on the board:** `sd: ACPI declares
    EMMC2 @ 0xfe340000`, the card brought up as the boot disk, its ext2
    root mounted, in all three boots. `acpi::declared` and
@@ -1182,6 +1188,16 @@ Each has a recommendation; none blocks step 2.
      the function. So the barrier is now before every register write,
      the set-up's too, where it was before a send's alone: not yet run
      on the board.
+     **Its review the same day** (no fault in the path; eight findings,
+     seven fixed): the "one caller" the check rests on was a comment,
+     and is now privacy, the bus and its store in `mod bus` so a second
+     caller does not compile; "every GENET register write" was false,
+     since `netscan.rs`'s scan has one MDIO write of its own, and now
+     reads "every write the driver's bus makes"; the entry in
+     `make-targets.md` names the file and the function. **Left open:**
+     the check tells functions apart by their instructions, so this
+     one's operands are shaped by the check; finding them by symbol
+     would lift that, and two drivers have not needed it.
    - *The send-time lines are said through the console that goes quiet
      once `cond` owns a framebuffer* (the review's reading, not checked
      here), so on a board with no serial console the first-frame line
