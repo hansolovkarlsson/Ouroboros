@@ -38,7 +38,9 @@ use crate::virtio_net;
 
 /// One error type across the drivers. `NET_SEND` answers `NET_ERROR` for any
 /// of them and nothing prints one today, so the `Display` below has no
-/// caller yet: a send that times out leaves no line.
+/// caller yet. virtio-net's send that times out leaves no line; the
+/// GENET's says its first timeout and its first busy refusal itself
+/// (`genetnic.rs`).
 #[derive(Debug)]
 pub enum Error {
     Virtio(virtio_net::Error),

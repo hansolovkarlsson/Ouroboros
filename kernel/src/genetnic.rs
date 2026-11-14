@@ -311,6 +311,7 @@ pub(crate) struct Device {
     /// since `netd` sends again and a dead link would fill the log.
     said_timeout: bool,
     said_busy: bool,
+    said_link_error: bool,
 }
 
 /// Brings a quieted device up: the crate's reset and set-up, the PHY found
@@ -342,7 +343,7 @@ pub(crate) unsafe fn init(quieted: Quieted, dma_noncoherent: bool) -> Option<Dev
     let (major, minor) = genet::version(sys_rev);
 
     let mut device = match Genet::init(&mut bus, area) {
-        Ok(genet) => Device { bus, genet, phy: None, sent: 0, said_timeout: false, said_busy: false },
+        Ok(genet) => Device { bus, genet, phy: None, sent: 0, said_timeout: false, said_busy: false, said_link_error: false },
         Err(InitError::NoMac(m)) => {
             console::println!(
                 "Ouroboros kernel: genet: the firmware left no station address ({:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}): none is made up, the Ethernet is not brought up",
@@ -364,7 +365,7 @@ pub(crate) unsafe fn init(quieted: Quieted, dma_noncoherent: bool) -> Option<Dev
     match device.bring_up_phy(&genet::Registers { sys_rev, ..genet::Registers::default() }) {
         Some(speed) => device.start(speed),
         None => console::println!(
-            "Ouroboros kernel: genet: no link, so the MAC's transmitter is left off: a send asks the link again{}",
+            "Ouroboros kernel: genet: no link read as up at a speed, so the MAC's transmitter is left off: a send asks the link again{}",
             if device.phy.is_some() { "" } else { " (it cannot: no PHY was set up, so nothing will be sent)" }
         ),
     }
@@ -430,12 +431,12 @@ impl Device {
                         if d.tx_delay() { "on" } else { "off" },
                         d.misc,
                         d.clk,
-                        if d.as_uboot_leaves() {
-                            "as U-Boot leaves it"
-                        } else if d.tx_delay() {
-                            "NOT as U-Boot leaves it: the receive clock has no skew"
-                        } else {
-                            "NOT as U-Boot leaves it: the transmit clock has no delay, the MAC adding none, so frames sent may be bad"
+                        match (d.rx_skew(), d.tx_delay()) {
+                            (true, true) => "as U-Boot leaves it",
+                            (false, true) => "NOT as U-Boot leaves it: the receive clock has no skew",
+                            (true, false) => "NOT as U-Boot leaves it: the transmit clock has no delay, the MAC adding none, so frames sent may be bad",
+                            (false, false) =>
+                                "NOT as U-Boot leaves it: the receive clock has no skew, and the transmit clock no delay, the MAC adding none, so frames sent may be bad",
                         }
                     ),
                 }
@@ -510,10 +511,11 @@ impl Device {
     /// under the kernel lock as virtio-net's send does.
     ///
     /// In order, and the order is the point of each:
-    /// 1. A MAC not started is a boot that found no link. The link is
+    /// 1. The length is checked before anything is read or written.
+    /// 2. A MAC not started is a boot that found no link. The link is
     ///    read once, with no wait, and the MAC started if it is up
-    ///    (decision D3); otherwise the send is refused.
-    /// 2. The length is checked before anything is written.
+    ///    (decision D3); otherwise the send is refused, and a link that
+    ///    did not read at all has a line, once.
     /// 3. `tx_idle` is asked **before the copy**: the buffer is the one
     ///    the device may still be reading the last frame from, after a
     ///    send that timed out.
@@ -524,6 +526,10 @@ impl Device {
     /// The first frame the device takes has a line, and so has the first
     /// send that times out and the first refused as busy.
     pub(crate) fn send_frame(&mut self, frame: &[u8]) -> Result<(), TxError> {
+        let len = frame.len();
+        if !(TX_MIN_FRAME..=TX_MAX_FRAME).contains(&len) {
+            return Err(TxError::BadLength(len));
+        }
         if !self.genet.started() {
             let Some((addr, id)) = self.phy else {
                 return Err(TxError::NotStarted);
@@ -537,12 +543,21 @@ impl Device {
                     );
                     self.start(speed);
                 }
-                _ => return Err(TxError::NotStarted),
+                // Down, negotiating, or up at a speed the PHY does not
+                // name: no line, it is the ordinary state of no cable.
+                Ok(_) => return Err(TxError::NotStarted),
+                // The PHY did not answer, or the bus is stuck: not the
+                // same thing as a link that is down.
+                Err(e) => {
+                    if !self.said_link_error {
+                        self.said_link_error = true;
+                        console::println!(
+                            "Ouroboros kernel: genet: a send asked the link and it did not read ({e:?}): nothing is sent; said once"
+                        );
+                    }
+                    return Err(TxError::NotStarted);
+                }
             }
-        }
-        let len = frame.len();
-        if !(TX_MIN_FRAME..=TX_MAX_FRAME).contains(&len) {
-            return Err(TxError::BadLength(len));
         }
         if !self.genet.tx_idle(&mut self.bus) {
             if !self.said_busy {

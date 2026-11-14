@@ -247,8 +247,10 @@ pub struct SetUp {
 }
 
 impl SetUp {
-    /// The shadows after the reset, when they were read.
-    pub fn delays(&self) -> Option<Delays> {
+    /// The shadows after the reset, when they were read. For the tests;
+    /// a caller matches on `after`.
+    #[cfg(test)]
+    pub(crate) fn delays(&self) -> Option<Delays> {
         self.after.delays()
     }
 }
@@ -265,8 +267,9 @@ pub enum ReadBack {
 }
 
 impl ReadBack {
-    /// The shadows, when they were read.
-    pub fn delays(&self) -> Option<Delays> {
+    /// The shadows, when they were read. For the tests.
+    #[cfg(test)]
+    pub(crate) fn delays(&self) -> Option<Delays> {
         match self {
             ReadBack::Read(d) => Some(*d),
             ReadBack::Failed(_) => None,
@@ -283,10 +286,14 @@ impl Delays {
     pub fn tx_delay(&self) -> bool {
         self.clk & BCM_SHD_CLK_CTL_GTXCLK_EN != 0
     }
-    /// Both are as `setup` wrote them: the PHY took the writes and its
-    /// reset kept them. False is not a failure of the set-up; it is the
-    /// fact the board run is asked for.
-    pub fn as_written(&self) -> bool {
+    /// Both are as `setup` wrote them: the receive skew on, the transmit
+    /// delay off. **Not a health check, and for the tests alone**, which
+    /// use it to see the writes on a model whose reset keeps them. On the
+    /// Pi 4 the reset turns the transmit delay back on, so this is false
+    /// there and that is the state to expect
+    /// ([`as_uboot_leaves`](Self::as_uboot_leaves)).
+    #[cfg(test)]
+    pub(crate) fn as_written(&self) -> bool {
         self.rx_skew() && !self.tx_delay()
     }
     /// The receive clock skew on and the transmit clock delay on: what

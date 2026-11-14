@@ -1133,6 +1133,51 @@ Each has a recommendation; none blocks step 2.
    Mac, with the adapter's interface in the `tcpdump` and `netstat`
    commands above.
 
+   **The review of the step (#463, read after the first boot, nothing
+   run by it).** Nine findings, none in the path a frame takes. Fixed,
+   the ones Hans chose:
+   - *A send checked its length after it had read the link*, and on a
+     boot with no link could start the MAC for a frame it then refused.
+     The length is checked first, as the function's own doc said.
+   - *A link that did not read at a send was returned as "not
+     started"*, the same as a link that is down. A PHY that does not
+     answer, or a stuck bus, has a line now, once.
+   - *The PHY's line named one missing delay where two were missing*
+     (both off said only the transmit clock), and the `no link` line was
+     also printed under "link up at a speed the PHY does not name". Four
+     cases worded, and the line says `no link read as up at a speed`.
+   - *`Delays::as_written` had no caller but the tests* once the kernel
+     printed the other question, and its doc called false "the fact the
+     board run is asked for". It is the tests' alone now
+     (`#[cfg(test)]`), so nothing can take the board's right state for a
+     fault through it.
+   - Stale lines: `mmu.rs` named two non-cacheable ranges where there
+     are three of four, `nic.rs` said a send that times out leaves no
+     line, and the source map and `ROADMAP.md` said step 6 had not run.
+   **Not fixed, and open:**
+   - *A link that changes after the MAC is started is never seen.* A
+     send asks the PHY only while the MAC was never started, so a cable
+     moved from a gigabit port to a 100 Mb one leaves `UMAC_CMD` at the
+     old speed, every frame clocked wrong and still counted as taken.
+     D3's "again whenever a send finds the link down" is built for the
+     boot that found none and no further.
+   - *With no link, every send reads the PHY under the kernel lock*, and
+     on a stuck MDIO bus that is 20 ms with interrupts masked, per send,
+     for the rest of the boot. Nothing remembers that the last read
+     failed.
+   - *Nothing guards the `dsb sy`.* The xHCI's barrier is a fixed
+     function `make check-xhci-barriers` finds in the built image; this
+     one is an inline instruction a later edit can drop with every check
+     green.
+   - *The send-time lines are said through the console that goes quiet
+     once `cond` owns a framebuffer* (the review's reading, not checked
+     here), so on a board with no serial console the first-frame line
+     and both failure lines may never show, with their said-once flags
+     spent.
+   - The on/off wording of a `Delays` is written out four times, and
+     the receive area and the transmit buffer have a walker each.
+   **Checked after the fixes:** below, with the commit.
+
 7. **The board: receive, polled.** The ARP reply and the echo reply come
    back through `NET_RECV`.
    **Check:** `ping` of the Mac from the Pi answers; `ping` of the Pi from
