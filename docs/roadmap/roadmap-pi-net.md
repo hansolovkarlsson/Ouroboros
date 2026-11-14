@@ -1176,7 +1176,11 @@ Each has a recommendation; none blocks step 2.
      spent.
    - The on/off wording of a `Delays` is written out four times, and
      the receive area and the transmit buffer have a walker each.
-   **Checked after the fixes:** below, with the commit.
+   **Checked after the fixes:** `make test` exit 0, 443 tests;
+   `make test-netdump` exit 0. `send_frame` changed (the order of its
+   first two checks, and one line), so the board's one run of it was of
+   the code before the review: the adapter run is on a card staged
+   after it.
 
 7. **The board: receive, polled.** The ARP reply and the echo reply come
    back through `NET_RECV`.
