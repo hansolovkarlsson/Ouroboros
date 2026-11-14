@@ -286,7 +286,7 @@ make test-keyboard-chain      # four driven QEMU boots through the nested-shell 
 make test                     # host unit tests, clippy and the host-side checks: run before every push
 make check-relocs             # the PIE contract: no R_AARCH64_ABS64 in any userland binary
 make check-stack-chains       # every userland program's deepest call chain against its stack, read off the built binaries
-make check-xhci-barriers      # the xHCI driver's two DMA barriers found in the built kernel image
+make check-xhci-barriers      # the xHCI driver's two DMA barriers and the GENET driver's one, found in the built kernel image
 make check-site               # the published GitHub Pages site vs the documents it abridges
 make check-statics            # every static in kernel/src against the multi-core plan's inventory
 make check-disk-handle        # no fsd file but disk.rs can reach the disk

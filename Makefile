@@ -3072,6 +3072,10 @@ check-stack-chains: esp
 # register write added beside the others (see the script's docstring). PART
 # OF `test`, since a check outside the default suite decays; checks the
 # PROFILE that `make sdcard` stages (debug unless PROFILE says otherwise).
+# Since 2026-11-14 it holds the Pi's Ethernet driver's barrier too
+# (genetnic.rs's genet_write32, every GENET register write): no emulator
+# models that device, so the image is the only place to look. Shown to fail
+# by the same three mutations.
 check-xhci-barriers: build
 	@python3 scripts/check-xhci-barriers.py $(KERNEL) $(dir $(OBJCOPY))
 

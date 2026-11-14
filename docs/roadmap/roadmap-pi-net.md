@@ -1038,6 +1038,9 @@ Each has a recommendation; none blocks step 2.
    the transmit DMA's note or a refusal. That is read from the absence of
    a line: the driver prints nothing when a DMA says it stopped, so the
    log does not show the status it read or how long the stop took.
+   **Since 2026-11-14 `quiet` says it:** `genet: made quiet in N us:
+   receive DMA stopped, transmit DMA stopped` (or `not yet`), on every
+   boot that stops the device. Not yet seen on the board.
    **The SD path changed by #457 works on the board:** `sd: ACPI declares
    EMMC2 @ 0xfe340000`, the card brought up as the boot disk, its ext2
    root mounted, in all three boots. `acpi::declared` and
@@ -1171,7 +1174,14 @@ Each has a recommendation; none blocks step 2.
    - *Nothing guards the `dsb sy`.* The xHCI's barrier is a fixed
      function `make check-xhci-barriers` finds in the built image; this
      one is an inline instruction a later edit can drop with every check
-     green.
+     green. **Fixed 2026-11-14:** the barrier is in `genet_write32`, a
+     naked function every register write of the driver goes through
+     (`Mmio::write`, its one caller), and `make check-xhci-barriers`
+     finds it in the image. The check failed with the barrier deleted,
+     with a `nop` before the store, and with `Mmio::write` routed around
+     the function. So the barrier is now before every register write,
+     the set-up's too, where it was before a send's alone: not yet run
+     on the board.
    - *The send-time lines are said through the console that goes quiet
      once `cond` owns a framebuffer* (the review's reading, not checked
      here), so on a board with no serial console the first-frame line
