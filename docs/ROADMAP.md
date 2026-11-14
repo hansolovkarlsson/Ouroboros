@@ -1064,6 +1064,12 @@ The small open tails those arcs deliberately left:
     entry in the check's below-the-floor table is gone, and the shallowest
     program is now `fsd` (13,904 left). `STACK_PAGES` is unchanged at 14;
     whether to give pages back is open, with `fsd` the one to measure.
+    **Closed by Hans on 2026-11-14: `STACK_PAGES` stays at 14.** With
+    `fsd` leaving 13,904 and the check's floor at 4,096, 12 pages is the
+    least the figures allow, two pages a task saved, and the eleven
+    programs that recurse by their input are not bounded by the check at
+    any size. The same day: `netd`'s table sizes stay as they are now
+    that they are in its heap, until a rig or a use meets a limit.
   - the count sees writes, not the stack pointer: a buffer reserved and
     never written at its low end is counted only as deep as it was written,
     so the true room is the reading or less.
