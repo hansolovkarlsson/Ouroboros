@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Check that the built kernel still carries the xHCI driver's two barriers.
+"""Check that the built kernel still carries the xHCI driver's two barriers,
+and the GENET driver's one.
 
 The xHCI driver orders its DMA memory against the controller with two
 barriers, and no rig can see either one: QEMU's controller is emulated in
@@ -32,6 +33,28 @@ and the check green. `Kept32::write` and `PortStatus::write` go through
 `Whole64::write`, which DCBAAP and ERDP also call, so one of those three
 routed around its store is NOT seen here.
 
+Since 2026-11-14 it also holds the Pi 4's Ethernet driver's one barrier,
+by the same method and for the same reason (no emulator models the GENET at
+all, so nothing but the board runs the path):
+
+    genet_write32:       dsb sy;    str w1, [x0, x2]; ret                (the GENET driver's register writes)
+
+`kernel/src/genetnic.rs`'s driver bus writes every register through it, from
+one caller (`Mmio::write`, the bus the `genet` crate is lent), so the frame
+copied into the transmit buffer is ordered before the write that hands it to
+the device. The function is private to that file's `mod bus`, so a second
+caller outside that module does not compile; one added inside it would,
+and the module holds the bus alone. That is what "at least one call" rests
+on. The base and the offset are two operands so that the sequence is
+not `mmio_write32`'s. Not held: the scan's one store in
+`kernel/src/netscan.rs`, a raw store of its own through which every MDIO
+read command of the scan goes (nothing else is let through it); and a raw
+`write_volatile` to a GENET register added anywhere in
+`genetnic.rs`, as for the xHCI below. Telling the functions apart by their
+instructions is why this one's operands are shaped by the check; finding
+them by symbol (a link map, or the objects before the link) would lift
+that, and has not been needed for two drivers.
+
 What it cannot see: ONE new raw `write_volatile` to a register somewhere
 else in `xhci.rs`. The functions are still called by everything else, so
 the check stays green; that every register write goes through `xhci.rs`'s
@@ -57,6 +80,7 @@ SEQUENCES = {
     "mmio_write32 (dsb sy; str w1, [x0]; ret)": ["dsb sy", "str w1, [x0]", "ret"],
     "mmio_write64 (dsb sy; str w1, [x0]; str w2, [x0, #4]; ret)": ["dsb sy", "str w1, [x0]", "str w2, [x0, #0x4]", "ret"],
     "publish_cycle_word (dmb oshst; str w1, [x0]; ret)": ["dmb oshst", "str w1, [x0]", "ret"],
+    "genet_write32 (dsb sy; str w1, [x0, x2]; ret)": ["dsb sy", "str w1, [x0, x2]", "ret"],
 }
 
 LINE = re.compile(r"^\s*([0-9a-f]+):\s+(\S+)(?:\s+(.*?))?\s*$")
