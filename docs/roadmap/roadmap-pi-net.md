@@ -1038,15 +1038,17 @@ Each has a recommendation; none blocks step 2.
    the transmit DMA's note or a refusal. That is read from the absence of
    a line: the driver prints nothing when a DMA says it stopped, so the
    log does not show the status it read or how long the stop took.
-   **Since 2026-11-14 `quiet` says how long:** `genet: made quiet in N
-   us: receive DMA stopped, transmit DMA stopped`, on every boot that
-   stops the device, and the refusal for a receive DMA that did not stop
-   has its time too. The transmit DMA's note above is now the end of
-   that line (`transmit DMA told to stop and has not yet said it had:
-   it is asked again after the MAC's reset`) and not a line of its own.
-   **Still not shown: the status the stop read.** `genet::mac::quiet`
-   answers two booleans, and printing the registers behind them is a
-   change to the crate. Not yet seen on the board.
+   **Since 2026-11-14 `quiet` says both:** `genet: made quiet in N us:
+   receive DMA stopped, transmit DMA stopped; status now: receive
+   0x..., transmit 0x...`, on every boot that stops the device, and the
+   refusal for a receive DMA that did not stop has its time and the two
+   status registers too. The transmit DMA's note above is now part of
+   that line (`transmit DMA told to stop and has not yet said it had`)
+   and not a line of its own; it no longer says the DMA is asked again,
+   since that is `Genet::init`'s to do and not every boot reaches it.
+   The status is read by `quiet` after the crate's polls, so it is the
+   state then and not the reading the crate judged by; that one would
+   need the crate to return it. Not yet seen on the board.
    **The SD path changed by #457 works on the board:** `sd: ACPI declares
    EMMC2 @ 0xfe340000`, the card brought up as the boot disk, its ext2
    root mounted, in all three boots. `acpi::declared` and
@@ -1191,13 +1193,30 @@ Each has a recommendation; none blocks step 2.
      **Its review the same day** (no fault in the path; eight findings,
      seven fixed): the "one caller" the check rests on was a comment,
      and is now privacy, the bus and its store in `mod bus` so a second
-     caller does not compile; "every GENET register write" was false,
-     since `netscan.rs`'s scan has one MDIO write of its own, and now
-     reads "every write the driver's bus makes"; the entry in
+     caller outside that module does not compile; "every GENET register
+     write" was false, since `netscan.rs`'s scan sends its MDIO read
+     commands through a store of its own, and the Makefile now reads
+     "every register write the driver's bus makes"; the entry in
      `make-targets.md` names the file and the function. **Left open:**
      the check tells functions apart by their instructions, so this
      one's operands are shaped by the check; finding them by symbol
      would lift that, and two drivers have not needed it.
+     **A second review, of those fixes alone:** no fault in the code,
+     and eight statements of mine that did not match it, all eight
+     corrected. The stop's line promised a transmit DMA "is asked again
+     after the MAC's reset", which `Genet::init` does only on a boot
+     that reaches it, and the line now promises nothing. "A second
+     caller does not compile" stood in four records without "outside
+     the module". The plan said printing the stop's status needed a
+     change to the crate, when both registers are public and `quiet`
+     holds the bus: it reads them now. A duration of 0 was printed
+     where the counter's frequency reads 0, and is now said as not
+     known (`timer::us_since`). **Left open, outside this driver:**
+     `xhci.rs`'s `publish_cycle_word` sits outside `mod reg`, its one
+     caller held by convention, the thing `mod bus` was made to end
+     here; and `timer::monotonic_us` divides by the counter's frequency
+     unchecked, so a firmware that left it 0 ends the boot at the first
+     caller. Neither is reachable on the Pi 4 as it runs.
    - *The send-time lines are said through the console that goes quiet
      once `cond` owns a framebuffer* (the review's reading, not checked
      here), so on a board with no serial console the first-frame line

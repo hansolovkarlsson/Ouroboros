@@ -3074,8 +3074,8 @@ check-stack-chains: esp
 # PROFILE that `make sdcard` stages (debug unless PROFILE says otherwise).
 # Since 2026-11-14 it holds the Pi's Ethernet driver's barrier too
 # (genetnic.rs's genet_write32, every register write the driver's bus
-# makes; the scan's one MDIO write in netscan.rs is a store of its own and
-# is not held): no emulator models that device, so the image is the only
+# makes; the scan's MDIO read commands in netscan.rs go through a store
+# of their own, which is not held): no emulator models that device, so the image is the only
 # place to look. Shown to fail by the same three mutations.
 check-xhci-barriers: build
 	@python3 scripts/check-xhci-barriers.py $(KERNEL) $(dir $(OBJCOPY))

@@ -43,11 +43,13 @@ all, so nothing but the board runs the path):
 one caller (`Mmio::write`, the bus the `genet` crate is lent), so the frame
 copied into the transmit buffer is ordered before the write that hands it to
 the device. The function is private to that file's `mod bus`, so a second
-caller does not compile, which is what "at least one call" needs to mean
-anything. The base and the offset are two operands so that the sequence is
-not `mmio_write32`'s. Not held: the scan's one MDIO write in
-`kernel/src/netscan.rs`, a raw store of its own that hands the device no
-memory; and a raw `write_volatile` to a GENET register added anywhere in
+caller outside that module does not compile; one added inside it would,
+and the module holds the bus alone. That is what "at least one call" rests
+on. The base and the offset are two operands so that the sequence is
+not `mmio_write32`'s. Not held: the scan's one store in
+`kernel/src/netscan.rs`, a raw store of its own through which every MDIO
+read command of the scan goes (nothing else is let through it); and a raw
+`write_volatile` to a GENET register added anywhere in
 `genetnic.rs`, as for the xHCI below. Telling the functions apart by their
 instructions is why this one's operands are shaped by the check; finding
 them by symbol (a link map, or the objects before the link) would lift

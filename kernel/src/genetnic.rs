@@ -148,8 +148,10 @@ pub(crate) fn report_rx_area() {
 /// needs exactly that: it asks for the store once and at least one call to
 /// it, and with a second caller `Mmio::write` could be routed around the
 /// barrier with the check still green (the review of this change,
-/// 2026-11-14; `xhci.rs` keeps its barrier stores in `mod reg` for the
-/// same reason). What privacy does not stop: a raw `write_volatile` to a
+/// 2026-11-14; `xhci.rs` keeps its two register stores in `mod reg` for
+/// the same reason, though not `publish_cycle_word`, whose one caller is
+/// still held by convention). A second caller inside this module would
+/// compile, so the module is kept to the bus alone. What privacy does not stop: a raw `write_volatile` to a
 /// register, written anywhere in this file. There is none, and the check
 /// does not see one.
 mod bus {
@@ -220,14 +222,18 @@ mod bus {
 }
 use bus::Mmio;
 
-/// Microseconds since `began`, a [`timer::now_ticks`] reading. Zero where
-/// the counter's frequency reads 0: the division is checked because this
-/// is asked around the stop, and a firmware that left `CNTFRQ_EL0` unset
-/// must not be able to end the boot there (`timer::monotonic_us` divides
-/// unchecked).
-fn elapsed_us(began: u64) -> u64 {
-    let ticks = timer::now_ticks().saturating_sub(began);
-    ticks.saturating_mul(1_000_000).checked_div(timer::frequency_hz()).unwrap_or(0)
+/// A duration for a log line: [`timer::us_since`]'s answer, said as
+/// unknown where the counter's frequency reads 0 and never as a 0 that
+/// would read as a measurement.
+struct Took(Option<u64>);
+
+impl core::fmt::Display for Took {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.0 {
+            Some(us) => write!(f, "{us} us"),
+            None => f.write_str("a time not known (the counter's frequency reads 0)"),
+        }
+    }
 }
 
 /// The GENET the ACPI tables declare, as [`discover`] took it.
@@ -337,7 +343,9 @@ pub(crate) unsafe fn quiet(declared: Declared) -> Option<Quieted> {
     // Ticks alone before the stop: nothing that can fail stands between
     // here and it.
     let began = timer::now_ticks();
-    match genet::mac::quiet(&mut bus) {
+    let stopped = genet::mac::quiet(&mut bus);
+    let took = Took(timer::us_since(began));
+    match stopped {
         None => {
             let (major, minor) = genet::version(sys_rev);
             console::println!(
@@ -349,9 +357,10 @@ pub(crate) unsafe fn quiet(declared: Declared) -> Option<Quieted> {
         // said it stopped is not set up over.
         Some(stopped) if !stopped.rdma => {
             console::println!(
-                "Ouroboros kernel: genet: WARNING: the receive DMA was told to stop and did not say it had (transmit DMA stopped {}, after {} us): the Ethernet is not brought up",
+                "Ouroboros kernel: genet: WARNING: the receive DMA was told to stop and did not say it had (transmit DMA stopped {}, after {took}; status now: receive {:#010x}, transmit {:#010x}): the Ethernet is not brought up",
                 stopped.tdma,
-                elapsed_us(began)
+                genet::Bus::read(&mut bus, genet::reg::RDMA_STATUS),
+                genet::Bus::read(&mut bus, genet::reg::TDMA_STATUS)
             );
             None
         }
@@ -360,16 +369,18 @@ pub(crate) unsafe fn quiet(declared: Declared) -> Option<Quieted> {
             // printed nothing, and "it stopped" was read from the absence
             // of a line (the board's first runs, the plan's step 5). A
             // transmit DMA that has not said so is a note and not a
-            // refusal: it only reads memory, Linux goes on from here too,
-            // and the set-up asks it once more after the MAC's reset.
+            // refusal: it only reads memory, and Linux goes on from here
+            // too. `Genet::init` asks it once more after the MAC's reset,
+            // when `init` runs and gets that far; the line promises
+            // nothing, since not every boot does. The two status
+            // registers are read here, after the crate's own polls, so
+            // they are the state now and not the reading the crate
+            // judged by.
             console::println!(
-                "Ouroboros kernel: genet: made quiet in {} us: receive DMA stopped, transmit DMA {}",
-                elapsed_us(began),
-                if stopped.tdma {
-                    "stopped"
-                } else {
-                    "told to stop and has not yet said it had: it is asked again after the MAC's reset"
-                }
+                "Ouroboros kernel: genet: made quiet in {took}: receive DMA stopped, transmit DMA {}; status now: receive {:#010x}, transmit {:#010x}",
+                if stopped.tdma { "stopped" } else { "told to stop and has not yet said it had" },
+                genet::Bus::read(&mut bus, genet::reg::RDMA_STATUS),
+                genet::Bus::read(&mut bus, genet::reg::TDMA_STATUS)
             );
             Some(Quieted { bus, sys_rev })
         }
