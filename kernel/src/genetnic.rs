@@ -47,9 +47,11 @@
 //! each must say non-cacheable, and on QEMU, where nothing declares
 //! non-coherent DMA, cacheable. Non-cacheable is not the whole of it: a
 //! store to the buffer is a Normal access that nothing orders against the
-//! register write that tells the device to read it, so `send_frame` puts
-//! a `dsb sy` between the two, the barrier `xhci.rs` puts before every
-//! doorbell.
+//! register write that tells the device to read it, so every register
+//! write this driver makes has a `dsb sy` in front of it
+//! ([`genet_write32`], the one store [`Mmio`] writes through), the barrier
+//! `xhci.rs` puts before every doorbell. `make check-xhci-barriers` finds
+//! it in the built image.
 
 use core::cell::UnsafeCell;
 
@@ -160,13 +162,34 @@ impl genet::Bus for Mmio {
 
     fn write(&mut self, offset: usize, value: u32) {
         assert!(offset.is_multiple_of(4) && offset + 4 <= genet::BLOCK_LEN as usize);
-        // SAFETY: as `read`.
-        unsafe { core::ptr::write_volatile((self.base + offset) as *mut u32, value) }
+        // SAFETY: as `read`. Through `genet_write32` and nothing else:
+        // it has this one caller, so the image check fails if this write
+        // is routed around its barrier.
+        unsafe { genet_write32(self.base, value, offset) }
     }
 
     fn delay_us(&mut self, us: u32) {
         timer::delay_us(u64::from(us));
     }
+}
+
+/// Every register write, with its barrier: `dsb sy; str w1, [x0, x2]; ret`,
+/// so each store the CPU made before it (a frame copied into the transmit
+/// buffer) is complete before the device sees the write that may tell it
+/// to read them. Naked, like `xhci.rs`'s `mmio_write32`, so the image holds
+/// these fixed instructions whatever the profile, no edit can put a store
+/// between the two, and `scripts/check-xhci-barriers.py` can find them.
+/// The base and offset are two operands on purpose: the sequence is then
+/// not the xHCI's, and that check wants each exactly once. Until
+/// 2026-11-14 the barrier was an inline `dsb sy` in `send_frame`, which a
+/// later edit could drop with every check green (the review of #463).
+///
+/// # Safety
+/// `base + offset` is a 32-bit register of the device, mapped as device
+/// memory ([`Mmio::write`]'s assert and `quiet`'s walk).
+#[unsafe(naked)]
+unsafe extern "C" fn genet_write32(base: usize, value: u32, offset: usize) {
+    core::arch::naked_asm!("dsb sy", "str w1, [x0, x2]", "ret");
 }
 
 /// The GENET the ACPI tables declare, as [`discover`] took it.
@@ -271,6 +294,7 @@ pub(crate) unsafe fn quiet(declared: Declared) -> Option<Quieted> {
     }
     let mut bus = Mmio { base: base as usize };
     let sys_rev = genet::Bus::read(&mut bus, genet::reg::SYS_REV_CTRL);
+    let began = timer::monotonic_us();
     match genet::mac::quiet(&mut bus) {
         None => {
             let (major, minor) = genet::version(sys_rev);
@@ -289,6 +313,14 @@ pub(crate) unsafe fn quiet(declared: Declared) -> Option<Quieted> {
             None
         }
         Some(stopped) => {
+            // Said when it works too: until 2026-11-14 a stop that worked
+            // printed nothing, and "it stopped" was read from the absence
+            // of a line (the board's first runs, the plan's step 5).
+            console::println!(
+                "Ouroboros kernel: genet: made quiet in {} us: receive DMA stopped, transmit DMA {}",
+                timer::monotonic_us().saturating_sub(began),
+                if stopped.tdma { "stopped" } else { "not yet" }
+            );
             if !stopped.tdma {
                 // It only reads memory, and Linux goes on from here too.
                 // The set-up asks it once more, after the MAC's reset.
@@ -526,9 +558,10 @@ impl Device {
     /// 3. `tx_idle` is asked **before the copy**: the buffer is the one
     ///    the device may still be reading the last frame from, after a
     ///    send that timed out.
-    /// 4. The copy, then `dsb sy`, then the crate's register writes: the
-    ///    barrier is what orders the buffer's stores before the write
-    ///    that tells the device to read them.
+    /// 4. The copy, then the crate's register writes, each with its
+    ///    `dsb sy` in front of it ([`genet_write32`]): the barrier is what
+    ///    orders the buffer's stores before the write that tells the
+    ///    device to read them.
     ///
     /// Four things are said, once each: the first frame the device
     /// takes, the first send that times out, the first refused as busy,
@@ -583,7 +616,6 @@ impl Device {
         // and the device is not reading it (`tx_idle` above).
         unsafe {
             core::ptr::copy_nonoverlapping(frame.as_ptr(), buffer as *mut u8, len);
-            core::arch::asm!("dsb sy", options(nostack, preserves_flags));
         }
         match self.genet.tx_send(&mut self.bus, buffer, len) {
             Ok(()) => {
