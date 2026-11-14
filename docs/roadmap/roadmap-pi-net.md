@@ -288,6 +288,12 @@ and the design's point 2 is the answer to that.
 
 Each has a recommendation; none blocks step 2.
 
+**D1 to D6: settled by Hans on 2026-11-14, each as recommended.** D1, D2,
+D3, D5 and D6 were already built on their recommendations (steps 1 to 6),
+so for those the answer confirms what ran on the board. D4 is the one that
+still decides work: step 8 is the file, and DHCP is a later item of its
+own. The entries below stand as they were put.
+
 - **D1. Discovery from ACPI alone.** Recommended, and step 1 built it: the
   board publishes no devicetree.
 - **D2. Polled first, the interrupt as a later step** (design 7), or the
@@ -1045,7 +1051,10 @@ Each has a recommendation; none blocks step 2.
    copy did.
    **Left open by the run:** `LINK_WAIT_MS`, whose 5 s the cable-out
    boot paid in full. The transmit clock delay was worked out the same
-   day (step 4b).
+   day (step 4b). **Kept at 5 s by Hans on 2026-11-14, for now:** only a
+   boot with no cable pays it, and a shorter wait leans on the send-time
+   read of the link (step 6), which no run on the board has yet shown
+   with a cable plugged in late. To be looked at again once one has.
 
 6. **The board: transmit.** `netd` sends what it sends now. With the
    address file in place (step 8 may come first if that is simpler), a
