@@ -918,9 +918,11 @@ not yet checked on this tree are marked (predicted).
       which is the state U-Boot's pairing with the MAC needs (the plan's
       step 4b). Step 6, the transmitter alone (the receiver waits for
       step 7), is built and ran on the board the same day: the device
-      took its first frame. Whether the frame reached the wire whole is
-      not yet seen, and waits for `tcpdump` on the Mac over a direct
-      cable. From there on only the board checks it. What it had to settle first, and what was read:
+      took its first frame. **The frame reached the wire whole, seen on
+      2026-11-14** by `tcpdump` on the Mac over a direct cable to a USB
+      Ethernet adapter: one ARP request from the board's MAC address,
+      60 bytes, no input error counted. Step 7, the receive path, is
+      next. From there on only the board checks it. What it had to settle first, and what was read:
       - **Which NIC: decided by Hans on 2026-11-12, the on-board GENET
         first.** It is Broadcom GENET v5 with a BCM54213PE PHY over MDIO
         (the PHY (predicted)), plain MMIO, discovered from the firmware's

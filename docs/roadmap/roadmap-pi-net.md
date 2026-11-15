@@ -1142,6 +1142,42 @@ own. The entries below stand as they were put.
    Mac, with the adapter's interface in the `tcpdump` and `netstat`
    commands above.
 
+   **The adapter run, 2026-11-14, by Hans (build `660aebe3de30`, the
+   code #463 merged): passed. The frame is on the wire, whole.** One
+   cable from the Pi to a USB Ethernet adapter on the Mac (`en9`),
+   `tcpdump -i en9 -e -n -xx` with no filter, started before power.
+   - *The observer was shown to see first.* From the moment the link
+     came up the capture printed the Mac's own frames on that interface
+     (DHCP, ARP, mDNS), 211 of the capture's 212 frames, so a silence from the Pi
+     would have meant something.
+   - *The frame:* at `ping 192.168.0.1`, one frame from
+     `d8:3a:dd:85:24:22` to broadcast, ARP, `Request who-has 192.168.0.1
+     tell 10.0.2.34`, 60 bytes: the 42 `netd` built, byte for byte in
+     the capture's hex, and 18 zeros after them, the device's padding.
+     It was the only frame from the Pi in the run.
+   - *The serial log:* the link up at 1000 Mb/s full duplex, `the MAC's
+     transmitter is on at 1000 Mb/s`, `first frame sent: 42 bytes, taken
+     by the device` at the `ping`, then `192.168.0.1 is unreachable (no
+     ARP reply)` as expected with the receiver off. No timeout line, no
+     busy refusal, no `EXCEPTION`. The PHY's two lines read as on
+     2026-11-13: found with its transmit clock delay off, on after the
+     reset (`0x71e7`, `0x0200`).
+   - *The adapter's error count:* `netstat -I en9` read `Ierrs` 0 after
+     the run, so none was counted during it.
+   So the transmit clock delay as U-Boot pairs it (step 4b) is right on
+   this board, the device does pad a short frame, and the DMA took the
+   CPU's address of the transmit buffer as its own.
+   **One prediction above was wrong, and it was mine:** the frame asks
+   for `192.168.0.1`, the address pinged, and not for the gateway
+   `10.0.2.2`. `netd`'s `ping` hands its target straight to
+   `arp_resolve`; only the TCP and UDP paths go through `next_hop`. The
+   frame is what the code sends. Whether `ping` should route by
+   `next_hop` is a question for step 8, when `netd` has an address of
+   its own.
+   **What one frame does not show:** a second send (the buffer reused,
+   `tx_idle` saying yes), a frame longer than the minimum, and anything
+   received. `ping` sends one ARP request and gives up after 500 ms.
+
    **The review of the step (#463, read after the first boot, nothing
    run by it).** Nine findings, none in the path a frame takes. Fixed,
    the ones Hans chose:
