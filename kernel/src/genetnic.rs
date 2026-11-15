@@ -474,7 +474,23 @@ pub(crate) unsafe fn init(quieted: Quieted, dma_noncoherent: bool) -> Option<Dev
         "Ouroboros kernel: genet: GENET v5 (version major {major} minor {minor}) @ {base:#x}, MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, set up on ring 16, polled",
         m[0], m[1], m[2], m[3], m[4], m[5]
     );
-    device.say_rx_state("after the set-up, the MAC off");
+    // Where the firmware left the two indexes the device owns, which the
+    // set-up cannot change. The receive ring does not depend on its own
+    // (the crate counts descriptors from 0; on 2026-11-15 the index stood
+    // at 10 and 9 and every frame was looked for that far from where it
+    // lay). The transmit ring still takes its descriptor from the index's
+    // low byte, as U-Boot does, which has been right on every boot only
+    // because the index read 0: one off a multiple of 256 is said loudly.
+    let rx_index = genet::Bus::read(&mut device.bus, genet::reg::RDMA_PROD_INDEX) & genet::mac::DMA_INDEX_MASK;
+    let tx_index = genet::Bus::read(&mut device.bus, genet::reg::TDMA_CONS_INDEX) & genet::mac::DMA_INDEX_MASK;
+    console::println!(
+        "Ouroboros kernel: genet: the indexes the firmware left: receive {rx_index}, transmit {tx_index}{}",
+        if tx_index.is_multiple_of(256) {
+            ""
+        } else {
+            ": WARNING: the transmit index is off a multiple of 256, and a send may be put where the device does not look"
+        }
+    );
     // The MDIO scan's version gate reads the version alone.
     match device.bring_up_phy(&genet::Registers { sys_rev, ..genet::Registers::default() }) {
         Some(speed) => device.start(speed),
@@ -501,50 +517,6 @@ impl Device {
             speed.mbps(),
             genet::Bus::read(&mut self.bus, genet::reg::UMAC_CMD),
             genet::Bus::read(&mut self.bus, genet::reg::UMAC_MDF_CTRL)
-        );
-        self.say_rx_state("after the start");
-    }
-
-    /// DIAGNOSTIC, 2026-11-15, for the board's second boot of step 7 (the
-    /// first dropped its first frame as oversize, which no frame on the
-    /// wire was): where the receive ring stands, by reads alone. The
-    /// device's producer and consumer indexes, its write and read
-    /// pointers, and which of the 256 descriptors no longer hold the
-    /// value `Genet::init` wrote (a buffer's length and `DMA_OWN`): those
-    /// are the ones the device has written a frame's status to.
-    fn say_rx_state(&mut self, when: &str) {
-        let untouched = ((RX_BUF_LEN as u32) << genet::mac::DMA_BUFLENGTH_SHIFT) | genet::mac::DMA_OWN;
-        let (mut written, mut first, mut last, mut first_value) = (0u32, None, 0usize, 0u32);
-        for i in 0..DESCS {
-            let v = genet::Bus::read(
-                &mut self.bus,
-                genet::reg::RX_DESCS + i * genet::reg::DESC_SIZE + genet::reg::DESC_LENGTH_STATUS,
-            );
-            if v != untouched {
-                written += 1;
-                if first.is_none() {
-                    first = Some(i);
-                    first_value = v;
-                }
-                last = i;
-            }
-        }
-        console::println!(
-            "Ouroboros kernel: genet: DIAG receive ring {when}: PROD_INDEX {:#010x}, CONS_INDEX {:#010x}, WRITE_PTR {:#010x}, READ_PTR {:#010x}; descriptors written by the device: {written} (first {first:?} holding {first_value:#010x}, last {last}); untouched value {untouched:#010x}",
-            genet::Bus::read(&mut self.bus, genet::reg::RDMA_PROD_INDEX),
-            genet::Bus::read(&mut self.bus, genet::reg::RDMA_CONS_INDEX),
-            genet::Bus::read(&mut self.bus, genet::reg::RDMA_WRITE_PTR),
-            genet::Bus::read(&mut self.bus, genet::reg::RDMA_READ_PTR)
-        );
-        // The transmit ring is indexed by its counter's low byte still,
-        // which is right only while the firmware leaves that counter on a
-        // multiple of 256: what it reads here says whether it has.
-        console::println!(
-            "Ouroboros kernel: genet: DIAG transmit ring {when}: PROD_INDEX {:#010x}, CONS_INDEX {:#010x}, WRITE_PTR {:#010x}, READ_PTR {:#010x}",
-            genet::Bus::read(&mut self.bus, genet::reg::TDMA_PROD_INDEX),
-            genet::Bus::read(&mut self.bus, genet::reg::TDMA_CONS_INDEX),
-            genet::Bus::read(&mut self.bus, genet::reg::TDMA_WRITE_PTR),
-            genet::Bus::read(&mut self.bus, genet::reg::TDMA_READ_PTR)
         );
     }
 
@@ -809,7 +781,6 @@ impl Device {
                 Rx::Dropped(why) => {
                     if !self.said_drop {
                         self.said_drop = true;
-                        self.say_rx_state("at the first drop, after its release");
                         // A flagged frame's status in hex: its bits are
                         // the device's error flags, SOP and EOP.
                         match why {
@@ -842,7 +813,6 @@ impl Device {
                     }
                     self.genet.rx_release(&mut self.bus);
                     if self.received == 0 {
-                        self.say_rx_state("at the first frame, after its release");
                         console::println!(
                             "Ouroboros kernel: genet: first frame received: {len} bytes, from buffer {buffer} of the receive area"
                         );

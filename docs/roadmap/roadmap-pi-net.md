@@ -1336,7 +1336,8 @@ own. The entries below stand as they were put.
    2-byte pad, a ring wrap and a stale buffer); the same `fetch` run
    enough times to wrap the 16-bit counters, with no fault.
 
-   **Built 2026-11-15, not yet run on the board.**
+   **Built 2026-11-15; run on the board the same day, three boots, and
+   it works from the third** (the result is at the end of this step).
    - *In the kernel,* `genetnic.rs`'s start passes `Receiver::On`, at
      the boot's link or at the first send that finds one, so from there
      the device writes frames into the receive area. `poll_frame` asks
@@ -1424,6 +1425,80 @@ own. The entries below stand as they were put.
      would meet the trap again; the kernel returning the copied length,
      or a sentinel for a cut frame, would make it unspellable. It is a
      change to the ABI.
+
+   **The board, 2026-11-15, by Hans: three boots, one cable to the Mac's
+   adapter, `en9` set to `10.0.2.2` by hand.** The wire of each is in
+   `scratch/boot-step7.txt`, `-step7b.txt` and `-step7c.txt`, the serial
+   in `screenlog.0`.
+   - *First boot (build `b43b881ecfcb`): nothing received.* The wire was
+     right: the Pi's ARP request for `10.0.2.2`, the Mac's reply within
+     a millisecond, the Mac's SYNs and its own ARP requests for
+     `10.0.2.34`, none answered. The serial log had one line for it: `a
+     received frame was dropped (Oversize; 0 taken before it)`. No frame
+     the Mac sent was over 1403 bytes.
+   - *Second boot (build `c42393e2f713`), a diagnostic that changed no
+     behaviour:* the receive ring's indexes, its pointers, and which of
+     the 256 descriptors no longer held the value the set-up wrote. It
+     read: producer index 10 at the set-up, as the firmware left it;
+     after the first frame, the index 11, the write pointer 3 (one
+     descriptor, in words), and exactly one descriptor written,
+     **number 0**, holding `0x003e7fc0`: a whole clean frame of 60
+     bytes.
+   - **The fault: the crate looked for a frame in the descriptor named
+     by the index's low byte, as U-Boot does, and the device fills the
+     ring from where the write pointer was set, 0.** With the index at
+     10, every frame was looked for ten descriptors from where it lay,
+     in one that still held the set-up's 2048, which reads as oversize.
+     Linux keeps a pointer of its own. Fixed in the crate: `rx_desc`
+     counts from 0, apart from the consumer index.
+   - **Why the host did not find it: the model was written from the
+     driver.** It placed a frame by the index's low byte, the same
+     mistake from the other side, so tests that started the index at 5,
+     at `0x00f0` and at `0xfffe` all passed. The model now places frames
+     from the write pointer, as the board was seen to; with that and the
+     driver unfixed, four tests failed.
+   - *Third boot (build `a9eeb46bcdaf`, the fix): it receives.* The
+     index stood at 9 this time. `first frame received: 60 bytes, from
+     buffer 0 of the receive area`; `ping 10.0.2.2` said `reply from
+     10.0.2.2`; the Mac's ARP table held `10.0.2.34` at the board's
+     address.
+   - *Files from the board's HTTP server, by `curl` on the Mac:* all
+     246 files under `include` and `man`; 241 equal to the staged
+     copies by SHA-256, 827 KB in all. The other 5 are man pages edited
+     since the card's root was written (`man/tree` read as its text
+     from before 2026-11-11): `make sdcard` stages the boot partition
+     alone, so the card's root, its binaries too, is an older build,
+     and `/bin/cpp` could not be compared with `build/esp/bin/CPP`.
+     Then `/bin/cpp` 1500 times against its own first checksum: 1500
+     equal, in 1420 s.
+   - *The counts:* `256 frames received so far`, `65536` and `131072`,
+     each with no frame dropped for any cause. So the ring went round
+     and the 16-bit index wrapped, twice. `en9` counted no input error.
+     No `EXCEPTION`.
+   - *Two mistakes of mine in the check, neither the board's:* the file
+     is `/bin/cpp` on the card, not `/bin/CPP`, so the first twenty
+     checksums Hans read were of a `404` page; and the staged binaries
+     were not what the card held.
+   **The transmit ring has the same shape and was left as it is.** It
+   takes its descriptor from its index's low byte too. The diagnostic
+   read that index as 0 at the set-up, which is why every send so far
+   went where the device looked; a firmware that sends a frame before
+   the exit (a network boot tried first) would leave it elsewhere. That
+   the device reads the transmit ring from its read pointer, as it
+   fills the receive ring from its write pointer, is likely and was not
+   seen, since the index was 0. The kernel now says both indexes at the
+   set-up (`the indexes the firmware left: receive N, transmit M`), with
+   a warning when the transmit one is off a multiple of 256. Counting
+   the transmit descriptor from 0 as well is the change to make; it is
+   Hans's to decide, since no boot here can show it wrong or right.
+   **Not yet run on the board:** the last commit, which removes the
+   diagnostic and adds that line.
+   **Still not shown:** a ping of the Pi from the Mac and a `fetch` by
+   address (`netd` does neither), a frame addressed to the board longer
+   than 165 bytes, the longest in the capture (the transfers' large
+   frames all went out; whether the Mac's multicast frames of up to
+   1403 bytes were taken or filtered by the MAC is not read), a cable
+   plugged in after the boot.
 
 8. **The address file.** `netd` reads its configuration from a file on the
    root (D4), absent meaning today's values.
