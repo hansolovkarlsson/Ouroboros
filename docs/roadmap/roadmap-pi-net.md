@@ -1336,6 +1336,59 @@ own. The entries below stand as they were put.
    2-byte pad, a ring wrap and a stale buffer); the same `fetch` run
    enough times to wrap the 16-bit counters, with no fault.
 
+   **Built 2026-11-15, not yet run on the board.**
+   - *In the kernel,* `genetnic.rs`'s start passes `Receiver::On`, at
+     the boot's link or at the first send that finds one, so from there
+     the device writes frames into the receive area. `poll_frame` asks
+     the crate's `rx_next`, copies a usable frame out of its buffer by a
+     raw pointer, cut to the caller's buffer, and gives the buffer back
+     (`rx_release`); a frame the crate refuses is dropped there and the
+     next looked at, at most 256 in one call. Nothing in the kernel
+     writes a receive buffer. No register store was added: the release
+     is the crate's write, through the bus, behind the barrier.
+   - *Its lines:* the start's line now reads `the MAC's transmitter and
+     receiver are on at N Mb/s (UMAC_CMD 0x..., UMAC_MDF_CTRL 0x...)`,
+     the two registers read back after the start. `UMAC_MDF_CTRL` (Linux
+     `bcmgenet.h` line 183) is the destination filters the firmware left
+     on; this driver writes none, as U-Boot writes none, and the value
+     is there for the day nothing is received. Then `first frame
+     received: N bytes, from buffer B of the receive area`, once, and `a
+     received frame was dropped (cause; N taken before it)`, once.
+   - *In `netd`,* the clamp step 3 found owed: `recv` drops a frame
+     longer than the buffer it was cut to and asks for the next, so its
+     callers index their 1600 bytes by a length that fits. No rig sends
+     such a frame (SLIRP sends none, and the GENET returns at most
+     1536), so the drop is a path no check has failed.
+   - *On QEMU,* where no GENET is declared, nothing of the kernel's half
+     runs. `netd`'s `recv` does, on virtio-net: `make test` and the
+     network rigs are the check that it still receives.
+   **The check as written cannot all be run with what `netd` is today,
+   read before the board and not found on it:**
+   - *`ping` of the Pi from the Mac* gets no answer whatever the driver
+     does: `on_frame` answers ARP requests and TCP, and has no arm for
+     an ICMP echo request. What the Mac can show is its ARP table
+     holding the board's address (`arp -n`), which needs the Pi to have
+     received the request and sent the reply.
+   - *`fetch` of a file from the Mac* is not available: `fetch` resolves
+     its host through DNS at `10.0.2.3`, takes no address, returns one
+     message's worth, and there is no checksum command on the board.
+   - **In its place, the other direction:** `curl` on the Mac of a file
+     from `netd`'s HTTP server on the board, its checksum against the
+     staged file's (`build/esp/bin/CPP`, 108 KB). Each transfer is the
+     Mac's SYN and some tens of ACKs received, so twenty of them wrap
+     the 256-buffer ring, and several hundred wrap the 16-bit index. It
+     catches a stale or misplaced received frame as a transfer that
+     stalls or a checksum that differs, though less directly than a
+     received file would: the bytes compared are ones the board sent.
+     The 2-byte pad is checked by every frame `netd` understands at
+     all.
+   So on the board: `ping 10.0.2.2` from the Pi answers (an ARP reply
+   and an echo reply received), with the Mac's `en9` set to `10.0.2.2`
+   by hand since `netd`'s address is `10.0.2.34` until step 8; the `curl`
+   above, repeated; and no fault. An echo reply from `netd` and a
+   `fetch` by address are what the check as written would need, each a
+   change to `netd` alone.
+
 8. **The address file.** `netd` reads its configuration from a file on the
    root (D4), absent meaning today's values.
    **Check:** on QEMU, every rig passes with no file; a new boot with a
