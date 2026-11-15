@@ -536,6 +536,16 @@ impl Device {
             genet::Bus::read(&mut self.bus, genet::reg::RDMA_WRITE_PTR),
             genet::Bus::read(&mut self.bus, genet::reg::RDMA_READ_PTR)
         );
+        // The transmit ring is indexed by its counter's low byte still,
+        // which is right only while the firmware leaves that counter on a
+        // multiple of 256: what it reads here says whether it has.
+        console::println!(
+            "Ouroboros kernel: genet: DIAG transmit ring {when}: PROD_INDEX {:#010x}, CONS_INDEX {:#010x}, WRITE_PTR {:#010x}, READ_PTR {:#010x}",
+            genet::Bus::read(&mut self.bus, genet::reg::TDMA_PROD_INDEX),
+            genet::Bus::read(&mut self.bus, genet::reg::TDMA_CONS_INDEX),
+            genet::Bus::read(&mut self.bus, genet::reg::TDMA_WRITE_PTR),
+            genet::Bus::read(&mut self.bus, genet::reg::TDMA_READ_PTR)
+        );
     }
 
     /// Finds the PHY, sets it up when it is one the crate knows, and logs

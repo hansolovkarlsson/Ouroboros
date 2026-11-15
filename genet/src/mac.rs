@@ -28,6 +28,11 @@
 //!   U-Boot hands up whatever length the descriptor reads.
 //! - A buffer's address is computed from its index. U-Boot reads it back
 //!   from the descriptor, which is the device's to have changed.
+//! - The descriptor a received frame is in is counted from 0, where the
+//!   set-up points the device's write pointer. U-Boot takes the low byte
+//!   of the producer index, which a firmware that received anything
+//!   leaves off a multiple of 256: on the Pi 4 it stood at 10, and every
+//!   frame was looked for ten descriptors from where it lay (2026-11-15).
 //! - A send waits for the device's consumer index to **equal** the
 //!   producer, wrapped to 16 bits. U-Boot's `cons < prod` with an unwrapped
 //!   producer never ends at the 65536th frame. The wait is bounded in time
@@ -183,7 +188,8 @@ const _: () = {
     assert!(TX_MAX_FRAME <= RX_BUF_LEN && RX_BUF_LEN <= DMA_BUFLENGTH_MASK as usize);
     // The longest frame returned fits a buffer after the pad.
     assert!(RX_MAX_FRAME + RX_PAD <= RX_BUF_LEN);
-    // The ring index is the counter's low byte: 256 divides 65536.
+    // The transmit ring's index is the counter's low byte, and the
+    // receive ring's goes round modulo this: 256 divides 65536.
     assert!(DESCS == 256);
 };
 
@@ -292,9 +298,19 @@ pub enum Receiver {
 #[derive(Debug)]
 pub struct Genet {
     mac: [u8; 6],
-    /// The receive consumer index: frames taken, 16 bits. The descriptor
-    /// and buffer in turn are its low byte.
+    /// The receive consumer index: frames taken, 16 bits. It counts from
+    /// wherever the device's producer index stood at [`Genet::init`], so
+    /// it does **not** say which descriptor is next.
     rx_cons: u16,
+    /// The descriptor, and so the buffer, the next received frame is in.
+    /// The device fills the ring from where `RDMA_WRITE_PTR` points,
+    /// which `init` sets to 0, and goes round from there whatever its
+    /// producer index counts from. U-Boot takes the index's low byte for
+    /// this, which is right only when the index was a multiple of 256 at
+    /// the set-up; Linux keeps a pointer of its own, as this does. Read
+    /// on the board, 2026-11-15: the firmware left the index at 10 and
+    /// the first frame was in descriptor 0.
+    rx_desc: usize,
     /// The transmit producer index: frames handed over, 16 bits.
     tx_prod: u16,
     started: bool,
@@ -494,7 +510,9 @@ impl Genet {
         }
 
         // rx_ring_init. The device's producer index cannot be set, so the
-        // consumer is aligned on it.
+        // consumer is aligned on it. The write pointer can, and is: the
+        // device's first frame goes to descriptor 0, which is where
+        // `rx_desc` starts.
         bus.write(reg::RDMA_SCB_BURST_SIZE, DMA_MAX_BURST_LENGTH);
         bus.write(reg::RDMA_START_ADDR, 0);
         bus.write(reg::RDMA_READ_PTR, 0);
@@ -532,7 +550,7 @@ impl Genet {
         bus.write(reg::TDMA_CTRL, DMA_RING16_EN | DMA_EN);
         set(bus, reg::RDMA_CTRL, DMA_RINGS_0_15_EN, DMA_RING16_EN | DMA_EN);
 
-        Ok(Genet { mac: address, rx_cons, tx_prod, started: false, receiving: false, rx_held: false, drops: Drops::default() })
+        Ok(Genet { mac: address, rx_cons, rx_desc: 0, tx_prod, started: false, receiving: false, rx_held: false, drops: Drops::default() })
     }
 
     /// The station address read before the reset and written back after.
@@ -616,7 +634,7 @@ impl Genet {
         if !self.has_frame(bus) {
             return Rx::None;
         }
-        let buffer = usize::from(self.rx_cons) % DESCS;
+        let buffer = self.rx_desc;
         let len_stat = bus.read(reg::RX_DESCS + buffer * reg::DESC_SIZE + reg::DESC_LENGTH_STATUS);
         let length = ((len_stat >> DMA_BUFLENGTH_SHIFT) & DMA_BUFLENGTH_MASK) as usize;
         let drop = if length > RX_PAD + RX_MAX_FRAME {
@@ -657,6 +675,7 @@ impl Genet {
 
     fn rx_advance<B: Bus>(&mut self, bus: &mut B) {
         self.rx_cons = self.rx_cons.wrapping_add(1);
+        self.rx_desc = (self.rx_desc + 1) % DESCS;
         bus.write(reg::RDMA_CONS_INDEX, u32::from(self.rx_cons));
     }
 
