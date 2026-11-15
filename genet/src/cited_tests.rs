@@ -44,6 +44,7 @@ const CITED: &[(&str, u64, u64, Src, u32)] = &[
     ("UMAC_CMD", reg::UMAC_CMD as u64, 0x808, U, 66),
     ("MDIO_CMD", reg::MDIO_CMD as u64, 0xe14, U, 67),
     ("UMAC_TX_FLUSH", reg::UMAC_TX_FLUSH as u64, 0xb34, U, 68),
+    ("UMAC_MDF_CTRL", reg::UMAC_MDF_CTRL as u64, 0xe50, L, 183),
     ("MDIO_START_BUSY", MDIO_START_BUSY as u64, 1 << 29, U, 69),
     ("MDIO_READ_FAIL", MDIO_READ_FAIL as u64, 1 << 28, U, 70),
     ("MDIO_RD", MDIO_RD as u64, 2 << 26, U, 71),

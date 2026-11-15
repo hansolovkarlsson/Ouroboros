@@ -3,22 +3,28 @@
 //! no QEMU machine has this device); this file lends it what the crate
 //! cannot own, the registers, the delay and the receive buffers' memory,
 //! and words the boot log. `docs/roadmap/roadmap-pi-net.md` is the plan,
-//! and this is its steps 5 and 6.
+//! and this is its steps 5 to 7.
 //!
 //! **Step 5 is bring-up and link.** The device is made quiet ([`quiet`],
 //! for every declared GENET, used or not), reset and set up ([`init`]),
 //! its PHY set up and its link read and logged, and it is installed so
 //! `NET_MAC` answers.
 //!
-//! **Step 6 is the transmitter, and the transmitter alone.** With a link,
-//! the MAC is told its speed and its transmitter turned on
-//! (`Genet::start` with `Receiver::Off`), and [`Device::send_frame`]
-//! copies a frame into the one transmit buffer and hands it to the
-//! device. The **receiver stays off** until step 7, its own trip to the
-//! board (one variable a round trip): until then the receive DMA writes
-//! nothing, so an address the device takes differently from the CPU
-//! (nothing has shown they are the same) costs a wrong frame on the wire
-//! and no memory. A boot with no link starts nothing; every send after
+//! **Step 6 is the transmitter.** With a link, the MAC is told its speed
+//! and turned on (`Genet::start`), and [`Device::send_frame`] copies a
+//! frame into the one transmit buffer and hands it to the device. That
+//! step ran with the receiver off, so that an address the device took
+//! differently from the CPU would cost a wrong frame on the wire and no
+//! memory; the frame was seen on the wire whole (2026-11-14), which is
+//! what showed the device takes the CPU's address as its own.
+//!
+//! **Step 7 is the receiver.** The same start turns it on
+//! (`Receiver::On`), and from then on **the device writes memory**: each
+//! frame into the buffer of [`RX_AREA`] its descriptor names.
+//! [`Device::poll_frame`] copies a waiting frame out and gives its buffer
+//! back. Nothing here writes a receive buffer, and a frame is read only
+//! between the crate's `rx_next` and `rx_release`, while its buffer is
+//! not the device's to fill. A boot with no link starts nothing; every send after
 //! it asks the PHY for the link, until one finds it up and starts the
 //! MAC, so a cable put in later works at the next send (the plan's
 //! decision D3, as recommended). That asking is up to three MDIO reads
@@ -55,7 +61,7 @@
 
 use core::cell::UnsafeCell;
 
-use genet::mac::{Genet, InitError, Receiver, TxError, RX_AREA_LEN, TX_MAX_FRAME, TX_MIN_FRAME};
+use genet::mac::{Genet, InitError, Receiver, Rx, TxError, DESCS, RX_AREA_LEN, RX_BUF_LEN, TX_MAX_FRAME, TX_MIN_FRAME};
 use genet::phy::{self, Link, ReadBack, Speed};
 
 use crate::{acpi, console, mmu, timer};
@@ -65,8 +71,9 @@ use crate::{acpi, console, mmu, timer};
 /// else (`mmu.rs` refuses a range that shares a page).
 #[repr(C, align(4096))]
 struct RxArea(UnsafeCell<[u8; RX_AREA_LEN]>);
-// SAFETY: touched by the device (DMA) and, from step 7, by the one core in
-// the kernel under the kernel lock; never by two at once.
+// SAFETY: written by the device alone (DMA), and read by the one core in
+// the kernel under the kernel lock (`NET_RECV`), a buffer at a time and
+// only while the crate holds that buffer back from the device.
 unsafe impl Sync for RxArea {}
 static RX_AREA: RxArea = RxArea(UnsafeCell::new([0; RX_AREA_LEN]));
 
@@ -397,6 +404,11 @@ pub(crate) struct Device {
     phy: Option<(u8, u32)>,
     /// Frames the device took.
     sent: u32,
+    /// Frames taken from the device and handed up.
+    received: u32,
+    /// Whether the first received frame the crate dropped has had its
+    /// line. The counts by cause are the crate's (`Genet::drops`).
+    said_drop: bool,
     /// Which of a send's failures has had its line: each is said once,
     /// since `netd` sends again and a dead link would fill the log.
     said_timeout: bool,
@@ -433,7 +445,17 @@ pub(crate) unsafe fn init(quieted: Quieted, dma_noncoherent: bool) -> Option<Dev
     let (major, minor) = genet::version(sys_rev);
 
     let mut device = match Genet::init(&mut bus, area) {
-        Ok(genet) => Device { bus, genet, phy: None, sent: 0, said_timeout: false, said_busy: false, said_link_error: false },
+        Ok(genet) => Device {
+            bus,
+            genet,
+            phy: None,
+            sent: 0,
+            received: 0,
+            said_drop: false,
+            said_timeout: false,
+            said_busy: false,
+            said_link_error: false,
+        },
         Err(InitError::NoMac(m)) => {
             console::println!(
                 "Ouroboros kernel: genet: the firmware left no station address ({:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}): none is made up, the Ethernet is not brought up",
@@ -455,7 +477,7 @@ pub(crate) unsafe fn init(quieted: Quieted, dma_noncoherent: bool) -> Option<Dev
     match device.bring_up_phy(&genet::Registers { sys_rev, ..genet::Registers::default() }) {
         Some(speed) => device.start(speed),
         None => console::println!(
-            "Ouroboros kernel: genet: no link read as up at a speed, so the MAC's transmitter is left off: a send asks the link again{}",
+            "Ouroboros kernel: genet: no link read as up at a speed, so the MAC is left off: a send asks the link again{}",
             if device.phy.is_some() { "" } else { " (it cannot: no PHY was set up, so nothing will be sent)" }
         ),
     }
@@ -463,13 +485,20 @@ pub(crate) unsafe fn init(quieted: Quieted, dma_noncoherent: bool) -> Option<Dev
 }
 
 impl Device {
-    /// Tells the MAC the speed and turns its transmitter on, the receiver
-    /// left off (step 6), and says so.
+    /// Tells the MAC the speed and turns its transmitter and its receiver
+    /// on, and says so. From here the device writes received frames into
+    /// [`RX_AREA`]. The line carries two registers read back after the
+    /// start, for the day nothing is received: `UMAC_CMD` (the enables,
+    /// the speed, and bit 4, promiscuous) and `UMAC_MDF_CTRL` (the
+    /// destination filters the firmware left on; this driver sets none,
+    /// as U-Boot sets none).
     fn start(&mut self, speed: Speed) {
-        self.genet.start(&mut self.bus, speed, Receiver::Off);
+        self.genet.start(&mut self.bus, speed, Receiver::On);
         console::println!(
-            "Ouroboros kernel: genet: the MAC's transmitter is on at {} Mb/s, its receiver left off: frames are sent and none is received yet (step 6)",
-            speed.mbps()
+            "Ouroboros kernel: genet: the MAC's transmitter and receiver are on at {} Mb/s (UMAC_CMD {:#010x}, UMAC_MDF_CTRL {:#010x}): frames are sent, and received by the tick's poll",
+            speed.mbps(),
+            genet::Bus::read(&mut self.bus, genet::reg::UMAC_CMD),
+            genet::Bus::read(&mut self.bus, genet::reg::UMAC_MDF_CTRL)
         );
     }
 
@@ -585,10 +614,10 @@ impl Device {
 
     /// Whether a received frame waits: at most one register read, nothing
     /// written, no wait, as the tick's caller needs. False while the
-    /// MAC's receiver is off, which is the crate's rule
-    /// (`Genet::has_frame`) and is all of steps 5 and 6: `poll_frame`
-    /// takes nothing, and a "yes" that nothing can consume would wake the
-    /// network server on every tick for good.
+    /// MAC's receiver is off (a boot with no link yet), which is the
+    /// crate's rule (`Genet::has_frame`). A "yes" is one
+    /// [`poll_frame`](Self::poll_frame) ends: it takes the frame or drops
+    /// it, and either moves the index this compares.
     pub(crate) fn has_frame(&self) -> bool {
         let mut bus = self.bus;
         self.genet.has_frame(&mut bus)
@@ -692,9 +721,59 @@ impl Device {
         }
     }
 
-    /// Nothing: with the MAC's receiver off no frame arrives, and step 7
-    /// is where one is first taken.
-    pub(crate) fn poll_frame(&mut self, _out: &mut [u8]) -> Option<usize> {
+    /// Takes one received frame if a usable one waits: copies it into
+    /// `out`, cut to `out`'s length, gives its buffer back to the device,
+    /// and returns the frame's own length (14 to
+    /// `genet::mac::RX_MAX_FRAME`). Under the kernel lock, with no wait.
+    ///
+    /// A frame the crate refuses (not whole, flagged by the device, too
+    /// short or too long) is released by the crate and the next one
+    /// looked at, at most a ring's worth in one call, so a call ends
+    /// whatever the device holds. `None` after that many refusals leaves
+    /// `has_frame` to say whether more wait.
+    ///
+    /// Two things are said, once each: the first frame taken, and the
+    /// first one dropped, with its cause.
+    pub(crate) fn poll_frame(&mut self, out: &mut [u8]) -> Option<usize> {
+        for _ in 0..DESCS {
+            match self.genet.rx_next(&mut self.bus) {
+                Rx::None => return None,
+                Rx::Dropped(why) => {
+                    if !self.said_drop {
+                        self.said_drop = true;
+                        console::println!(
+                            "Ouroboros kernel: genet: a received frame was dropped ({why:?}; {} taken before it); said once",
+                            self.received
+                        );
+                    }
+                }
+                Rx::Frame { buffer, offset, len } => {
+                    let n = len.min(out.len());
+                    let (area, _) = dma_region();
+                    let from = area as usize + buffer * RX_BUF_LEN + offset;
+                    // SAFETY: the crate returns `buffer` below `DESCS` and
+                    // `offset + len` inside one buffer (its `Rx::Frame`
+                    // doc, and its assert that the longest frame fits a
+                    // buffer after the pad), so the `n` bytes read are
+                    // inside `RX_AREA`. The device does not write this
+                    // buffer between `rx_next` and `rx_release`. Read
+                    // through a raw pointer: no reference to memory the
+                    // device writes is made. `out` is the caller's, `n`
+                    // inside it.
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(from as *const u8, out.as_mut_ptr(), n);
+                    }
+                    self.genet.rx_release(&mut self.bus);
+                    if self.received == 0 {
+                        console::println!(
+                            "Ouroboros kernel: genet: first frame received: {len} bytes, from buffer {buffer} of the receive area"
+                        );
+                    }
+                    self.received = self.received.saturating_add(1);
+                    return Some(len);
+                }
+            }
+        }
         None
     }
 }

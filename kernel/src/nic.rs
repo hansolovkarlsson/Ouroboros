@@ -6,10 +6,9 @@
 //! Two arms: virtio-net, and since the plan's step 5 the Pi 4's GENET
 //! (`docs/roadmap/roadmap-pi-net.md`, design 6; `genetnic.rs`). The enum
 //! came first, in step 3, so the driver arrived as an arm and
-//! `syscall.rs` and `netd` did not change with it. **The GENET arm sends
-//! and does not yet receive** (step 6): it answers `mac`, sends a frame
-//! once it has a link, says no to `has_frame` and returns no frame, until
-//! step 7.
+//! `syscall.rs` and `netd` did not change with it. The GENET arm sends
+//! and receives once it has a link (steps 6 and 7); with none it answers
+//! `mac`, says no to `has_frame` and returns no frame.
 //!
 //! What every arm owes its callers, stated here because the callers are in
 //! three files and cannot see a driver:
