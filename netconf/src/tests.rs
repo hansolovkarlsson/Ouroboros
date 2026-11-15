@@ -88,7 +88,9 @@ fn a_gateway_is_another_machine_on_the_subnet() {
 #[test]
 fn a_dns_server_is_some_other_machine_anywhere() {
     assert!(parse(b"address 192.168.1.50\nmask 255.255.255.0\ndns 8.8.8.8\n").is_ok());
-    for bad in ["192.168.1.50", "0.0.0.0", "224.0.0.251", "127.0.0.1"] {
+    // Off our subnet, a last byte of 0 or 255 may be a machine's.
+    assert!(parse(b"address 192.168.1.50\nmask 255.255.255.0\ndns 10.9.8.255\n").is_ok());
+    for bad in ["192.168.1.50", "0.0.0.0", "224.0.0.251", "127.0.0.1", "192.168.1.255", "192.168.1.0"] {
         let file = std::format!("address 192.168.1.50\nmask 255.255.255.0\ndns {bad}\n");
         assert_eq!(parse(file.as_bytes()), Err(Error::BadDns), "{bad}");
     }

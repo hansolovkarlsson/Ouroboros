@@ -11,7 +11,8 @@ e2fsprogs) or left out:
    the host reaches its HTTP server at 10.0.2.20 through a port forwarded
    there, and does NOT reach one at 10.0.2.15, the address it would have had.
    `ping 10.0.2.2` from the guest answers, so frames it sends carry an address
-   SLIRP will answer to.
+   SLIRP will answer to, and a ping of an address off the subnet is sent by
+   way of the gateway (it is not refused for want of an ARP reply).
 2. **A file with a line that is not understood.** `netd` says the file is
    refused and which line, then that it uses the defaults; the host reaches it
    at 10.0.2.15 and not at 10.0.2.20, the address the bad file named. Nothing
@@ -50,6 +51,8 @@ CONF = os.path.join(ROOT, "build", "netconf-etc-net.txt")
 OFF, SIZE = 2048 * 512, 49152 * 512
 OLD, NEW = "10.0.2.15", "10.0.2.20"
 PORT_OLD, PORT_NEW = 5661, 5662
+# An address off the guest's subnet (TEST-NET-3), for the next hop.
+FAR = "203.0.113.9"
 
 GOOD = f"# test-net-config\naddress {NEW}\nmask 255.255.255.0\ngateway 10.0.2.2\ndns 10.0.2.3\n"
 # Line 3 is the one not understood. The address line before it is a good one,
@@ -107,7 +110,13 @@ def boot(label, conf, want_lines, reached, not_reached, ping):
         print(f"[{'PASS' if ok else 'FAIL'}] {label}: {what}", flush=True)
         failed += 0 if ok else 1
 
-    make_copy(conf)
+    try:
+        make_copy(conf)
+    except BaseException:
+        for leftover in (COPY, PART, CONF):
+            if os.path.exists(leftover):
+                os.unlink(leftover)
+        raise
     g = drive_qemu.Guest(COPY, extra_args=(
         "-netdev", f"user,id=net0,hostfwd=tcp::{PORT_OLD}-{OLD}:80,hostfwd=tcp::{PORT_NEW}-{NEW}:80",
         "-device", "virtio-net-device,netdev=net0",
@@ -130,8 +139,17 @@ def boot(label, conf, want_lines, reached, not_reached, ping):
         check(not http(port[not_reached]), f"and does not at {not_reached}")
         if ping:
             g.type_line("root")
-            g.run([("assword", "root"), ("# ", "ping 10.0.2.2"), ("# ", "")])
-            check("reply from 10.0.2.2" in g.transcript(), "ping 10.0.2.2 from the guest answers")
+            g.run([("assword", "root"), ("# ", "ping 10.0.2.2"), ("# ", f"ping {FAR}"), ("# ", "")])
+            text = g.transcript()
+            check("reply from 10.0.2.2" in text, "ping 10.0.2.2 from the guest answers")
+            # Off the subnet the frame goes to the gateway, which SLIRP
+            # answers ARP for; nobody answers ARP for FAR itself. So "no
+            # ARP reply" is a ping that asked the wire for the far address,
+            # as `handle_ping` did until 2026-11-15. Whether the echo is
+            # answered is SLIRP's and the host's business, and not asked.
+            went = f"reply from {FAR}" in text
+            check(went and f"{FAR} is unreachable (no ARP reply)" not in text,
+                  f"ping {FAR}, off the subnet, is sent by way of the gateway")
         check(g.proc.poll() is None, "the guest is alive at the end")
         if failed:
             # What the guest said, for the checks above that did not find it.

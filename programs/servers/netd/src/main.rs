@@ -117,37 +117,58 @@ fn log_ip(ip: &[u8; 4]) {
 }
 
 /// Reads `/etc/net` and sets the configuration for the boot, saying in one
-/// line what it is and where it came from. Called once, after
-/// [`load_auth`], whose reads have by then waited out the disk's mount (or
-/// found there is no disk), so this retries a transient failure a few
-/// times and no more.
+/// line what it is and where it came from. Called once, from
+/// [`load_auth`] after its reads, which have by then waited out the disk's
+/// mount or found there is no disk.
+///
+/// **It does not wait for a mount itself.** `load_auth` holds the one
+/// retry budget for that (its comment says why there is one and not one a
+/// read), so `NO_FS` here is taken as "nothing is mounted" at once. The
+/// other transient answers (a full mailbox, a server mid-restart) are asked
+/// again a few times. A disk that mounts after `load_auth` gave up leaves
+/// this machine on the defaults for the boot, as it leaves it with no
+/// cluster identity: `NET_WAIT` is not a sleep (`testing-pi4.md`, risk 4b),
+/// and nothing reads either file again.
 ///
 /// **Every way of not having a usable file ends in the configuration for
-/// no file**, each with its own words: the file absent (the ordinary case
-/// on QEMU, and no warning), the file not read, and the file refused. A
+/// no file**, each with its own words: the file absent or nothing mounted
+/// (ordinary, and no warning), the file not read, and the file refused. A
 /// refused file is refused whole (`netconf::parse`): the line says why,
 /// and which line of the file where one is to blame.
+///
+/// The file is read until a read returns nothing, as `read_registry` reads:
+/// a read may return fewer bytes than asked without being the end, and a
+/// file cut short could still parse, to an address nobody wrote.
 fn load_netconf() {
     let mut buf = [0u8; netconf::MAX_FILE + 1];
     let mut budget = 5u32;
+    let mut len = 0usize;
     let n = loop {
-        let r = read_file_chunk(As::FirstParty, NETCONF_PATH, 0, 0, &mut buf);
-        if transient_fs_failure(r) && budget > 0 {
+        let r = read_file_chunk(As::FirstParty, NETCONF_PATH, 0, len as u64, &mut buf[len..]);
+        if r != syscall_abi::NO_FS && transient_fs_failure(r) && budget > 0 {
             budget -= 1;
             syscall(syscall_abi::NET_WAIT, 40);
             continue;
         }
-        break r;
+        if r >= syscall_abi::FS_ERR_MIN {
+            break r;
+        }
+        len += (r as usize).min(buf.len() - len);
+        // The end of the file, or a buffer full: one byte more than the
+        // longest file taken, so a longer file is refused as too long.
+        if r == 0 || len == buf.len() {
+            break len as u64;
+        }
     };
     let mut config = default_netconf();
     let source: &[u8] = if n == syscall_abi::FS_ERR_NOT_FOUND {
         b" (no /etc/net: the defaults)"
+    } else if n == syscall_abi::NO_FS {
+        b" (nothing mounted to read /etc/net from: the defaults)"
     } else if n >= syscall_abi::FS_ERR_MIN {
         b" (WARNING: /etc/net could not be read: the defaults)"
     } else {
-        // `buf` is one byte longer than the longest file taken, so a longer
-        // file fills it and is refused as too long.
-        match netconf::parse(&buf[..(n as usize).min(buf.len())]) {
+        match netconf::parse(&buf[..len]) {
             Ok(c) => {
                 config = c;
                 b" (from /etc/net)"
@@ -380,8 +401,9 @@ const USERS_MAX: usize = clusterkeys::USERS_MAX;
 /// `docs/roadmap/roadmap-cluster-keys.md`). A *per-machine keypair*: this machine holds
 /// its own private key and a list of the peer PUBLIC keys it accepts, so a
 /// member is revoked by deleting a line rather than by re-keying everyone. A
-/// machine with neither can neither serve nor dial. Read-only after startup; no mutable statics exist in
-/// userland (`.bss` asserted empty), so this lives in `Tables` (the heap region) and is
+/// machine with neither can neither serve nor dial. Read-only after startup. It was put in `Tables`
+/// when userland had no `.bss` (the linker script asserted it empty, until
+/// the loader's `.data`/`.bss` milestone), so it lives in the heap region and is
 /// threaded (`&Auth`) through the event loop to the two leaves that need it -
 /// the inbound gate (`handle_9p`) and the outbound signer (`handle_rmount`/
 /// `handle_run`).
@@ -709,6 +731,13 @@ fn load_auth() -> Auth {
             Registry::Unreadable => log(b"netd: WARNING could not read /etc/cluster/users; it is read as broken, so a claim needing it is REFUSED\r\n"),
         }
     }
+    // The network configuration, here: after the reads above have waited out
+    // the disk's mount (`load_netconf` leans on that and waits for no mount
+    // of its own), and BEFORE the lines below, which stay netd's last boot
+    // lines. Two rigs type once they see the last of them
+    // (`test-blank-disk.py`'s NETD_SETTLED, `test-sd.py`), and a line
+    // printed after it could land in what they type.
+    load_netconf();
     // REPORTED PER DIRECTION: they have different preconditions, and a machine
     // can be able to do one and not the other. Naming WHICH half is missing
     // matters more now that there is no fallback format to fall back to - the
@@ -933,13 +962,7 @@ fn tables() -> &'static mut Tables {
         p.write(Tables {
             buf: [0u8; syscall_abi::MSG_MAX_LEN as usize],
             frame: [0u8; 1600],
-            auth: {
-                // The address after the keys: `load_auth` waits out the
-                // disk's mount, and `load_netconf` leans on that.
-                let auth = load_auth();
-                load_netconf();
-                auth
-            },
+            auth: load_auth(),
             conns: core::array::from_fn(|_| None),
             dials: core::array::from_fn(|_| None),
             sessions: core::array::from_fn(|_| None),
@@ -1524,7 +1547,8 @@ fn is_echo_reply(frame: &[u8], target: &[u8; 4]) -> bool {
 }
 
 /// Resolve `host` to an IPv4 by sending a DNS A-record query over UDP to the
-/// user-net DNS server and parsing the response. Returns
+/// configured DNS server (`/etc/net`'s `dns`; QEMU user networking's with
+/// no file) and parsing the response. Returns
 /// `(status, packed_ip)` - the `NET_RESOLVE_*` status, and the four resolved
 /// octets packed little-endian when it's `NET_RESOLVE_OK`. The first UDP
 /// application in the stack (Stage 3).

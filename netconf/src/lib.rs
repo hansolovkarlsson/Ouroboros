@@ -79,7 +79,8 @@ pub enum Error {
     BadAddress,
     /// A gateway that is not another machine on the address's subnet.
     BadGateway,
-    /// A DNS server that is no one machine's address.
+    /// A DNS server that is no one machine's address, or is our own
+    /// subnet's own or broadcast address.
     BadDns,
 }
 
@@ -197,7 +198,9 @@ pub fn parse(file: &[u8]) -> Result<Config, Error> {
         }
     }
     if let Some(d) = dns {
-        if !unicast(d) || d == address {
+        // On our own subnet it must be a machine there too; elsewhere its
+        // subnet is not ours to know.
+        if !unicast(d) || d == address || (config.on_subnet(d) && !config.host_on_subnet(d)) {
             return Err(Error::BadDns);
         }
     }
