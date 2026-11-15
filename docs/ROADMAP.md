@@ -925,7 +925,7 @@ not yet checked on this tree are marked (predicted).
       every register write, the stop's line) ran on the board on
       2026-11-15:** the same frame four times from four pings, and a
       boot of about 14 minutes with no fault. Step 7, the receive path,
-      is next. From there on only the board checks it. What it had to settle first, and what was read:
+      was built on 2026-11-15 and has not yet run on the board. From there on only the board checks it. What it had to settle first, and what was read:
       - **Which NIC: decided by Hans on 2026-11-12, the on-board GENET
         first.** It is Broadcom GENET v5 with a BCM54213PE PHY over MDIO
         (the PHY (predicted)), plain MMIO, discovered from the firmware's

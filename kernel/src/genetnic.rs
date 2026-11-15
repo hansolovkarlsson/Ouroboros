@@ -61,7 +61,7 @@
 
 use core::cell::UnsafeCell;
 
-use genet::mac::{Genet, InitError, Receiver, Rx, TxError, DESCS, RX_AREA_LEN, RX_BUF_LEN, TX_MAX_FRAME, TX_MIN_FRAME};
+use genet::mac::{Genet, InitError, Receiver, Rx, RxDrop, TxError, DESCS, RX_AREA_LEN, RX_BUF_LEN, TX_MAX_FRAME, TX_MIN_FRAME};
 use genet::phy::{self, Link, ReadBack, Speed};
 
 use crate::{acpi, console, mmu, timer};
@@ -407,7 +407,8 @@ pub(crate) struct Device {
     /// Frames taken from the device and handed up.
     received: u32,
     /// Whether the first received frame the crate dropped has had its
-    /// line. The counts by cause are the crate's (`Genet::drops`).
+    /// line. The counts by cause are the crate's (`Genet::drops`), said
+    /// with the count of frames taken ([`Device::say_counts`]).
     said_drop: bool,
     /// Which of a send's failures has had its line: each is said once,
     /// since `netd` sends again and a dead link would fill the log.
@@ -721,6 +722,26 @@ impl Device {
         }
     }
 
+    /// Says how many frames were taken and how many dropped, by cause,
+    /// when the count taken reaches 256 and at each 65536: past the first
+    /// the ring of 256 buffers has been round, and past the second the
+    /// 16-bit index has wrapped, which is what the board's check asks to
+    /// have seen. Without these the log holds the first frame and the
+    /// first drop and nothing after.
+    fn say_counts(&self) {
+        if self.received == DESCS as u32 || self.received.is_multiple_of(65536) {
+            let d = self.genet.drops();
+            console::println!(
+                "Ouroboros kernel: genet: {} frames received so far; dropped: {} flagged by the device, {} not whole, {} too short, {} too long",
+                self.received,
+                d.flagged,
+                d.fragment,
+                d.runt,
+                d.oversize
+            );
+        }
+    }
+
     /// Takes one received frame if a usable one waits: copies it into
     /// `out`, cut to `out`'s length, gives its buffer back to the device,
     /// and returns the frame's own length (14 to
@@ -733,7 +754,9 @@ impl Device {
     /// `has_frame` to say whether more wait.
     ///
     /// Two things are said, once each: the first frame taken, and the
-    /// first one dropped, with its cause.
+    /// first one dropped, with its cause. The counts are said as the
+    /// frames taken pass a ring's worth and each 65536 after
+    /// ([`say_counts`](Self::say_counts)).
     pub(crate) fn poll_frame(&mut self, out: &mut [u8]) -> Option<usize> {
         for _ in 0..DESCS {
             match self.genet.rx_next(&mut self.bus) {
@@ -741,10 +764,18 @@ impl Device {
                 Rx::Dropped(why) => {
                     if !self.said_drop {
                         self.said_drop = true;
-                        console::println!(
-                            "Ouroboros kernel: genet: a received frame was dropped ({why:?}; {} taken before it); said once",
-                            self.received
-                        );
+                        // A flagged frame's status in hex: its bits are
+                        // the device's error flags, SOP and EOP.
+                        match why {
+                            RxDrop::Flagged(status) => console::println!(
+                                "Ouroboros kernel: genet: a received frame was dropped (flagged by the device, status {status:#06x}; {} taken before it); said once",
+                                self.received
+                            ),
+                            other => console::println!(
+                                "Ouroboros kernel: genet: a received frame was dropped ({other:?}; {} taken before it); said once",
+                                self.received
+                            ),
+                        }
                     }
                 }
                 Rx::Frame { buffer, offset, len } => {
@@ -770,6 +801,7 @@ impl Device {
                         );
                     }
                     self.received = self.received.saturating_add(1);
+                    self.say_counts();
                     return Some(len);
                 }
             }

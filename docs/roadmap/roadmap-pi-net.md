@@ -1375,8 +1375,11 @@ own. The entries below stand as they were put.
    - **In its place, the other direction:** `curl` on the Mac of a file
      from `netd`'s HTTP server on the board, its checksum against the
      staged file's (`build/esp/bin/CPP`, 108 KB). Each transfer is the
-     Mac's SYN and some tens of ACKs received, so twenty of them wrap
-     the 256-buffer ring, and several hundred wrap the 16-bit index. It
+     Mac's SYN and some tens of ACKs received (78 segments of 1400
+     bytes, so about 44 to 82 frames from the Mac), so six of them wrap
+     the 256-buffer ring, and 800 to 1500 wrap the 16-bit index. The
+     kernel says its count of frames taken at 256 and at each 65536, so
+     the log shows whether either was reached. It
      catches a stale or misplaced received frame as a transfer that
      stalls or a checksum that differs, though less directly than a
      received file would: the bytes compared are ones the board sent.
@@ -1388,6 +1391,39 @@ own. The entries below stand as they were put.
    above, repeated; and no fault. An echo reply from `netd` and a
    `fetch` by address are what the check as written would need, each a
    change to `netd` alone.
+
+   **The review of the step (2026-11-15, before the board, nothing run
+   by it).** No fault found in the path a frame takes. Fixed: the counts
+   were never said after the first frame and the first drop, so a ring
+   wrap could not be read from the log (the count line above, with the
+   crate's drops by cause); a flagged frame's status was printed in
+   decimal; "several hundred" transfers for the 16-bit wrap was wrong by
+   the arithmetic; and `ROADMAP.md` still said the step was next.
+   **Left open, each a decision and none in the way of the board's
+   run:**
+   - *A link that comes up after the boot's wait is seen only at a
+     send* (decision D3, made for a transmitter). With the receiver the
+     same rule leaves the board deaf until the Pi itself sends: `netd`
+     sends nothing unprompted, so a Mac's ARP goes unanswered until
+     someone runs `ping` on the board. A link that drops and returns is
+     never read again either. Asking the link from the tick is not
+     open to it, since `has_frame` may not write or wait.
+   - *The receiver is never turned off.* With nobody draining it
+     (before `netd` first runs, after `netd` is past its restart cap,
+     after the kernel halts) the ring fills and the DMA sits at its
+     flow-control threshold. Whether the MAC then sends PAUSE frames is
+     not known here; U-Boot stops the MAC after each command and never
+     leaves it on undrained.
+   - *`netd`'s drain loop has no bound and no heartbeat* (`while let
+     Some(n) = recv(...)`, and `recv`'s own loop over oversize frames).
+     Frames arriving faster than they are handled for 2.56 s would have
+     the supervisor call `netd` wedged. SLIRP never did that; a wire
+     can.
+   - *`NET_RECV` still returns a length longer than the buffer it
+     filled*, and the clamp is in `netd`'s one `recv`. A second caller
+     would meet the trap again; the kernel returning the copied length,
+     or a sentinel for a cut frame, would make it unspellable. It is a
+     change to the ABI.
 
 8. **The address file.** `netd` reads its configuration from a file on the
    root (D4), absent meaning today's values.
