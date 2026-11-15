@@ -3072,6 +3072,11 @@ check-stack-chains: esp
 # register write added beside the others (see the script's docstring). PART
 # OF `test`, since a check outside the default suite decays; checks the
 # PROFILE that `make sdcard` stages (debug unless PROFILE says otherwise).
+# Since 2026-11-14 it holds the Pi's Ethernet driver's barrier too
+# (genetnic.rs's genet_write32, every register write the driver's bus
+# makes; the scan's MDIO read commands in netscan.rs go through a store
+# of their own, which is not held): no emulator models that device, so the image is the only
+# place to look. Shown to fail by the same three mutations.
 check-xhci-barriers: build
 	@python3 scripts/check-xhci-barriers.py $(KERNEL) $(dir $(OBJCOPY))
 
@@ -3200,7 +3205,7 @@ test:
 	@python3 scripts/disksig.py --self-test || exit 1
 	@python3 scripts/bootstick.py --self-test || exit 1
 	@python3 scripts/bootcounter.py --self-test || exit 1
-	@echo "== xHCI barriers in the kernel image"
+	@echo "== xHCI and GENET barriers in the kernel image"
 	@$(MAKE) --no-print-directory check-xhci-barriers || exit 1
 	@# The multi-core plan (docs/roadmap/roadmap-smp.md) names every static in
 	@# the kernel by owner, because the single-core argument it retires is

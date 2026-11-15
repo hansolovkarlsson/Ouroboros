@@ -89,6 +89,16 @@ pub(crate) fn monotonic_us() -> u64 {
     (ticks / freq) * 1_000_000 + ((ticks % freq) * 1_000_000) / freq
 }
 
+/// Microseconds from `began`, an earlier [`now_ticks`] reading, to now.
+/// `None` where the counter's frequency reads 0, so a caller that only
+/// wants to print a duration can say it does not know one: the division
+/// is checked here, where [`monotonic_us`]'s is not, for a caller that
+/// must not be able to end the boot by asking (`genetnic::quiet`, around
+/// the stop of a device that may be writing memory).
+pub(crate) fn us_since(began: u64) -> Option<u64> {
+    now_ticks().saturating_sub(began).saturating_mul(1_000_000).checked_div(frequency_hz())
+}
+
 /// Arms the timer to fire once, `interval_ms` milliseconds from now.
 /// Re-arming (calling this again) is how a periodic tick is built. See
 /// the IRQ handler in `exceptions.rs`, which calls this again each time the
