@@ -1,7 +1,7 @@
 # True when written
 
 *A process retrospective, the twenty-ninth, covering 2026-09-03 and extended
-through 2026-11-13. Five PRs, no new subsystem, and four defects that were all
+through 2026-11-14. Five PRs, no new subsystem, and four defects that were all
 the same defect: a statement that was correct on the day someone typed it, and
 stopped being correct without anyone touching the file it lived in. The later
 sections, each dated, add the variants found since: claims false on arrival, a
@@ -1387,6 +1387,28 @@ were checked by nothing until a second reader opened the files.
 before and the one after, and it is written with only the second on the
 screen. Read the old lines before saying what they did; and when a fix
 adds a case, grep for the lists of the cases there were.**
+
+**Eight more, the day this section was written (2026-11-14).** #465
+moved the GENET's barrier into a function and was reviewed twice the
+same way. The second review, of the first one's fixes, found no fault in
+the code and eight statements that did not match it, written within the
+hour by the author of the paragraphs above. "A second caller does not
+compile" stood in four records without "outside the module". "The
+scan's one MDIO write" was one store that up to about 128 commands go through.
+The plan quoted a corrected wording that was in no file. And one had a
+cost attached: the plan said printing the status the stop read needed a
+change to the `genet` crate, when both registers are public and the
+caller holds the bus. That sentence closed a question by naming a
+blocker nobody had looked for, and the next board trip would have gone
+without the reading. The same day the wire falsified an older one, in
+the plan since 2026-11-13: that the Pi's ARP request would ask for the
+gateway. `netd`'s `ping` does not route, and the comment on `next_hop`
+says which paths do.
+Knowing the rule did not help, the morning's section being the proof.
+What stopped it was not a third review, which would have read the second
+round's sentences, but ending the rounds and handing the diff to a
+reader. **A sentence that says a thing cannot be done yet is the one to
+open the code for: it ends the looking, so it is checked by nobody.**
 
 ## What actually worked
 

@@ -1,6 +1,6 @@
 # Blind instruments
 
-*A process retrospective, 2026-09-02, extended through 2026-11-13. It began
+*A process retrospective, 2026-09-02, extended through 2026-11-14. It began
 with a day of small roadmap items (five PRs, one release, no arc) during which
 five separate tools reported success while proving nothing. Every later day
 that found another instrument of the same kind added a dated section after
@@ -2997,3 +2997,16 @@ log is the only instrument, success needs a line as much as failure
 does: a pass told by silence cannot be told from the code not having
 run.** The stop still has no such line; it is on the list for the next
 change to `genetnic.rs`.
+
+**Both answered on 2026-11-14, one of them by a run.** The adapter came,
+and the capture was shown its noise before it was asked for a silence:
+`tcpdump` on the adapter's interface with no filter, started before the
+Pi had power, and watched first. The Mac's own DHCP and ARP printed as
+the link came up, 211 frames, and then the Pi's one, whole. The control
+cost nothing but dropping the source filter the plan's command had
+carried, which would have hidden the very frames that prove the capture
+sees. The stop has its line too (#465), with the time it took and both
+status registers. That one is not answered yet in the sense this file
+means: no board has printed it, so today it is a line that a boot which
+skipped the stop would also not print. It becomes an instrument at the
+first boot that shows it.

@@ -11,6 +11,27 @@ here actually works today, see [`architecture.md`](architecture.md) and
 
 **Not yet released.** Changes since v0.25.0, drafted as they land.
 
+**The Pi's first frame was seen on the wire, whole (2026-11-14, #466).**
+The check step 6 of `docs/roadmap/roadmap-pi-net.md` still owed, run on
+the code #463 merged: over one cable from the Pi to a USB Ethernet
+adapter on the Mac, `tcpdump` showed one ARP request from the board's
+MAC address, 60 bytes, the 42 `netd` built and the device's padding, and
+the adapter counted no input error. Nothing in the tree changed for it
+but the records. The receiver is still off, so `ping` on the Pi still
+gets no answer; receiving is step 7.
+
+**Every register write of the Pi's Ethernet driver has its barrier, and a stop that works says so (2026-11-14, #465).**
+The `dsb sy` that orders a frame's bytes before the write that hands
+them to the device was one inline instruction in `send_frame`. It is now
+in `genet_write32`, a function of fixed instructions that every register
+write of the driver's bus goes through, and `make check-xhci-barriers`
+(part of `make test`) finds it in the built kernel beside the xHCI's
+two. At boot, `genet: made quiet in N us: ...` says how long stopping
+the device took and what its two DMA status registers read afterwards;
+before, a stop that worked printed nothing. Built and checked on the
+host and on QEMU, where no such device exists; not yet run on a board.
+On QEMU and Parallels nothing changes.
+
 **The Pi's Ethernet sends a frame; it does not yet receive (2026-11-13, #463).**
 Step 6 of `docs/roadmap/roadmap-pi-net.md`. With a link, the kernel turns
 the MAC's transmitter on and `NET_SEND` sends through it, from one
