@@ -2376,6 +2376,15 @@ test-cred-client: images-2vm-ext2
 test-no-identity: image-ext2
 	python3 scripts/test-no-identity.py
 
+# netd's address from /etc/net (scripts/test-net-config.py, Pi net step 8):
+# three boots of a copy of the ext2 image, with a good file, a file with a
+# line not understood, and none. Each is reached at the address it should
+# have and not at the other. About three minutes; needs e2fsprogs. Run it
+# whenever netconf, netd's load_netconf or its use of the address, mask,
+# gateway or DNS server changes.
+test-net-config: image-ext2
+	python3 scripts/test-net-config.py
+
 # The user heap on a booted image: /bin/CMEM twice in one boot
 # (scripts/test-heap.py). Each run checks its heap is at least 1 MiB, that
 # malloc holds nearly all of it with every byte read back, and that the heap
