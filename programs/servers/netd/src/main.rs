@@ -17,9 +17,10 @@
 //!
 //! Scope, deliberate: **guest-initiated ping only**. Replying to a host's
 //! ping needs an asynchronous receive loop (the poll/select gap), out of
-//! scope here. The source IP `10.0.2.15` and the /24 assumption are the
-//! QEMU user-net convention `init_net`'s old probe already used; real
-//! DHCP/routing is future work.
+//! scope here. The address, mask, gateway and DNS server come from
+//! `/etc/net` (`netconf`, since 2026-11-15); with no such file they are
+//! QEMU user networking's, `10.0.2.15` on a /24, as they always were.
+//! DHCP is future work.
 //!
 //! Built like every userland program: `aarch64-unknown-none`, release-only,
 //! the shared `programs/linker.ld`, staged as `\EFI\ORBS\NETD.BIN`.
@@ -33,14 +34,15 @@ use core::arch::asm;
 use core::panic::PanicInfo;
 
 
-/// Our IPv4, derived from the NIC's MAC (cluster Phase 1d) so two guests on a
+/// The configuration with no `/etc/net`: QEMU user networking's, with our
+/// IPv4 derived from the NIC's MAC (cluster Phase 1d) so two guests on a
 /// shared L2 link get distinct addresses with no config channel: the last octet
 /// is the MAC's last octet. The QEMU-default MAC (`…:56`) maps to `.15` -
 /// SLIRP's DHCP lease - so every existing SLIRP-based run (ping/resolve/fetch,
 /// and the export gateway's `hostfwd`, all of which target `.15`) is unchanged;
 /// a two-VM socket-net target assigns distinct MACs (`…:0a`/`…:0b` -> `.10`/`.11`).
 /// No NIC -> `.15` (the value is never used without a NIC anyway).
-fn our_ip() -> [u8; 4] {
+fn default_netconf() -> netconf::Config {
     let packed = syscall(syscall_abi::NET_MAC, 0);
     let last = if packed == syscall_abi::NET_ERROR {
         15
@@ -52,16 +54,151 @@ fn our_ip() -> [u8; 4] {
             b
         }
     };
-    [10, 0, 2, last]
+    netconf::Config::slirp(last)
 }
-/// QEMU user-net's built-in DNS proxy (forwards to the host's resolver).
-const DNS_SERVER: [u8; 4] = [10, 0, 2, 3];
+
+/// This machine's network configuration, set once at start
+/// ([`load_netconf`]) and read from everywhere a frame is built or judged.
+/// Four words and a flag, atomics so that no `unsafe` and no parameter
+/// through sixty functions is needed for values that never change after
+/// the start. An address is stored big-endian; 0 in the gateway or the DNS
+/// server is "none", which no file can name (`netconf::parse` refuses it).
+static NET_SET: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static NET_ADDRESS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static NET_MASK: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static NET_GATEWAY: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static NET_DNS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+fn set_netconf(c: &netconf::Config) {
+    use core::sync::atomic::Ordering::Relaxed;
+    NET_ADDRESS.store(u32::from_be_bytes(c.address), Relaxed);
+    NET_MASK.store(u32::from_be_bytes(c.mask), Relaxed);
+    NET_GATEWAY.store(c.gateway.map_or(0, u32::from_be_bytes), Relaxed);
+    NET_DNS.store(c.dns.map_or(0, u32::from_be_bytes), Relaxed);
+    NET_SET.store(true, Relaxed);
+}
+
+/// The configuration in force. Before [`load_netconf`] has run it is the
+/// one for no file, so nothing reads zeros.
+fn netconf_now() -> netconf::Config {
+    use core::sync::atomic::Ordering::Relaxed;
+    if !NET_SET.load(Relaxed) {
+        return default_netconf();
+    }
+    let some = |v: u32| if v == 0 { None } else { Some(v.to_be_bytes()) };
+    netconf::Config {
+        address: NET_ADDRESS.load(Relaxed).to_be_bytes(),
+        mask: NET_MASK.load(Relaxed).to_be_bytes(),
+        gateway: some(NET_GATEWAY.load(Relaxed)),
+        dns: some(NET_DNS.load(Relaxed)),
+    }
+}
+
+/// Our IPv4 address.
+fn our_ip() -> [u8; 4] {
+    netconf_now().address
+}
+
+/// The DNS server names are asked of, if the configuration has one.
+fn dns_server() -> Option<[u8; 4]> {
+    netconf_now().dns
+}
+
+/// Where this machine's network configuration is read from.
+const NETCONF_PATH: &[u8] = b"/etc/net";
+
+fn log_ip(ip: &[u8; 4]) {
+    for (i, b) in ip.iter().enumerate() {
+        if i != 0 {
+            log(b".");
+        }
+        log_dec(u64::from(*b));
+    }
+}
+
+/// Reads `/etc/net` and sets the configuration for the boot, saying in one
+/// line what it is and where it came from. Called once, after
+/// [`load_auth`], whose reads have by then waited out the disk's mount (or
+/// found there is no disk), so this retries a transient failure a few
+/// times and no more.
+///
+/// **Every way of not having a usable file ends in the configuration for
+/// no file**, each with its own words: the file absent (the ordinary case
+/// on QEMU, and no warning), the file not read, and the file refused. A
+/// refused file is refused whole (`netconf::parse`): the line says why,
+/// and which line of the file where one is to blame.
+fn load_netconf() {
+    let mut buf = [0u8; netconf::MAX_FILE + 1];
+    let mut budget = 5u32;
+    let n = loop {
+        let r = read_file_chunk(As::FirstParty, NETCONF_PATH, 0, 0, &mut buf);
+        if transient_fs_failure(r) && budget > 0 {
+            budget -= 1;
+            syscall(syscall_abi::NET_WAIT, 40);
+            continue;
+        }
+        break r;
+    };
+    let mut config = default_netconf();
+    let source: &[u8] = if n == syscall_abi::FS_ERR_NOT_FOUND {
+        b" (no /etc/net: the defaults)"
+    } else if n >= syscall_abi::FS_ERR_MIN {
+        b" (WARNING: /etc/net could not be read: the defaults)"
+    } else {
+        // `buf` is one byte longer than the longest file taken, so a longer
+        // file fills it and is refused as too long.
+        match netconf::parse(&buf[..(n as usize).min(buf.len())]) {
+            Ok(c) => {
+                config = c;
+                b" (from /etc/net)"
+            }
+            Err(e) => {
+                log(b"netd: WARNING /etc/net is refused: ");
+                let (why, line): (&[u8], Option<u32>) = match e {
+                    netconf::Error::TooLong => (b"it is longer than 512 bytes", None),
+                    netconf::Error::NotKeyValue { line } => (b"not a key and one value", Some(line)),
+                    netconf::Error::UnknownKey { line } => (b"a key that is not address, mask, gateway or dns", Some(line)),
+                    netconf::Error::Repeated { line } => (b"a key given twice", Some(line)),
+                    netconf::Error::NotAnAddress { line } => (b"a value that is not an address", Some(line)),
+                    netconf::Error::NoAddress => (b"it has no address line", None),
+                    netconf::Error::NoMask => (b"it has no mask line", None),
+                    netconf::Error::BadMask => (b"its mask is not ones then zeros", None),
+                    netconf::Error::BadAddress => (b"its address is none a machine on that subnet can have", None),
+                    netconf::Error::BadGateway => (b"its gateway is not another machine on the address's subnet", None),
+                    netconf::Error::BadDns => (b"its dns is not another machine's address", None),
+                };
+                log(why);
+                if let Some(line) = line {
+                    log(b", at line ");
+                    log_dec(u64::from(line));
+                }
+                log(b"\r\n");
+                b" (the defaults)"
+            }
+        }
+    };
+    set_netconf(&config);
+    log(b"netd: address ");
+    log_ip(&config.address);
+    log(b"/");
+    log_dec(u64::from(config.prefix()));
+    log(b", gateway ");
+    match config.gateway {
+        Some(g) => log_ip(&g),
+        None => log(b"none"),
+    }
+    log(b", dns ");
+    match config.dns {
+        Some(d) => log_ip(&d),
+        None => log(b"none"),
+    }
+    log(source);
+    log(b"\r\n");
+}
 /// A fixed ephemeral UDP source port for DNS queries (one query at a time).
 const DNS_SRC_PORT: u16 = 0x8000;
 /// The DNS transaction id we send and match on the reply.
 const DNS_ID: u16 = 0x4f42; // "OB"
-/// QEMU user-net's gateway - the next hop for any off-subnet target.
-const GATEWAY: [u8; 4] = [10, 0, 2, 2];
 /// Base of our ephemeral TCP source-port range and the base initial sequence
 /// number. A single client connection is live at a time, but the remote-mount
 /// client (cluster Phase 1c) opens many *back to back* - one per verb - and a
@@ -796,7 +933,13 @@ fn tables() -> &'static mut Tables {
         p.write(Tables {
             buf: [0u8; syscall_abi::MSG_MAX_LEN as usize],
             frame: [0u8; 1600],
-            auth: load_auth(),
+            auth: {
+                // The address after the keys: `load_auth` waits out the
+                // disk's mount, and `load_netconf` leans on that.
+                let auth = load_auth();
+                load_netconf();
+                auth
+            },
             conns: core::array::from_fn(|_| None),
             dials: core::array::from_fn(|_| None),
             sessions: core::array::from_fn(|_| None),
@@ -1238,7 +1381,12 @@ fn handle_ping(packed_mac: u64, target_packed: u64) -> u64 {
         }
     }
 
-    let Some(target_mac) = arp_resolve(&mac, &target) else {
+    // Through the next hop, as every other sender here goes: until
+    // 2026-11-15 a ping asked the wire for the target's own address, so one
+    // off the subnet could never be answered (seen on the board,
+    // 2026-11-14: a ping of 192.168.0.1 from 10.0.2.34 asked who has
+    // 192.168.0.1). A target with no route says what a silent one says.
+    let Some(target_mac) = next_hop(&target).and_then(|hop| arp_resolve(&mac, &hop)) else {
         return syscall_abi::NET_PING_NO_ARP;
     };
     if icmp_echo(&mac, &target_mac, &target) {
@@ -1397,7 +1545,9 @@ fn handle_resolve(packed_mac: u64, host: &[u8]) -> (u64, u64) {
 /// `NET_RESOLVE_*` status (`TIMEOUT` / `NXDOMAIN`). Shared by `resolve` and
 /// `fetch` (which resolves the hostname before connecting).
 fn resolve_ip(mac: &[u8; 6], host: &[u8]) -> Result<[u8; 4], u64> {
-    let Some(server_mac) = arp_resolve(mac, &DNS_SERVER) else {
+    // No server configured is a name that cannot be asked: the timeout a
+    // silent server gives. The server need not be on our subnet.
+    let Some(server_mac) = dns_server().and_then(|dns| next_hop(&dns)).and_then(|hop| arp_resolve(mac, &hop)) else {
         return Err(syscall_abi::NET_RESOLVE_TIMEOUT);
     };
     let mut dns = [0u8; 300];
@@ -1432,16 +1582,12 @@ fn pack_ip(ip: &[u8; 4]) -> u64 {
     ip[0] as u64 | (ip[1] as u64) << 8 | (ip[2] as u64) << 16 | (ip[3] as u64) << 24
 }
 
-/// The next hop for `target`: itself if on the QEMU user-net `10.0.2.0/24`
-/// subnet, otherwise the gateway (`10.0.2.2`) - a minimal default route. The
-/// first place off-subnet routing matters (`ping`/`resolve` only ever
-/// targeted on-subnet addresses).
-fn next_hop(target: &[u8; 4]) -> [u8; 4] {
-    if target[0] == 10 && target[1] == 0 && target[2] == 2 {
-        *target
-    } else {
-        GATEWAY
-    }
+/// The next hop for `target`: itself on our subnet, otherwise the gateway,
+/// a minimal default route (`netconf::Config::next_hop`). `None` when the
+/// target is off the subnet and the configuration has no gateway: there is
+/// nowhere to send it.
+fn next_hop(target: &[u8; 4]) -> Option<[u8; 4]> {
+    netconf_now().next_hop(*target)
 }
 
 /// A parsed TCP segment (the fields the minimal client needs).
@@ -1473,7 +1619,7 @@ fn handle_fetch(packed_mac: u64, host: &[u8], out: &mut [u8]) -> usize {
     let Ok(ip) = resolve_ip(&mac, host) else {
         return finish(out, syscall_abi::NET_FETCH_NO_ROUTE, &[]);
     };
-    let Some(dst_mac) = arp_resolve(&mac, &next_hop(&ip)) else {
+    let Some(dst_mac) = next_hop(&ip).and_then(|hop| arp_resolve(&mac, &hop)) else {
         return finish(out, syscall_abi::NET_FETCH_NO_ROUTE, &[]);
     };
 
@@ -1823,7 +1969,7 @@ fn park_run(packed_mac: u64, call: u64, buf: &[u8], len: usize, out: &mut [u8], 
     }
 
     let mac = unpack_mac(packed_mac);
-    let Some(dst_mac) = arp_resolve(&mac, &next_hop(&ip)) else {
+    let Some(dst_mac) = next_hop(&ip).and_then(|hop| arp_resolve(&mac, &hop)) else {
         return fail(out, b"cpu: remote unreachable\r\n");
     };
     // PARK it (step 3 of docs/roadmap/roadmap-async-rmount.md). This used to
@@ -2149,7 +2295,7 @@ fn handle_rmount(packed_mac: u64, call: u64, buf: &[u8], len: usize, sessions: &
     };
 
     let mac = unpack_mac(packed_mac);
-    let Some(dst_mac) = arp_resolve(&mac, &next_hop(&ip)) else {
+    let Some(dst_mac) = next_hop(&ip).and_then(|hop| arp_resolve(&mac, &hop)) else {
         return fail(out, syscall_abi::NO_FS);
     };
 
@@ -6034,7 +6180,7 @@ fn dial_file_op(
             let Some((ip, port)) = parse_connect(data_in) else {
                 return (syscall_abi::FS_ERR_INVALID_NAME, 0);
             };
-            let Some(dst_mac) = arp_resolve(mac, &next_hop(&ip)) else {
+            let Some(dst_mac) = next_hop(&ip).and_then(|hop| arp_resolve(mac, &hop)) else {
                 if let Some(c) = dials[n].as_mut() {
                     c.state = DialState::Closed;
                 }
@@ -8400,7 +8546,9 @@ fn build_dns_frame(mac: &[u8; 6], server_mac: &[u8; 6], dns: &[u8], out: &mut [u
     out[ip + 9] = 17; // protocol: UDP
     out[ip + 10..ip + 12].copy_from_slice(&[0, 0]); // checksum placeholder
     out[ip + 12..ip + 16].copy_from_slice(&our_ip());
-    out[ip + 16..ip + 20].copy_from_slice(&DNS_SERVER);
+    // The server `resolve_ip` found a way to; with none this is not
+    // reached, and no frame is built for nowhere.
+    out[ip + 16..ip + 20].copy_from_slice(&dns_server()?);
     let ipc = ip_checksum(&out[ip..ip + IP_LEN]);
     out[ip + 10..ip + 12].copy_from_slice(&ipc.to_be_bytes());
     // UDP.
@@ -8422,7 +8570,7 @@ fn dns_payload(frame: &[u8]) -> Option<&[u8]> {
     if frame[23] != 17 {
         return None; // not UDP (IP protocol = 14 + 9)
     }
-    if frame[26..30] != DNS_SERVER {
+    if dns_server().is_none_or(|dns| frame[26..30] != dns) {
         return None; // source IP != DNS server
     }
     let ihl = (frame[14] & 0x0f) as usize * 4;
