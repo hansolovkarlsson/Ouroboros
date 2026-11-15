@@ -921,8 +921,11 @@ not yet checked on this tree are marked (predicted).
       took its first frame. **The frame reached the wire whole, seen on
       2026-11-14** by `tcpdump` on the Mac over a direct cable to a USB
       Ethernet adapter: one ARP request from the board's MAC address,
-      60 bytes, no input error counted. Step 7, the receive path, is
-      next. From there on only the board checks it. What it had to settle first, and what was read:
+      60 bytes, no input error counted. **#465 (the barrier before
+      every register write, the stop's line) ran on the board on
+      2026-11-15:** the same frame four times from four pings, and a
+      boot of about 14 minutes with no fault. Step 7, the receive path,
+      is next. From there on only the board checks it. What it had to settle first, and what was read:
       - **Which NIC: decided by Hans on 2026-11-12, the on-board GENET
         first.** It is Broadcom GENET v5 with a BCM54213PE PHY over MDIO
         (the PHY (predicted)), plain MMIO, discovered from the firmware's
