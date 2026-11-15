@@ -1510,6 +1510,47 @@ own. The entries below stand as they were put.
    and not the old one; a malformed file is refused with a line and falls
    back.
 
+   **Built 2026-11-15, on QEMU; not yet run on the board.**
+   - *The file is `/etc/net`*, lines of `key value`: `address` and
+     `mask` required, `gateway` and `dns` optional, `#` lines and blank
+     lines skipped. With no gateway only the machine's own subnet is
+     reached; with no `dns` no name resolves. **A file with anything
+     not understood is refused whole,** with a line that says why and
+     at which line of the file: a half-read file would give a machine
+     an address its operator did not write.
+   - *The rules are a pure crate, `netconf`,* host-tested (13 tests):
+     the parse and each refusal, the values with no file
+     (`Config::slirp`, what `netd` held as constants), and the next hop.
+     The /24 that `next_hop` assumed is now the file's mask.
+   - *In `netd`,* `load_netconf` reads the file once at start, after
+     `load_auth` has waited out the disk's mount, and sets four atomics
+     that `our_ip`, `next_hop` and the DNS code read. One line says the
+     configuration on every boot and where it came from: `netd: address
+     A/N, gateway G, dns D (from /etc/net)`, or `(no /etc/net: the
+     defaults)`, or a warning that the file could not be read or was
+     refused. Every way of having no usable file ends in the defaults.
+   - **`ping` goes through the next hop now.** The adapter run
+     (2026-11-14) found `handle_ping` asking the wire for the target's
+     own address, so a ping off the subnet could not be answered. It
+     asks for the gateway's as the TCP paths do. A DNS server off the
+     subnet is reached the same way.
+   - *The check, `make test-net-config`,* three boots of a copy of the
+     ext2 image: a file naming `10.0.2.20` (reached there through a
+     forwarded port, **not** at `10.0.2.15`, and `ping 10.0.2.2` from
+     the guest answers); a file whose third line is not understood,
+     after a good address line (refused with its line named, the
+     defaults used, reached at `.15` and **not** at the `.20` its first
+     line named); and no file, the control. 20 checks, all passed.
+     Controlled: with `netd` ignoring a good file, three checks of the
+     first boot failed.
+   - *Not checked by any rig:* a file that cannot be read (a disk
+     error), a configuration with no gateway or no DNS server on the
+     wire, and a mask other than /24 past the host tests.
+   **On the board** the file is written once at the Pi's shell, as
+   root (`echo address 192.168.1.50 > /etc/net`, then a `>>` for each
+   further line), and read at the next boot. `make sdcard` stages the
+   boot partition alone, so a file on the card's root stays.
+
 9. **The interrupt.** INTID 189 enabled in the GIC, receive done unmasked,
    cleared in the kernel's IRQ path, `NET_WAIT` woken by it.
    **Check:** the kernel counts the interrupts it takes on INTID 189 and
