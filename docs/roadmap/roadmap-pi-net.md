@@ -1038,7 +1038,9 @@ own. The entries below stand as they were put.
      range, `10.0.2.34` on this board, step 8.)
    - No `EXCEPTION` line in any of the three boots, each run to a login
      and a `shutdown`. None was left running long, so "a sustained boot
-     shows no fault" is not yet shown.
+     shows no fault" is not yet shown. **Shown 2026-11-15,** for one
+     boot of about 14 minutes, most of it idle (the run of #465 on the
+     board, under step 6).
    **The stop ran against a live device and raised no line.** The firmware
    had both DMAs and the MAC on (step 2), and none of the boots printed
    the transmit DMA's note or a refusal. That is read from the absence of
@@ -1054,7 +1056,10 @@ own. The entries below stand as they were put.
    since that is `Genet::init`'s to do and not every boot reaches it.
    The status is read by `quiet` after the crate's polls, so it is the
    state then and not the reading the crate judged by; that one would
-   need the crate to return it. Not yet seen on the board.
+   need the crate to return it. **Seen on the board 2026-11-15**
+   (build `363b87ca05e0`): `genet: made quiet in 13 us: receive DMA
+   stopped, transmit DMA stopped; status now: receive 0x0003ffff,
+   transmit 0x0003ffff`. Bit 0, `DMA_DISABLED`, is set in both.
    **The SD path changed by #457 works on the board:** `sd: ACPI declares
    EMMC2 @ 0xfe340000`, the card brought up as the boot disk, its ext2
    root mounted, in all three boots. `acpi::declared` and
@@ -1189,6 +1194,46 @@ own. The entries below stand as they were put.
    `tx_idle` saying yes), a frame longer than the minimum, and anything
    received. `ping` sends one ARP request and gives up after 500 ms.
 
+   **The run of #465 on the board, 2026-11-15, by Hans (build
+   `363b87ca05e0`, `main` after #465 and a closeout of documents alone):
+   passed. Nothing differs from the adapter run but what #465 added.**
+   The same cable, adapter and capture (`tcpdump -i en9 -e -n -xx`, no
+   filter, started before power; the wire is in `scratch/boot-465.txt`,
+   the serial in `screenlog.0`).
+   - *The observer was shown to see first.* The Mac's own frames start
+     at 08:10:21, the Pi's first at 08:11:06.
+   - *The stop line,* new with #465: `made quiet in 13 us`, both DMAs
+     stopped, both status registers `0x0003ffff` (quoted in step 5).
+     So the barrier before the set-up's writes and the two status reads
+     after the stop, the two things new on the device, ran without a
+     fault.
+   - *The PHY, the link and the transmitter* read as on 2026-11-14, word
+     for word, the shadows included (`0x73e7`, `0x0000` found; `0x71e7`,
+     `0x0200` after the reset). The receive area and the transmit buffer
+     sit one page lower (`0x378f1000`, `0x37971000`): the image is a
+     different size.
+   - *The frame:* the same ARP request, `who-has 192.168.0.1 tell
+     10.0.2.34`, 60 bytes, the capture's hex equal to 2026-11-14's byte
+     for byte.
+   - *A second send, and two more.* `ping 192.168.0.1` four times
+     (08:11:06, 08:13:21, 08:24:30, 08:24:55) put four frames from
+     `d8:3a:dd:85:24:22` on the wire, all four equal in the hex, and no
+     other frame from the Pi. So the transmit buffer is reused and
+     `tx_idle` says yes after a send. The kernel's `first frame sent`
+     line is printed once, so the wire is the one witness of the three
+     after it.
+   - *The adapter's counts:* `netstat -I en9` read 749285 packets in
+     before the boot and 749289 after, the four frames and no more, and
+     `Ierrs` 0 both times.
+   - *A sustained boot:* `uptime` read 42503 ticks, about 14 minutes at
+     20 ms a tick, which fits the capture's span. The third and fourth
+     sends came after the idle time, and `shutdown` powered the board
+     off. No `EXCEPTION`, no `SError`, no timeout line in the boot.
+   **Still not shown:** a frame longer than the minimum, anything
+   received, and a cable plugged in after the boot (`LINK_WAIT_MS`,
+   step 5). The 14 minutes were idle but for four sends, with the
+   receiver off, so they say nothing of a boot under traffic.
+
    **The review of the step (#463, read after the first boot, nothing
    run by it).** Nine findings, none in the path a frame takes. Fixed,
    the ones Hans chose:
@@ -1234,7 +1279,8 @@ own. The entries below stand as they were put.
      with a `nop` before the store, and with `Mmio::write` routed around
      the function. So the barrier is now before every register write,
      the set-up's too, where it was before a send's alone: not yet run
-     on the board.
+     on the board. **Run on the board 2026-11-15, passed** (the run of
+     #465, under step 6's adapter run).
      **Its review the same day** (no fault in the path; eight findings,
      seven fixed): the "one caller" the check rests on was a comment,
      and is now privacy, the bus and its store in `mod bus` so a second
