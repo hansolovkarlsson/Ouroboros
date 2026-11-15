@@ -1336,6 +1336,173 @@ own. The entries below stand as they were put.
    2-byte pad, a ring wrap and a stale buffer); the same `fetch` run
    enough times to wrap the 16-bit counters, with no fault.
 
+   **Built 2026-11-15; run on the board the same day, three boots, and
+   it works from the third** (the result is at the end of this step).
+   - *In the kernel,* `genetnic.rs`'s start passes `Receiver::On`, at
+     the boot's link or at the first send that finds one, so from there
+     the device writes frames into the receive area. `poll_frame` asks
+     the crate's `rx_next`, copies a usable frame out of its buffer by a
+     raw pointer, cut to the caller's buffer, and gives the buffer back
+     (`rx_release`); a frame the crate refuses is dropped there and the
+     next looked at, at most 256 in one call. Nothing in the kernel
+     writes a receive buffer. No register store was added: the release
+     is the crate's write, through the bus, behind the barrier.
+   - *Its lines:* the start's line now reads `the MAC's transmitter and
+     receiver are on at N Mb/s (UMAC_CMD 0x..., UMAC_MDF_CTRL 0x...)`,
+     the two registers read back after the start. `UMAC_MDF_CTRL` (Linux
+     `bcmgenet.h` line 183) is the destination filters the firmware left
+     on; this driver writes none, as U-Boot writes none, and the value
+     is there for the day nothing is received. Then `first frame
+     received: N bytes, from buffer B of the receive area`, once, and `a
+     received frame was dropped (cause; N taken before it)`, once.
+   - *In `netd`,* the clamp step 3 found owed: `recv` drops a frame
+     longer than the buffer it was cut to and asks for the next, so its
+     callers index their 1600 bytes by a length that fits. No rig sends
+     such a frame (SLIRP sends none, and the GENET returns at most
+     1536), so the drop is a path no check has failed.
+   - *On QEMU,* where no GENET is declared, nothing of the kernel's half
+     runs. `netd`'s `recv` does, on virtio-net: `make test` and the
+     network rigs are the check that it still receives.
+   **The check as written cannot all be run with what `netd` is today,
+   read before the board and not found on it:**
+   - *`ping` of the Pi from the Mac* gets no answer whatever the driver
+     does: `on_frame` answers ARP requests and TCP, and has no arm for
+     an ICMP echo request. What the Mac can show is its ARP table
+     holding the board's address (`arp -n`), which needs the Pi to have
+     received the request and sent the reply.
+   - *`fetch` of a file from the Mac* is not available: `fetch` resolves
+     its host through DNS at `10.0.2.3`, takes no address, returns one
+     message's worth, and there is no checksum command on the board.
+   - **In its place, the other direction:** `curl` on the Mac of a file
+     from `netd`'s HTTP server on the board, its checksum against the
+     staged file's (`build/esp/bin/CPP`, 108 KB). Each transfer is the
+     Mac's SYN and some tens of ACKs received (78 segments of 1400
+     bytes, so about 44 to 82 frames from the Mac), so six of them wrap
+     the 256-buffer ring, and 800 to 1500 wrap the 16-bit index. The
+     kernel says its count of frames taken at 256 and at each 65536, so
+     the log shows whether either was reached. It
+     catches a stale or misplaced received frame as a transfer that
+     stalls or a checksum that differs, though less directly than a
+     received file would: the bytes compared are ones the board sent.
+     The 2-byte pad is checked by every frame `netd` understands at
+     all.
+   So on the board: `ping 10.0.2.2` from the Pi answers (an ARP reply
+   and an echo reply received), with the Mac's `en9` set to `10.0.2.2`
+   by hand since `netd`'s address is `10.0.2.34` until step 8; the `curl`
+   above, repeated; and no fault. An echo reply from `netd` and a
+   `fetch` by address are what the check as written would need, each a
+   change to `netd` alone.
+
+   **The review of the step (2026-11-15, before the board, nothing run
+   by it).** No fault found in the path a frame takes. Fixed: the counts
+   were never said after the first frame and the first drop, so a ring
+   wrap could not be read from the log (the count line above, with the
+   crate's drops by cause); a flagged frame's status was printed in
+   decimal; "several hundred" transfers for the 16-bit wrap was wrong by
+   the arithmetic; and `ROADMAP.md` still said the step was next.
+   **Left open, each a decision and none in the way of the board's
+   run:**
+   - *A link that comes up after the boot's wait is seen only at a
+     send* (decision D3, made for a transmitter). With the receiver the
+     same rule leaves the board deaf until the Pi itself sends: `netd`
+     sends nothing unprompted, so a Mac's ARP goes unanswered until
+     someone runs `ping` on the board. A link that drops and returns is
+     never read again either. Asking the link from the tick is not
+     open to it, since `has_frame` may not write or wait.
+   - *The receiver is never turned off.* With nobody draining it
+     (before `netd` first runs, after `netd` is past its restart cap,
+     after the kernel halts) the ring fills and the DMA sits at its
+     flow-control threshold. Whether the MAC then sends PAUSE frames is
+     not known here; U-Boot stops the MAC after each command and never
+     leaves it on undrained.
+   - *`netd`'s drain loop has no bound and no heartbeat* (`while let
+     Some(n) = recv(...)`, and `recv`'s own loop over oversize frames).
+     Frames arriving faster than they are handled for 2.56 s would have
+     the supervisor call `netd` wedged. SLIRP never did that; a wire
+     can.
+   - *`NET_RECV` still returns a length longer than the buffer it
+     filled*, and the clamp is in `netd`'s one `recv`. A second caller
+     would meet the trap again; the kernel returning the copied length,
+     or a sentinel for a cut frame, would make it unspellable. It is a
+     change to the ABI.
+
+   **The board, 2026-11-15, by Hans: three boots, one cable to the Mac's
+   adapter, `en9` set to `10.0.2.2` by hand.** The wire of each is in
+   `scratch/boot-step7.txt`, `-step7b.txt` and `-step7c.txt`, the serial
+   in `screenlog.0`.
+   - *First boot (build `b43b881ecfcb`): nothing received.* The wire was
+     right: the Pi's ARP request for `10.0.2.2`, the Mac's reply within
+     a millisecond, the Mac's SYNs and its own ARP requests for
+     `10.0.2.34`, none answered. The serial log had one line for it: `a
+     received frame was dropped (Oversize; 0 taken before it)`. No frame
+     the Mac sent was over 1403 bytes.
+   - *Second boot (build `c42393e2f713`), a diagnostic that changed no
+     behaviour:* the receive ring's indexes, its pointers, and which of
+     the 256 descriptors no longer held the value the set-up wrote. It
+     read: producer index 10 at the set-up, as the firmware left it;
+     after the first frame, the index 11, the write pointer 3 (one
+     descriptor, in words), and exactly one descriptor written,
+     **number 0**, holding `0x003e7fc0`: a whole clean frame of 60
+     bytes.
+   - **The fault: the crate looked for a frame in the descriptor named
+     by the index's low byte, as U-Boot does, and the device fills the
+     ring from where the write pointer was set, 0.** With the index at
+     10, every frame was looked for ten descriptors from where it lay,
+     in one that still held the set-up's 2048, which reads as oversize.
+     Linux keeps a pointer of its own. Fixed in the crate: `rx_desc`
+     counts from 0, apart from the consumer index.
+   - **Why the host did not find it: the model was written from the
+     driver.** It placed a frame by the index's low byte, the same
+     mistake from the other side, so tests that started the index at 5,
+     at `0x00f0` and at `0xfffe` all passed. The model now places frames
+     from the write pointer, as the board was seen to; with that and the
+     driver unfixed, four tests failed.
+   - *Third boot (build `a9eeb46bcdaf`, the fix): it receives.* The
+     index stood at 9 this time. `first frame received: 60 bytes, from
+     buffer 0 of the receive area`; `ping 10.0.2.2` said `reply from
+     10.0.2.2`; the Mac's ARP table held `10.0.2.34` at the board's
+     address.
+   - *Files from the board's HTTP server, by `curl` on the Mac:* all
+     246 files under `include` and `man`; 241 equal to the staged
+     copies by SHA-256, 827 KB in all. The other 5 are man pages edited
+     since the card's root was written (`man/tree` read as its text
+     from before 2026-11-11): `make sdcard` stages the boot partition
+     alone, so the card's root, its binaries too, is an older build,
+     and `/bin/cpp` could not be compared with `build/esp/bin/CPP`.
+     Then `/bin/cpp` 1500 times against its own first checksum: 1500
+     equal, in 1420 s.
+   - *The counts:* `256 frames received so far`, `65536` and `131072`,
+     each with no frame dropped for any cause. So the ring went round
+     and the 16-bit index wrapped, twice. `en9` counted no input error.
+     No `EXCEPTION`.
+   - *Two mistakes of mine in the check, neither the board's:* the file
+     is `/bin/cpp` on the card, not `/bin/CPP`, so the first twenty
+     checksums Hans read were of a `404` page; and the staged binaries
+     were not what the card held.
+   **The transmit ring has the same shape and was left as it is.** It
+   takes its descriptor from its index's low byte too. The diagnostic
+   read that index as 0 at the set-up, which is why every send so far
+   went where the device looked; a firmware that sends a frame before
+   the exit (a network boot tried first) would leave it elsewhere. That
+   the device reads the transmit ring from its read pointer, as it
+   fills the receive ring from its write pointer, is likely and was not
+   seen, since the index was 0. The kernel now says both indexes at the
+   set-up (`the indexes the firmware left: receive N, transmit M`), with
+   a warning when the transmit one is off a multiple of 256. Counting
+   the transmit descriptor from 0 as well is the change to make; it is
+   Hans's to decide, since no boot here can show it wrong or right.
+   **A fourth boot, the same day (build `788ca3491741`, the diagnostic
+   removed and that line added): as the third.** `the indexes the
+   firmware left: receive 9, transmit 0`, `first frame received: 60
+   bytes, from buffer 0`, `ping 10.0.2.2` answered, and one file fetched
+   from the board equal to its staged copy.
+   **Still not shown:** a ping of the Pi from the Mac and a `fetch` by
+   address (`netd` does neither), a frame addressed to the board longer
+   than 165 bytes, the longest in the capture (the transfers' large
+   frames all went out; whether the Mac's multicast frames of up to
+   1403 bytes were taken or filtered by the MAC is not read), a cable
+   plugged in after the boot.
+
 8. **The address file.** `netd` reads its configuration from a file on the
    root (D4), absent meaning today's values.
    **Check:** on QEMU, every rig passes with no file; a new boot with a

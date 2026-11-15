@@ -41,6 +41,14 @@ struct Dev {
     reads: Vec<usize>,
     /// `RDMA_PROD_INDEX` whole: the index low, the discard count high.
     rx_prod: u32,
+    /// The descriptor the device writes its next received frame to. **Not
+    /// the producer index's low byte:** it starts where `RDMA_WRITE_PTR`
+    /// was last set (in words, three a descriptor) and goes round the
+    /// ring from there, whatever the index counts from. Read on the board
+    /// on 2026-11-15: the firmware left the index at 10, the set-up wrote
+    /// the pointer 0, and the first frame went to descriptor 0 with the
+    /// pointer then reading 3.
+    rx_at: usize,
     tx_cons: u16,
     /// Where the consumer index goes once `tx_lag_left` reads have passed.
     tx_target: u16,
@@ -156,6 +164,7 @@ fn board() -> Dev {
         ops: Vec::new(),
         reads: Vec::new(),
         rx_prod: 0,
+        rx_at: 0,
         tx_cons: 0,
         tx_target: 0,
         tx_lag: 0,
@@ -296,7 +305,9 @@ impl Dev {
             self.rx_prod = self.rx_prod.wrapping_add(1 << 16);
             return false;
         }
-        self.regs.insert(RX_DESC + usize::from(prod % 256) * 12, (length << 16) | flags);
+        self.regs.insert(RX_DESC + self.rx_at * 12, (length << 16) | flags);
+        self.rx_at = (self.rx_at + 1) % 256;
+        self.regs.insert(0x3000, (self.rx_at * 3) as u32);
         self.rx_prod = (self.rx_prod & 0xffff_0000) | u32::from(prod.wrapping_add(1));
         true
     }
@@ -359,6 +370,10 @@ impl Bus for Dev {
         }
         if offset == 0xb34 && value == 1 && self.tdma_freed_by_flush {
             self.dma_stop_left.0 = 0;
+        }
+        // RDMA_WRITE_PTR, in words: where the device writes next.
+        if offset == 0x3000 {
+            self.rx_at = (value as usize / 3) % 256;
         }
         match offset {
             // The two indexes the device owns.
@@ -816,7 +831,8 @@ fn a_frame_is_returned_where_it_lies_until_released() {
     let mut g = up(&mut d);
     assert!(d.deliver(60));
     assert!(g.has_frame(&mut d));
-    let frame = Rx::Frame { buffer: 5, offset: 2, len: 60 };
+    // The index stood at 5; the frame is in descriptor 0 all the same.
+    let frame = Rx::Frame { buffer: 0, offset: 2, len: 60 };
     assert_eq!(g.rx_next(&mut d), frame);
     // Looking is not taking: the same frame again, and nothing written.
     assert_eq!(g.rx_next(&mut d), frame);
@@ -861,20 +877,21 @@ fn the_receive_counter_wraps_at_65536_and_the_ring_at_256() {
         }
         g.rx_release(&mut d);
     }
-    assert_eq!(seen, [(254, 100), (255, 101), (0, 102), (1, 103)]);
+    assert_eq!(seen, [(0, 100), (1, 101), (2, 102), (3, 103)]);
     assert_eq!(d.writes(), [(RDMA_CONS, 0xffff), (RDMA_CONS, 0), (RDMA_CONS, 1), (RDMA_CONS, 2)]);
     assert!(!g.has_frame(&mut d));
 }
 
 #[test]
-fn the_ring_index_follows_the_counter_past_the_first_256() {
-    // 300 frames from 0x00f0: the buffer is always the counter's low byte.
+fn the_ring_goes_round_from_descriptor_0_whatever_the_counter_started_at() {
+    // 300 frames with the index from 0x00f0: the buffers are 0 to 255 and
+    // round again, never the counter's low byte.
     let mut d = board();
     d.rx_prod = 0x00f0;
     let mut g = up(&mut d);
     for n in 0..300usize {
         assert!(d.deliver(64));
-        assert_eq!(g.rx_next(&mut d), Rx::Frame { buffer: (0xf0 + n) % 256, offset: 2, len: 64 });
+        assert_eq!(g.rx_next(&mut d), Rx::Frame { buffer: n % 256, offset: 2, len: 64 });
         g.rx_release(&mut d);
     }
 }
@@ -889,7 +906,7 @@ fn the_discard_count_in_the_high_half_is_not_a_frame() {
     assert!(!g.has_frame(&mut d));
     assert_eq!(g.rx_next(&mut d), Rx::None);
     assert!(d.deliver(64));
-    assert_eq!(g.rx_next(&mut d), Rx::Frame { buffer: 0x40, offset: 2, len: 64 });
+    assert_eq!(g.rx_next(&mut d), Rx::Frame { buffer: 0, offset: 2, len: 64 });
 }
 
 #[test]
@@ -971,7 +988,7 @@ fn releasing_a_frame_makes_room_in_a_full_ring() {
     // driver still sees exactly its 256.
     assert!(!d.deliver(64));
     assert_eq!(d.rx_prod, 0x0001_0080);
-    assert!(matches!(g.rx_next(&mut d), Rx::Frame { buffer: 0x80, .. }));
+    assert!(matches!(g.rx_next(&mut d), Rx::Frame { buffer: 0, .. }));
     g.rx_release(&mut d);
     assert!(d.deliver(64));
     assert!(!d.deliver(64));

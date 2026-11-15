@@ -8613,13 +8613,24 @@ fn send(frame: &[u8]) -> Result<(), ()> {
 }
 
 /// Non-blocking receive of one frame into `buf`; `Some(len)` if one was
-/// waiting.
+/// waiting, and `len` is never more than `buf`'s length, so every caller
+/// may index `buf` by it.
+///
+/// `NET_RECV` returns the frame's own length, which can be more than the
+/// buffer it was cut to (up to `NET_MAX_FRAME`, 2036, against the 1600
+/// bytes every caller here passes). A frame that long is none this stack
+/// sends or expects: it is dropped whole, not handed on cut, and the next
+/// one is asked for. The kernel has taken each frame it answers for, so
+/// the loop ends when none waits.
 fn recv(buf: &mut [u8]) -> Option<usize> {
-    let r = syscall4(syscall_abi::NET_RECV, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0);
-    if r == syscall_abi::NET_NO_FRAME || r == syscall_abi::NET_ERROR {
-        None
-    } else {
-        Some(r as usize)
+    loop {
+        let r = syscall4(syscall_abi::NET_RECV, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0);
+        if r == syscall_abi::NET_NO_FRAME || r == syscall_abi::NET_ERROR {
+            return None;
+        }
+        if r <= buf.len() as u64 {
+            return Some(r as usize);
+        }
     }
 }
 

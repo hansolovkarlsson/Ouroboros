@@ -85,6 +85,10 @@ pub mod reg {
     pub const TBUF_CTRL: usize = 0x0600;
     /// `UMAC_MAX_FRAME_LEN`, `GENET_UMAC_OFF + 0x014` (U-Boot).
     pub const UMAC_MAX_FRAME_LEN: usize = 0x0800 + 0x014;
+    /// `UMAC_MDF_CTRL`, 0x650 in the UMAC block (Linux): which of the
+    /// MAC's destination-address filters are on. Read for a log line and
+    /// never written: U-Boot receives without touching it.
+    pub const UMAC_MDF_CTRL: usize = 0x0800 + 0x650;
     /// `UMAC_TX_FLUSH`, `GENET_UMAC_OFF + 0x334` (U-Boot).
     pub const UMAC_TX_FLUSH: usize = 0x0800 + 0x334;
     /// `UMAC_MIB_CTRL`, `GENET_UMAC_OFF + 0x580` (U-Boot).

@@ -806,8 +806,9 @@ pub const NET_SEND: u64 = 42;
 /// into `buf`, truncated to `buf len`), `NET_NO_FRAME` if none is waiting,
 /// or an error sentinel. Non-blocking poll of the network driver's receive
 /// side. **The length returned is the frame's own, which can be more than
-/// `buf len`:** the caller must not index its buffer by it unclamped. A
-/// `buf len` over [`NET_MAX_FRAME`] is refused.
+/// `buf len`:** the caller must not index its buffer by it unclamped
+/// (`netd`'s `recv` drops such a frame whole). A `buf len` over
+/// [`NET_MAX_FRAME`] is refused.
 /// Gated to [`NET_TASK`] like [`NET_SEND`].
 pub const NET_RECV: u64 = 43;
 
