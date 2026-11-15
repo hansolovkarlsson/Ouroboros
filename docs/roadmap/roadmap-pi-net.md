@@ -1491,8 +1491,11 @@ own. The entries below stand as they were put.
    a warning when the transmit one is off a multiple of 256. Counting
    the transmit descriptor from 0 as well is the change to make; it is
    Hans's to decide, since no boot here can show it wrong or right.
-   **Not yet run on the board:** the last commit, which removes the
-   diagnostic and adds that line.
+   **A fourth boot, the same day (build `788ca3491741`, the diagnostic
+   removed and that line added): as the third.** `the indexes the
+   firmware left: receive 9, transmit 0`, `first frame received: 60
+   bytes, from buffer 0`, `ping 10.0.2.2` answered, and one file fetched
+   from the board equal to its staged copy.
    **Still not shown:** a ping of the Pi from the Mac and a `fetch` by
    address (`netd` does neither), a frame addressed to the board longer
    than 165 bytes, the longest in the capture (the transfers' large
