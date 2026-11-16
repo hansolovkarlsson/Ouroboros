@@ -1573,6 +1573,9 @@ own. The entries below stand as they were put.
      copies behind when its set-up failed; `resolve`'s and `fetch`'s
      rows, two comments and a sentence saying userland has no statics
      still described what this step changed.
+   **Decided by Hans on 2026-11-16:** `/etc/net` keeps its name and
+   format, and `netd` keeps its configuration in the four atomics. Both
+   were made in this step without asking him.
    **Left open:**
    - *A disk that mounts after `load_auth` has given up leaves the
      machine on the defaults for the boot,* as it leaves it with no
