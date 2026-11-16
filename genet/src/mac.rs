@@ -157,6 +157,13 @@ pub const DMA_BUFLENGTH_MASK: u32 = 0x0fff;
 pub const DMA_OWN: u32 = 0x8000;
 pub const DMA_EOP: u32 = 0x4000;
 pub const DMA_SOP: u32 = 0x2000;
+/// `UMAC_IRQ_RXDMA_DONE` (Linux's `UMAC_IRQ_RXDMA_MBDONE`, bit 13 of
+/// INTRL2_0): the default ring (16) took a frame, counted against the
+/// ring's `DMA_MBUF_DONE_THRESH`. The one interrupt this driver unmasks
+/// (the plan's step 9); its line is the board's INTID 189. Linux's header
+/// is the only source for the bit: not yet read on the board.
+pub const IRQ_RX_DONE: u32 = 1 << 13;
+
 /// `DMA_TX_APPEND_CRC` and `DMA_TX_QTAG_SHIFT` (U-Boot), with the tag
 /// U-Boot sends, 0x3f.
 pub const DMA_TX_APPEND_CRC: u32 = 0x0040;
@@ -537,6 +544,10 @@ impl Genet {
         let rx_cons = (bus.read(reg::RDMA_PROD_INDEX) & DMA_INDEX_MASK) as u16;
         bus.write(reg::RDMA_CONS_INDEX, u32::from(rx_cons));
         bus.write(reg::RDMA_RING_BUF_SIZE, DMA_RING_BUF_SIZE_VALUE);
+        // Receive done after each frame: Linux's default
+        // (`rx_max_coalesced_frames = 1`, `bcmgenet_set_rx_coalesce`).
+        // U-Boot, which takes no interrupt, leaves the firmware's.
+        bus.write(reg::RDMA_MBUF_DONE_THRESH, 1);
         bus.write(reg::RDMA_XON_XOFF_THRESH, DMA_FC_THRESH_VALUE);
         bus.write(reg::RDMA_RING_CFG, 1 << DEFAULT_Q);
 
@@ -620,9 +631,25 @@ impl Genet {
             Receiver::Off => CMD_TX_EN,
             Receiver::On => CMD_TX_EN | CMD_RX_EN,
         };
+        if receiver == Receiver::On {
+            // Receive done unmasked before the receiver comes on, with any
+            // stale one cleared first, so the first frame raises the line.
+            // Linux's `bcmgenet_rx_ring16_int_enable`.
+            bus.write(reg::INTRL2_0_CLEAR, IRQ_RX_DONE);
+            bus.write(reg::INTRL2_0_MASK_CLEAR, IRQ_RX_DONE);
+        }
         set(bus, reg::UMAC_CMD, 0, on);
         self.started = true;
         self.receiving |= receiver == Receiver::On;
+    }
+
+    /// Clears receive done at the device, so its level-triggered line
+    /// drops until the next frame: what the kernel's IRQ path does for the
+    /// interrupt, before it wakes the reader (Linux clears it before
+    /// servicing too, "to reduce spurious interrupts"). One write; frames
+    /// that arrive after it raise the line again.
+    pub fn ack_rx_interrupt<B: Bus>(&self, bus: &mut B) {
+        bus.write(reg::INTRL2_0_CLEAR, IRQ_RX_DONE);
     }
 
     /// Makes the device quiet, as [`quiet`] does, **and gives the device
