@@ -50,6 +50,9 @@ const NP_HDR: usize = ninep_abi::NP_REQ_PAYLOAD as usize;
 
 fn main() -> ! {
     let mut backend = detect_backend();
+    if cfg!(feature = "restart-rig") {
+        write_text(&mut backend, b"cond: the restart rig's build: a write of restart-rig-fault faults it, restart-rig-spin spins it, restart-rig-echo it answers\r\n");
+    }
     write_text(&mut backend, b"cond: console server ready\r\n");
 
     let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];
@@ -88,9 +91,52 @@ fn handle(backend: &mut Backend, req: &[u8], reply: &mut [u8]) -> usize {
         let text_len = read_u64(req, 24) as usize;
         let payload = &req[NP_HDR..];
         let n = text_len.min(payload.len()).min(DATA_MAX);
+        restart_rig(&payload[..n]);
         write_text(backend, &payload[..n]);
+        if restart_rig_echo(&payload[..n]) {
+            write_text(backend, b"cond: restart-rig-echo seen\r\n");
+        }
     }
     REPLY_PAYLOAD
+}
+
+/// The restart rig's build alone (`restart-rig`, never the shipped cond): the
+/// two ways the supervisor comes to restart a server, on request, by text
+/// asked to be written. Only a write that is the word and its line end, as a
+/// rig's staged file holds it and `cat` writes it (typing it would reach cond
+/// a key at a time): the word inside other text, a file that mentions it, is
+/// written as text.
+fn restart_rig(text: &[u8]) {
+    if !cfg!(feature = "restart-rig") {
+        return;
+    }
+    if is_word(text, b"restart-rig-fault") {
+        // SAFETY: none, by design: a read of an address no task maps, which
+        // the kernel answers by ending this task.
+        unsafe { core::ptr::read_volatile(8 as *const u8) };
+    }
+    if is_word(text, b"restart-rig-spin") {
+        loop {
+            core::hint::spin_loop();
+        }
+    }
+}
+
+/// The restart rig's third word, `restart-rig-echo`, matched as the other
+/// two: cond answers it with a line of its own after the text. The proof
+/// that cond itself wrote, since `ulib::con_write` prints a failed call's
+/// bytes through the kernel's PUTC, so any other text comes out whether cond
+/// is alive or not.
+fn restart_rig_echo(text: &[u8]) -> bool {
+    cfg!(feature = "restart-rig") && is_word(text, b"restart-rig-echo")
+}
+
+/// Whether `text` is `word` and a line end (`\r\n` or `\n`), and nothing else.
+fn is_word(text: &[u8], word: &[u8]) -> bool {
+    match text.strip_prefix(word) {
+        Some(rest) => rest == b"\r\n" || rest == b"\n",
+        None => false,
+    }
 }
 
 // ---------------------------------------------------------------------

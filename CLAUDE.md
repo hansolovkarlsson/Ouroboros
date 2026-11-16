@@ -225,6 +225,8 @@ make test-run-orphan          # a `cpu` run's command dies with the run's connec
 make test-run-silent          # a `cpu` run's command ends when its caller goes silent (a node killed outright), and not while the caller lives
 make test-server-children     # a restarted server's children end with it: netd faulted and spun on request, its `cpu` command ended each time
 make test-fsd-restart         # fsd faulted and spun on request, restarted from the image the kernel kept, and serving again
+make test-cond-restart        # the same for cond, which must answer a word of its own after
+make test-accountd-restart    # the same for accountd, which must answer `passwd` after
 make test-cred-client         # the client sends a user credential: served while the user is logged in, refused and its session closed after
 make test-no-identity         # an export with no /etc/cluster/id runs nothing, in either signed format
 make test-net-config          # netd's address from /etc/net: a good file, a refused one and none, each reached where it should be and not elsewhere

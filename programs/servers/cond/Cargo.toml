@@ -7,6 +7,16 @@ edition = "2021"
 syscall-abi = { path = "../../../syscall-abi" }
 ninep-abi = { path = "../../../ninep-abi" }
 
+# test-cond-restart's build alone (`make test-cond-restart`): a write that is
+# `restart-rig-fault` and a line end makes cond fault, `restart-rig-spin`
+# makes it spin, and `restart-rig-echo` it answers with a line of its own, so
+# a rig can have the supervisor restart cond at a moment it chooses, which no
+# request to the shipped cond does. Built into target/restart-rigs, apart from the
+# shipped cond.bin, and it says so at startup. fsd's and netd's `restart-rig`
+# are the same for them.
+[features]
+restart-rig = []
+
 [[bin]]
 name = "cond"
 path = "src/main.rs"

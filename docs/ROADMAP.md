@@ -1032,9 +1032,9 @@ The small open tails those arcs deliberately left:
   hands out from the memory map (task regions, `allocate_runtime_region`,
   the DMA areas) can reach those pages; that the copies walk as kernel
   memory after `switch_to_identity_map`; and what a failed allocation
-  says. `make test-fsd-restart` and `make test-server-children` are the
-  rigs that must still pass, with `cond` and `accountd` still having
-  none.
+  says. `make test-fsd-restart`, `test-cond-restart`,
+  `test-accountd-restart` and `test-server-children` are the rigs that
+  must still pass: one for each supervised server since 2026-11-16.
 
 - **`netd` had 1,168 bytes of its stack left after one `resolve <name>`,
   not the 2,528 the rigs read; found and fixed 2026-11-11 (37,296 now).** The kernel counts every task's never-written stack
