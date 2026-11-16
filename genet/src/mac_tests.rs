@@ -52,12 +52,12 @@ struct Dev {
     /// The descriptor the device reads its next frame to send from. **Not
     /// the consumer index's low byte**, by the same rule as `rx_at`: it
     /// starts where `TDMA_READ_PTR` was last set (in words, three a
-    /// descriptor) and goes round the ring from there. **Assumed, not
-    /// seen:** the board showed this rule for the receive ring
-    /// (2026-11-15), and every boot found the transmit index at 0, where
-    /// it and the low byte agree. Linux does not settle it: it writes both
-    /// indexes 0 at the set-up, so the pointer and the ring's start plus
-    /// the index name the same descriptor there.
+    /// descriptor) and goes round the ring from there. Read on the board
+    /// on 2026-11-16 with the index written to 10 before the set-up: one
+    /// frame sent, the pointer read 3 and the index 11, and the frame was
+    /// on the wire whole. **Not modelled:** what the board did with the
+    /// low byte in the driver, which was to take nothing (a timeout, then
+    /// every send refused); this model sends the stale descriptor.
     tx_at: usize,
     tx_cons: u16,
     /// Where the consumer index goes once `tx_lag_left` reads have passed.
@@ -1084,7 +1084,7 @@ fn the_transmit_ring_goes_round_from_descriptor_0_whatever_the_counter_started_a
     // a frame taken from the wrong descriptor is seen by its length: the
     // descriptors are 0 to 255 and round again, never the counter's low
     // byte. The one test of the transmit ring's wrap at 256. The rule is
-    // receive's, assumed for transmit: see `tx_at`.
+    // the board's: see `tx_at`.
     let mut d = board();
     d.tx_cons = 0x00f0;
     d.tx_target = 0x00f0;
