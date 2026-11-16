@@ -121,9 +121,12 @@ def round_(g, label, path, reason):
 
 
 def main():
-    stage()
-    g = drive_qemu.Guest(COPY, label="[fsd-restart] ")
+    g = None
     try:
+        # Inside the try, so a staging that fails part way still removes
+        # its copy of the image.
+        stage()
+        g = drive_qemu.Guest(COPY, label="[fsd-restart] ")
         if not check(g.run([("login:", "root"), ("assword", "root"), ("# ", "")]), "the guest boots to root's shell"):
             return failed
         text = g.transcript()
@@ -137,10 +140,11 @@ def main():
         check(restarts == [1, 2], f"fsd was restarted twice, once a round: attempts {restarts}")
         check(g.proc.poll() is None, "the guest is alive at the end")
     finally:
-        transcript = g.transcript()
-        g.stop()
-        with open(os.path.join(ROOT, "build", "fsd-restart.txt"), "w") as f:
-            f.write(transcript)
+        if g is not None:
+            transcript = g.transcript()
+            g.stop()
+            with open(os.path.join(ROOT, "build", "fsd-restart.txt"), "w") as f:
+                f.write(transcript)
         if os.path.exists(COPY):
             os.unlink(COPY)
     want = 4 + 2 * 3 + 2

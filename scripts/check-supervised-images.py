@@ -18,13 +18,16 @@ the boot will read:
 - the arena's size, from `const IMAGE_ARENA: usize = N * 1024;` in
   supervisor.rs (the line's comment says this script reads it);
 - which images are supervised, from loader.rs: each `supervisor::register`
-  call, and the image named by the warning it logs
-  ("Ouroboros kernel: NAME.BIN - {} - ... won't be restartable");
+  call outside a `//` comment, and the image named by the warning it logs
+  ("Ouroboros kernel: NAME.BIN - {} - ... won't be restartable"); a call in
+  any other kernel source is refused, since this would not see its image;
 - each image's size, from the staged ESP's `EFI/ORBS/`.
 
 It fails if the number of register calls and named images differ, if one is
-missing from the ESP, if there are more than MAX_SUPERVISED, or if the images,
-each started on a 16-byte boundary as `register` places them, do not fit.
+missing from the ESP, if there are more than MAX_SUPERVISED, or if the images
+do not fit with the worst case of `register`'s 16-byte alignment (up to 15
+bytes before each image after the first), which holds whatever order main.rs
+loads them in.
 
     python3 scripts/check-supervised-images.py build/esp
     python3 scripts/check-supervised-images.py --self-test
@@ -49,15 +52,30 @@ class Refused(Exception):
     pass
 
 
-def read_sources(supervisor_text, loader_text):
-    """(arena bytes, max supervised, [image names]) from the two sources."""
+def code(text):
+    """`text` with `//` comments removed, line by line: what a register call
+    is counted in, so a comment that mentions one counts for nothing. (No
+    `//` inside a string literal in these files; a warning's text has none.)"""
+    return "\n".join(line.split("//", 1)[0] for line in text.split("\n"))
+
+
+def read_sources(supervisor_text, loader_text, others=()):
+    """(arena bytes, max supervised, [image names]) from the two sources.
+    `others` is (name, text) for every other kernel source: a register call
+    in one of them is refused, since its image would be held to nothing."""
+    for name, text in others:
+        if REGISTER_RE.search(code(text)):
+            raise Refused(
+                f"{name}: a supervisor::register call outside loader.rs; this check reads the supervised images "
+                "from loader.rs alone, so that image would never be held to the arena"
+            )
     arena = ARENA_RE.findall(supervisor_text)
     if len(arena) != 1:
         raise Refused(f"supervisor.rs: expected one `const IMAGE_ARENA: usize = N * 1024;`, found {len(arena)}")
     most = MAX_RE.findall(supervisor_text)
     if len(most) != 1:
         raise Refused(f"supervisor.rs: expected one `const MAX_SUPERVISED: usize = N;`, found {len(most)}")
-    calls = len(REGISTER_RE.findall(loader_text))
+    calls = len(REGISTER_RE.findall(code(loader_text)))
     names = NAME_RE.findall(loader_text)
     if calls == 0:
         raise Refused("loader.rs: no supervisor::register call found")
@@ -73,35 +91,45 @@ def read_sources(supervisor_text, loader_text):
 
 def fit(arena, most, sizes):
     """The problems with `sizes` ({name: bytes or None}) in an arena of
-    `arena` bytes and at most `most` entries; empty when they fit. Placed in
-    the order given, as `register` places them: each at the next 16-byte
-    boundary, and one that does not fit takes nothing, so the images after
-    it are judged on what is really left. Whether all fit does not depend on
-    the order beyond the alignment's padding."""
+    `arena` bytes and at most `most` entries, and the bytes they need; no
+    problems when they fit. `register` puts each image at the next 16-byte
+    boundary, in the order main.rs loads the servers, so the padding depends
+    on that order; this judges the worst case, up to 15 bytes before each
+    image after the first, which fits in every order or is refused."""
     problems = []
     if len(sizes) > most:
         problems.append(f"{len(sizes)} supervised images, more than MAX_SUPERVISED ({most})")
-    used = 0
+    present = []
     for name, size in sizes.items():
         if size is None:
             problems.append(f"{name} is not in the ESP")
-            continue
-        if size == 0:
+        elif size == 0:
             problems.append(f"{name} is empty")
-            continue
-        at = -(-used // ALIGN) * ALIGN
-        if at + size > arena:
-            problems.append(
-                f"{name} ({size} bytes) does not fit: {max(arena - at, 0)} bytes of the arena are left after the images before it"
-            )
-            continue
-        used = at + size
-    return problems, used
+        else:
+            present.append(size)
+    need = sum(present) + (ALIGN - 1) * max(len(present) - 1, 0)
+    if need > arena:
+        problems.append(
+            f"the images need up to {need} bytes with their alignment, {need - arena} more than the arena's {arena}"
+        )
+    return problems, need
+
+
+def others():
+    """(name, text) of every kernel source but loader.rs and supervisor.rs."""
+    src = os.path.dirname(LOADER)
+    out = []
+    for name in sorted(os.listdir(src)):
+        path = os.path.join(src, name)
+        if name.endswith(".rs") and path not in (LOADER, SUPERVISOR):
+            with open(path) as f:
+                out.append((name, f.read()))
+    return out
 
 
 def check(esp):
     with open(SUPERVISOR) as f, open(LOADER) as g:
-        arena, most, names = read_sources(f.read(), g.read())
+        arena, most, names = read_sources(f.read(), g.read(), others())
     sizes = {}
     for name in names:
         path = os.path.join(esp, "EFI", "ORBS", name)
@@ -114,7 +142,7 @@ def check(esp):
         print(f"check-supervised-images: arena {arena // 1024} KB (supervisor.rs IMAGE_ARENA); images: {listed}")
         print("check-supervised-images: a server whose image is not kept cannot be restarted after a crash or a wedge")
         return 1
-    print(f"check-supervised-images: ok: {len(sizes)} images, {used // 1024} KB of the {arena // 1024} KB arena ({listed})")
+    print(f"check-supervised-images: ok: {len(sizes)} images, at most {used // 1024} KB of the {arena // 1024} KB arena ({listed})")
     return 0
 
 
@@ -138,22 +166,33 @@ def self_test():
             raise AssertionError("refused nothing")
         except Refused:
             pass
-    # Exactly full fits; one byte more does not; alignment counts.
-    assert fit(4096, 2, {"A": 2048, "B": 2048})[0] == []
-    assert fit(4096, 2, {"A": 2048, "B": 2049})[0] != []
-    assert fit(4096, 2, {"A": 2047, "B": 2048})[0] == []
-    assert fit(4096, 2, {"A": 2047, "B": 2049})[0] != []
+    # Exactly full fits; one byte more does not; the worst case's padding
+    # counts, whatever the sizes' own alignment.
+    assert fit(4096, 2, {"A": 2048, "B": 2033})[0] == []
+    assert fit(4096, 2, {"A": 2048, "B": 2034})[0] != []
+    assert fit(4096, 2, {"A": 2047, "B": 2035})[0] != []
+    assert fit(4096, 1, {"A": 4096})[0] == []
     # Each image under the arena but not their sum: the case a per-image
     # cap would have passed.
     assert fit(4096, 2, {"A": 3000, "B": 3000})[0] != []
     assert fit(4096, 1, {"A": 10, "B": 10})[0] != []
     assert fit(4096, 2, {"A": None})[0] != []
     assert fit(4096, 2, {"A": 0})[0] != []
-    # One that does not fit takes nothing: the next is judged on the whole.
-    assert len(fit(4096, 2, {"A": 5000, "B": 4000})[0]) == 1
+    # The same sizes in either order: one answer.
+    assert fit(4096, 2, {"A": 2047, "B": 2033})[0] == fit(4096, 2, {"B": 2033, "A": 2047})[0]
+    # A comment naming a register call is not one; a call in another file
+    # is refused.
+    commented = two + "// supervisor::register(C, &z) is how a fifth would be added\n"
+    assert read_sources(sup, commented) == (4096, 2, ["A.BIN", "B.BIN"])
+    try:
+        read_sources(sup, two, [("main.rs", "    supervisor::register(5, &img);\n")])
+        raise AssertionError("refused nothing")
+    except Refused:
+        pass
+    assert read_sources(sup, two, [("main.rs", "    // supervisor::register(5, &img);\n")])[2] == ["A.BIN", "B.BIN"]
     # The real sources parse.
     with open(SUPERVISOR) as f, open(LOADER) as g:
-        arena, most, names = read_sources(f.read(), g.read())
+        arena, most, names = read_sources(f.read(), g.read(), others())
     assert "FSD.BIN" in names and len(names) <= most and arena > 0, (arena, most, names)
     print(f"check-supervised-images: self-test ok ({len(names)} images registered in loader.rs, arena {arena // 1024} KB)")
     return 0

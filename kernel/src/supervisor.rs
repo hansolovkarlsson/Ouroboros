@@ -79,10 +79,10 @@ const IMAGE_ARENA: usize = 768 * 1024;
 /// costs only its bookkeeping now; its image's bytes come from
 /// [`IMAGE_ARENA`], so this is a count, not a memory trade.
 ///
-/// [`register`] reports a full registry distinctly from an oversized image
-/// precisely because of that: with no slack left, the next server to move out
-/// of the kernel is the one that hits this, and it would otherwise boot
-/// unsupervised behind a warning blaming its file size.
+/// [`register`] reports a full registry distinctly from an image that does
+/// not fit, because with no slack left the next server to move out of the
+/// kernel is the one that hits this, and a warning blaming the arena would
+/// send its reader to measure images that were never the problem.
 const MAX_SUPERVISED: usize = 4;
 
 /// Per-boot restart cap per server (covers crashes *and* wedges together):
@@ -130,12 +130,10 @@ pub enum PingAction {
 struct Entry {
     /// The task slot this server runs in once registered; `None` = free.
     slot: Option<usize>,
-    /// Where this server's image starts in [`Registry::arena`], its length,
-    /// and the bytes reserved for it there (a later image for the same slot
-    /// reuses them if it fits).
+    /// Where this server's image starts in [`Registry::arena`], and its
+    /// length.
     image_at: usize,
     image_len: usize,
-    image_room: usize,
     /// Crash + wedge restarts so far this boot, vs [`MAX_RESTARTS`].
     restarts: u32,
     /// Heartbeat: consecutive ticks observed `Runnable`, reset on any
@@ -158,7 +156,6 @@ impl Entry {
             slot: None,
             image_at: 0,
             image_len: 0,
-            image_room: 0,
             restarts: 0,
             runnable_ticks: 0,
             ping_outstanding: false,
@@ -180,53 +177,51 @@ impl Entry {
 /// The supervised servers and the one arena their images are kept in.
 struct Registry {
     entries: [Entry; MAX_SUPERVISED],
-    arena: [u8; IMAGE_ARENA],
+    arena: Arena,
     /// Bytes of `arena` handed out, from its start; never given back, since
-    /// a server is registered once a boot.
+    /// a slot is registered once a boot ([`Registered::SlotTaken`]).
     used: usize,
 }
 
+/// The arena's bytes, aligned so that an offset that is a multiple of 16 is
+/// an address that is one: a `[u8; N]` alone has alignment 1, and a field of
+/// it may land anywhere in [`Registry`].
+#[repr(C, align(16))]
+struct Arena([u8; IMAGE_ARENA]);
+
 static REGISTRY: SyncCell<Registry> = SyncCell::new(Registry {
     entries: [const { Entry::empty() }; MAX_SUPERVISED],
-    arena: [0; IMAGE_ARENA],
+    arena: Arena([0; IMAGE_ARENA]),
     used: 0,
 });
 
 /// Stash `slot`'s ELF image and mark it supervised. Called once per server
-/// by `loader.rs` during boot services (`load_fsd`/`load_cond`). Returns
-/// whether the image fit; a too-big image (or a full registry) just means
-/// that server won't be restartable this boot, not a boot failure.
+/// by `loader.rs` during boot services (`load_fsd`, `load_cond`, `load_netd`,
+/// `load_accountd`). Returns whether the image was kept; one that was not
+/// just means that server won't be restartable this boot, not a boot
+/// failure.
 pub fn register(slot: usize, image: &[u8]) -> Registered {
     if image.is_empty() {
-        return Registered::ImageTooLarge;
+        return Registered::Empty;
     }
     let reg = unsafe { &mut *REGISTRY.get() };
-    let idx = reg
-        .entries
-        .iter()
-        .position(|e| e.slot == Some(slot))
-        .or_else(|| reg.entries.iter().position(|e| e.slot.is_none()));
-    let Some(idx) = idx else {
+    if reg.entries.iter().any(|e| e.slot == Some(slot)) {
+        return Registered::SlotTaken;
+    }
+    let Some(idx) = reg.entries.iter().position(|e| e.slot.is_none()) else {
         return Registered::RegistryFull;
     };
+    // Each image at the next 16-byte boundary ([`Arena`] makes that an
+    // address), and nothing taken or written unless it fits.
+    let at = reg.used.next_multiple_of(16);
+    if at > IMAGE_ARENA || image.len() > IMAGE_ARENA - at {
+        return Registered::ImageTooLarge;
+    }
+    reg.used = at + image.len();
     let e = &mut reg.entries[idx];
-    // The slot's own reservation if the image fits it, else fresh bytes
-    // from the arena: nothing is written until it is known to fit.
-    let at = if e.slot == Some(slot) && image.len() <= e.image_room {
-        e.image_at
-    } else {
-        // 16-aligned, so an image starts as a copy from the ESP would.
-        let at = reg.used.next_multiple_of(16);
-        if at > IMAGE_ARENA || image.len() > IMAGE_ARENA - at {
-            return Registered::ImageTooLarge;
-        }
-        reg.used = at + image.len();
-        e.image_room = image.len();
-        at
-    };
     e.slot = Some(slot);
     e.image_at = at;
-    reg.arena[at..at + image.len()].copy_from_slice(image);
+    reg.arena.0[at..at + image.len()].copy_from_slice(image);
     e.image_len = image.len();
     e.restarts = 0;
     e.reset_liveness();
@@ -242,8 +237,12 @@ pub fn register(slot: usize, image: &[u8]) -> Registered {
 #[derive(PartialEq, Eq, Clone, Copy)]
 pub enum Registered {
     Ok,
-    /// The image is empty or larger than what is left of [`IMAGE_ARENA`].
+    /// The image is larger than what is left of [`IMAGE_ARENA`].
     ImageTooLarge,
+    /// The image is empty (the loader refuses an empty file before this).
+    Empty,
+    /// The slot was registered already this boot; its first image stands.
+    SlotTaken,
     /// All [`MAX_SUPERVISED`] entries are taken - raise it.
     RegistryFull,
 }
@@ -254,7 +253,11 @@ impl Registered {
     pub fn why(self) -> Option<&'static str> {
         match self {
             Registered::Ok => None,
-            Registered::ImageTooLarge => Some("image too large to keep for crash recovery (the supervisor's IMAGE_ARENA is full)"),
+            Registered::ImageTooLarge => {
+                Some("image too large to keep for crash recovery (not enough room left in the supervisor's IMAGE_ARENA)")
+            }
+            Registered::Empty => Some("image empty, nothing to keep for crash recovery"),
+            Registered::SlotTaken => Some("already registered this boot, its first image kept"),
             Registered::RegistryFull => {
                 Some("the supervision registry is full (raise MAX_SUPERVISED)")
             }
@@ -302,7 +305,7 @@ pub fn restart(slot: usize) {
     // from the old one (a wedged server is replaced without end_task).
     e.reset_liveness();
     crate::fbdev::server_ended(slot as u64);
-    let image = &arena[e.image_at..e.image_at + e.image_len];
+    let image = &arena.0[e.image_at..e.image_at + e.image_len];
     let (header, phdrs, region_size) = match loader::elf_region_size(image) {
         Ok(result) => result,
         Err(err) => {

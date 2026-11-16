@@ -1372,9 +1372,9 @@ esp: srcid-begin build shell-bin hello-bin pong-bin fsd-bin upper-bin cond-bin n
 	python3 scripts/srcid.py write $(ESP_DIR)/EFI/ORBS/SRCID.TXT $(BUILD_DIR)/srcid.begin $(SRCID_DIRS)
 	# Every supervised server's image must fit the supervisor's arena, or
 	# that server is not restartable for the whole boot, said only by one
-	# warning (fsd was not, on every Pi boot to 2026-11-16). Last, so a
-	# tree that fails it stages nothing: every image, card and stick target
-	# builds this one.
+	# warning (fsd was not, on every Pi boot to 2026-11-16). Last: build/esp
+	# is staged by then and stays, but `esp` fails, so every image, card
+	# and stick target built on it stops here.
 	python3 scripts/check-supervised-images.py $(ESP_DIR)
 
 # Boots the ESP directory directly in QEMU (no disk image needed) against
@@ -3094,6 +3094,11 @@ check-relocs:
 check-stack-chains: esp
 	@python3 scripts/check-stack-chains.py
 
+# The supervised servers' images against the supervisor's arena (also the
+# last step of `esp`, so every staging target runs it).
+check-supervised-images: esp
+	@python3 scripts/check-supervised-images.py $(ESP_DIR)
+
 # The xHCI driver's two DMA barriers in the built kernel (2026-10-03). No QEMU
 # rig can fail for a missing one: QEMU's controller sees guest memory as the
 # CPU last wrote it, and only the Pi's non-coherent PCIe controller needs
@@ -3109,11 +3114,6 @@ check-stack-chains: esp
 # makes; the scan's MDIO read commands in netscan.rs go through a store
 # of their own, which is not held): no emulator models that device, so the image is the only
 # place to look. Shown to fail by the same three mutations.
-# The supervised servers' images against the supervisor's arena (also the
-# last step of `esp`, so every staging target runs it).
-check-supervised-images: esp
-	@python3 scripts/check-supervised-images.py $(ESP_DIR)
-
 check-xhci-barriers: build
 	@python3 scripts/check-xhci-barriers.py $(KERNEL) $(dir $(OBJCOPY))
 
