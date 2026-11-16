@@ -74,7 +74,10 @@ def read_sources(supervisor_text, loader_text):
 def fit(arena, most, sizes):
     """The problems with `sizes` ({name: bytes or None}) in an arena of
     `arena` bytes and at most `most` entries; empty when they fit. Placed in
-    the order given, as the loader registers them."""
+    the order given, as `register` places them: each at the next 16-byte
+    boundary, and one that does not fit takes nothing, so the images after
+    it are judged on what is really left. Whether all fit does not depend on
+    the order beyond the alignment's padding."""
     problems = []
     if len(sizes) > most:
         problems.append(f"{len(sizes)} supervised images, more than MAX_SUPERVISED ({most})")
@@ -91,6 +94,7 @@ def fit(arena, most, sizes):
             problems.append(
                 f"{name} ({size} bytes) does not fit: {max(arena - at, 0)} bytes of the arena are left after the images before it"
             )
+            continue
         used = at + size
     return problems, used
 
@@ -145,6 +149,8 @@ def self_test():
     assert fit(4096, 1, {"A": 10, "B": 10})[0] != []
     assert fit(4096, 2, {"A": None})[0] != []
     assert fit(4096, 2, {"A": 0})[0] != []
+    # One that does not fit takes nothing: the next is judged on the whole.
+    assert len(fit(4096, 2, {"A": 5000, "B": 4000})[0]) == 1
     # The real sources parse.
     with open(SUPERVISOR) as f, open(LOADER) as g:
         arena, most, names = read_sources(f.read(), g.read())

@@ -85,6 +85,9 @@ fn main() -> ! {
     if cfg!(feature = "disk-gate-rig") {
         print("fsd: the disk-gate rig's build: the verb gate does not ask an arm\r\n");
     }
+    if cfg!(feature = "restart-rig") {
+        print("fsd: the restart rig's build: a path ending restart-rig-fault faults it, restart-rig-spin spins it\r\n");
+    }
     print("fsd: filesystem server ready\r\n");
 
     // v2 protocol: requests arrive fully self-contained (header +
@@ -1494,7 +1497,29 @@ fn path_from(payload: &[u8], start: usize, len: u64) -> Option<&str> {
     if len == 0 || len > DATA_MAX || payload.len() < start + len {
         return None;
     }
+    restart_rig(&payload[start..start + len]);
     core::str::from_utf8(&payload[start..start + len]).ok()
+}
+
+/// The restart rig's build alone (`restart-rig`, never the shipped fsd): the
+/// two ways the supervisor comes to restart a server, on request, by a name
+/// no disk holds, in any request that carries a path (every path is read
+/// through [`path_from`], so a stat, an open or a listing all reach it).
+/// Compared as bytes (the &str-slice PIE trap, docs/processes.md).
+fn restart_rig(path: &[u8]) {
+    if !cfg!(feature = "restart-rig") {
+        return;
+    }
+    if path.ends_with(b"restart-rig-fault") {
+        // SAFETY: none, by design: a read of an address no task maps, which
+        // the kernel answers by ending this task.
+        unsafe { core::ptr::read_volatile(8 as *const u8) };
+    }
+    if path.ends_with(b"restart-rig-spin") {
+        loop {
+            core::hint::spin_loop();
+        }
+    }
 }
 
 /// A result-window size capped at the per-op payload max (which also always
