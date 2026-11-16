@@ -1674,6 +1674,41 @@ own. The entries below stand as they were put.
    no stuck interrupt (a level-triggered line left uncleared would hang
    the board at the first frame, which is the check that it is cleared).
 
+   **Built 2026-11-16, on the host; not yet run on the board.**
+   - *The crate:* `init` writes the receive ring's `DMA_MBUF_DONE_THRESH`
+     to 1, Linux's default, so receive done is raised after every frame
+     (U-Boot takes no interrupt and leaves the firmware's value). `start`,
+     when it turns the receiver on, clears a stale receive done and
+     unmasks that bit alone (`IRQ_RX_DONE`, bit 13 of INTRL2_0, Linux's
+     `UMAC_IRQ_RXDMA_MBDONE`), before the receiver's enable.
+     `ack_rx_interrupt` clears it. The model has the interrupt block
+     (status, mask, clear; the line is status and not mask) and raises
+     receive done by the threshold: **Linux's reading, not seen.** Five
+     tests (94 in the crate). Controlled: with the unmask left out four
+     failed, with the ack clearing bit 14 one, with the threshold left out
+     five.
+   - *The kernel:* `Declared` carries the `_CRS`'s INTID through `quiet`
+     to the `Device`, `nic.rs`'s GENET arm reports it and acks through
+     the device, and `main.rs`'s existing NIC path enables it at the GIC
+     and wakes `netd` on it. The ack counts the interrupts; the first has
+     a line (`first receive interrupt taken (INTID 189), and cleared at
+     the device`) and the count rides on the received-counts line at 256
+     frames and each 65536 (`; N receive interrupts taken`).
+   - *On QEMU,* which has no GENET: `make test`, `test-netdump` and the
+     six boots of `test-smp` pass.
+   **The board's two boots, to run:** this build, and the control with the
+   unmask left out. In each, the boot's `NIC receive interrupt enabled
+   (GIC INTID 189)` line; then a hundred pings from the Mac
+   (`ping -c 100 192.168.77.2`), which `netd` does not answer (it answers
+   no echo request yet) but which arrive as a hundred frames, and fetches
+   from its HTTP server to pass 256 frames. This build: the
+   first-interrupt line, and the count at 256 frames at least a hundred.
+   The control: no such line, the count 0, and the fetches still served,
+   by the tick's poll. (The step's check above says the pings are
+   answered; they cannot be until `netd` answers echo, so the fetches are
+   the served traffic.) Then the soak: repeated fetches with no fault and
+   the board still answering.
+
 10. **Two boards.** Two Pi 4s on one switch, each with its address file
     and cluster keys.
     **Check:** `mount -r` of one from the other reads a file whole; a `cpu`

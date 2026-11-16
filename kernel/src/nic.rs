@@ -83,10 +83,10 @@ impl Nic {
     pub fn intid(&self) -> Option<u32> {
         match self {
             Nic::Virtio(d) => d.intid(),
-            // Polled, whatever its `_CRS` names (the plan's design 7): an
-            // INTID reported is one `main.rs` enables, and nothing here
-            // would clear the level-triggered line.
-            Nic::Genet(_) => None,
+            // The declared receive interrupt since the plan's step 9:
+            // receive done alone is unmasked, and `ack_interrupt` clears it
+            // (the level-triggered line held back until then, design 7).
+            Nic::Genet(d) => d.intid(),
         }
     }
 
@@ -99,8 +99,7 @@ impl Nic {
     pub unsafe fn ack_interrupt(&self) {
         match self {
             Nic::Virtio(d) => unsafe { d.ack_interrupt() },
-            // No interrupt is reported, so none is taken.
-            Nic::Genet(_) => {}
+            Nic::Genet(d) => d.ack_interrupt(),
         }
     }
 

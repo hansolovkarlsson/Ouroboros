@@ -2,7 +2,8 @@
 //! sent, one frame received. The sequence is U-Boot's
 //! `drivers/net/bcmgenet.c` (`bcmgenet_eth_probe`, then
 //! `bcmgenet_gmac_eth_start`), which drives this board's device with one
-//! queue and no interrupt, as this arc does first.
+//! queue and no interrupt. This crate adds one interrupt, receive done
+//! ([`IRQ_RX_DONE`], the plan's step 9), which U-Boot does not take.
 //!
 //! **Where this departs from U-Boot, each on purpose:**
 //!
@@ -10,9 +11,14 @@
 //!   it, where U-Boot is handed one from its environment. An address no
 //!   station can have ends [`Genet::init`] before any write.
 //! - Every interrupt of both blocks is masked and cleared first, as Linux's
-//!   `bcmgenet_intr_disable` does. U-Boot never touches them. The kernel
-//!   polls this device (the plan's design 7), and a firmware that left one
-//!   unmasked must not be able to raise it.
+//!   `bcmgenet_intr_disable` does. U-Boot never touches them. A firmware
+//!   that left one unmasked must not be able to raise it.
+//! - Receive done is unmasked when [`Genet::start`] turns the receiver on,
+//!   after any stale one is cleared, and the ring raises it after every
+//!   frame (`DMA_MBUF_DONE_THRESH` 1): Linux's
+//!   `bcmgenet_rx_ring16_int_enable` and its default coalescing.
+//!   [`Genet::ack_rx_interrupt`] clears it. No other interrupt is
+//!   unmasked.
 //! - `RBUF_64B_EN` is cleared where U-Boot only sets the bit beside it, and
 //!   `TBUF_64B_EN`, which U-Boot never touches, is cleared too. Linux sets
 //!   both. Had the firmware's driver done as Linux does, every received
