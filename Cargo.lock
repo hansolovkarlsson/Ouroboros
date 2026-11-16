@@ -334,6 +334,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "netconf"
+version = "0.1.0"
+
+[[package]]
 name = "netd"
 version = "0.1.0"
 dependencies = [
@@ -341,6 +345,7 @@ dependencies = [
  "clusterkeys",
  "ed25519",
  "heldkeys",
+ "netconf",
  "ninep-abi",
  "syscall-abi",
 ]

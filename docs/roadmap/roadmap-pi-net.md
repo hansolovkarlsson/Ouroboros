@@ -1510,6 +1510,111 @@ own. The entries below stand as they were put.
    and not the old one; a malformed file is refused with a line and falls
    back.
 
+   **Built 2026-11-15, on QEMU; run on the board the same day, and it
+   works** (the result is at the end of this step).
+   - *The file is `/etc/net`*, lines of `key value`: `address` and
+     `mask` required, `gateway` and `dns` optional, `#` lines and blank
+     lines skipped. With no gateway only the machine's own subnet is
+     reached; with no `dns` no name resolves. **A file with anything
+     not understood is refused whole,** with a line that says why and
+     at which line of the file: a half-read file would give a machine
+     an address its operator did not write.
+   - *The rules are a pure crate, `netconf`,* host-tested (13 tests):
+     the parse and each refusal, the values with no file
+     (`Config::slirp`, what `netd` held as constants), and the next hop.
+     The /24 that `next_hop` assumed is now the file's mask.
+   - *In `netd`,* `load_netconf` reads the file once at start, called
+     from `load_auth` after its reads have waited out the disk's mount
+     and before its last lines, and sets four atomics
+     that `our_ip`, `next_hop` and the DNS code read. One line says the
+     configuration on every boot and where it came from: `netd: address
+     A/N, gateway G, dns D (from /etc/net)`, or `(no /etc/net: the
+     defaults)`, or `(nothing mounted to read /etc/net from: the
+     defaults)`, or a warning that the file could not be read or was
+     refused. Every way of having no usable file ends in the defaults.
+   - **`ping` goes through the next hop now.** The adapter run
+     (2026-11-14) found `handle_ping` asking the wire for the target's
+     own address, so a ping off the subnet could not be answered. It
+     asks for the gateway's as the TCP paths do. A DNS server off the
+     subnet is reached the same way.
+   - *The check, `make test-net-config`,* three boots of a copy of the
+     ext2 image: a file naming `10.0.2.20` (reached there through a
+     forwarded port, **not** at `10.0.2.15`, and `ping 10.0.2.2` from
+     the guest answers); a file whose third line is not understood,
+     after a good address line (refused with its line named, the
+     defaults used, reached at `.15` and **not** at the `.20` its first
+     line named); and no file, the control. The first boot also pings
+     an address off the subnet, which must not be refused for want of
+     an ARP reply. 21 checks, all passed. Controlled twice: with `netd`
+     ignoring a good file, three checks of the first boot failed; with
+     `handle_ping` put back to asking for the target's own address, the
+     off-subnet check failed.
+   - *Not checked by any rig:* a file that cannot be read (a disk
+     error), a configuration with no gateway or no DNS server on the
+     wire, and a mask other than /24 past the host tests.
+   **The review of the step (2026-11-15, before the board).** Ten
+   findings, no fault in the path. Fixed:
+   - *The file was taken from one read.* A read may return fewer bytes
+     than asked without being the end, and a file cut short can still
+     parse, to an address nobody wrote. It is read until a read returns
+     nothing, as the users registry is.
+   - *A DNS server at our own subnet's own or broadcast address was
+     accepted,* where the same mistake in the address or the gateway is
+     refused.
+   - *The address line was printed after `load_auth`'s last line,* which
+     two rigs wait for before they type (`test-blank-disk.py`,
+     `test-sd.py`). It is printed before those lines now.
+   - *A boot with nothing mounted,* a supported one, was given a warning
+     and a retry budget of its own, against `load_auth`'s rule of one
+     budget. `NO_FS` is now taken at once and said without a warning.
+   - *Nothing checked the ping through the next hop;* the rig's one ping
+     was on the subnet. The rig pings off it now.
+   - `test-net-config` was not in `.PHONY`; the rig left its image
+     copies behind when its set-up failed; `resolve`'s and `fetch`'s
+     rows, two comments and a sentence saying userland has no statics
+     still described what this step changed.
+   **Left open:**
+   - *A disk that mounts after `load_auth` has given up leaves the
+     machine on the defaults for the boot,* as it leaves it with no
+     cluster identity. `NET_WAIT` is not a sleep (`testing-pi4.md`, risk
+     4b): with a frame or a message waiting it returns at once, so the
+     retries can be spent in a moment, and since step 7 a board on a
+     busy wire always has a frame waiting. Nothing reads either file
+     again. Not seen on the board, whose card mounted in time on every
+     boot; the cure is a wait that is a wait, for both files.
+   - *Three parsers of a dotted address serve `netd`:* `netconf`'s,
+     `clusterkeys::parse_ip` with the same rules, and `netd`'s own
+     `parse_ip4`. One crate holding one is the change.
+   - *The ext2 root's place in the image* is written out in three rigs
+     now (`test-no-identity.py`, `test-net-config.py` and
+     `mkext2.py`, which decides it).
+   **On the board** the file is written once at the Pi's shell, as
+   root (`echo address 192.168.1.50 > /etc/net`, then a `>>` for each
+   further line), and read at the next boot. `make sdcard` stages the
+   boot partition alone, so a file on the card's root stays.
+
+   **The board, 2026-11-15, by Hans: two boots of build `2e9d0dc7f73a`,
+   the Mac's adapter moved to `192.168.77.1`.**
+   - *First boot, no file:* `netd: address 10.0.2.34/24, gateway
+     10.0.2.2, dns 10.0.2.3 (no /etc/net: the defaults)`. The file was
+     then written at the shell, three `echo` lines (address
+     `192.168.77.2`, mask `255.255.255.0`, gateway `192.168.77.1`, no
+     `dns`), read back with `cat`, and the board shut down.
+   - *Second boot:* `netd: address 192.168.77.2/24, gateway
+     192.168.77.1, dns none (from /etc/net)`. `ping 192.168.77.1` said
+     `reply from 192.168.77.1`. The Mac's ARP table held `192.168.77.2`
+     at the board's address.
+   - *From the Mac, at the new address:* the 246 files under `include`
+     and `man` by `curl`; 241 equal to the staged copies by SHA-256,
+     827 KB, and the same 5 man pages differing as in step 7 (the
+     card's root is older than the tree). `/etc/net` itself came back
+     as written.
+   - No `EXCEPTION`, no frame dropped, `en9` counting no input error.
+     The firmware's indexes read receive 10, transmit 0 on both boots.
+   **Not shown on the board:** a refused file, a ping off the subnet
+   (the Mac routes nothing on), and a name resolved (no `dns` line).
+   The first two are the rig's on QEMU.
+
 9. **The interrupt.** INTID 189 enabled in the GIC, receive done unmasked,
    cleared in the kernel's IRQ path, `NET_WAIT` woken by it.
    **Check:** the kernel counts the interrupts it takes on INTID 189 and
