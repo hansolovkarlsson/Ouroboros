@@ -51,7 +51,7 @@ const NP_HDR: usize = ninep_abi::NP_REQ_PAYLOAD as usize;
 fn main() -> ! {
     let mut backend = detect_backend();
     if cfg!(feature = "restart-rig") {
-        write_text(&mut backend, b"cond: the restart rig's build: text holding restart-rig-fault faults it, restart-rig-spin spins it\r\n");
+        write_text(&mut backend, b"cond: the restart rig's build: text holding restart-rig-fault faults it, restart-rig-spin spins it, restart-rig-echo it answers\r\n");
     }
     write_text(&mut backend, b"cond: console server ready\r\n");
 
@@ -93,6 +93,9 @@ fn handle(backend: &mut Backend, req: &[u8], reply: &mut [u8]) -> usize {
         let n = text_len.min(payload.len()).min(DATA_MAX);
         restart_rig(&payload[..n]);
         write_text(backend, &payload[..n]);
+        if restart_rig_echo(&payload[..n]) {
+            write_text(backend, b"cond: restart-rig-echo seen\r\n");
+        }
     }
     REPLY_PAYLOAD
 }
@@ -105,17 +108,28 @@ fn restart_rig(text: &[u8]) {
     if !cfg!(feature = "restart-rig") {
         return;
     }
-    let holds = |what: &[u8]| text.windows(what.len()).any(|w| w == what);
-    if holds(b"restart-rig-fault") {
+    if holds(text, b"restart-rig-fault") {
         // SAFETY: none, by design: a read of an address no task maps, which
         // the kernel answers by ending this task.
         unsafe { core::ptr::read_volatile(8 as *const u8) };
     }
-    if holds(b"restart-rig-spin") {
+    if holds(text, b"restart-rig-spin") {
         loop {
             core::hint::spin_loop();
         }
     }
+}
+
+/// The restart rig's third word, `restart-rig-echo`: cond answers it with a
+/// line of its own after the text. The proof that cond itself wrote, since
+/// `ulib::con_write` prints a failed call's bytes through the kernel's PUTC,
+/// so any other text comes out whether cond is alive or not.
+fn restart_rig_echo(text: &[u8]) -> bool {
+    cfg!(feature = "restart-rig") && holds(text, b"restart-rig-echo")
+}
+
+fn holds(text: &[u8], what: &[u8]) -> bool {
+    text.windows(what.len()).any(|w| w == what)
 }
 
 // ---------------------------------------------------------------------

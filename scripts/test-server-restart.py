@@ -35,8 +35,10 @@ One boot, two rounds, a fault and then a spin. In each:
   task=N`, `slot N wedged`);
 - a fresh server must say it is ready;
 - the server must answer a request only it can answer: fsd a listing of
-  `/EFI/ORBS` naming FSD.BIN, cond an `echo`'s line, accountd `passwd`'s
-  `no such user` for an account that does not exist.
+  `/EFI/ORBS` naming FSD.BIN, cond a line of its own for a third staged
+  file (`restart-rig-echo`: any other text is printed by the kernel when
+  cond is gone), accountd `passwd`'s `no such user` for an account that does
+  not exist.
 
 And over the boot: no line saying an image was too large to keep, the
 restarts numbered 1 and 2, and the guest alive at the end.
@@ -48,8 +50,10 @@ image-too-large line, no restart in either round, no fresh fsd, and no
 listing after (the shell could not find `ls`, the filesystem being gone). A
 thirteenth check, that the kernel never said it had no kept image, passed in
 the control too (an unregistered server never reaches that line), so it
-could not fail and was removed. cond's and accountd's controls are recorded
-in docs/testing/make-targets.md.
+could not fail and was removed. cond's and accountd's controls, the same day,
+refused their slot in `register`: 5 and 7 of 12 checks failed. cond's first
+control showed its check then, that an `echo` printed, passing with cond
+dead, which is why cond now answers a word of its own.
 
 Exit status: the number of failed checks.
 """
@@ -103,14 +107,16 @@ def lists_fsd(g):
     return "FSD.BIN" in out, f"`ls /EFI/ORBS` names FSD.BIN: {out.strip()[-80:]!r}"
 
 
-def echoes(g):
-    # The typed line reaches cond as well, after `# `; the output is the line
-    # that holds the word alone.
+def answers(g):
+    # Any text comes out whether cond is alive or not: `ulib::con_write`
+    # prints a failed call's bytes through the kernel's PUTC (an `echo` did,
+    # in the control, with cond gone). So the rig's cond answers a file
+    # holding `restart-rig-echo` with a line only it writes.
     mark = len(g.transcript())
-    g.type_line("echo cond-serves-again")
+    g.type_line("cat /RIGECHO.TXT")
     g.wait_for(PROMPT, timeout=30)
     out = g.transcript()[mark:]
-    return re.search(r"\ncond-serves-again\r", out) is not None, f"`echo` prints its line: {out.strip()[-80:]!r}"
+    return "cond: restart-rig-echo seen" in out, f"cond answers restart-rig-echo: {out.strip()[-80:]!r}"
 
 
 def no_such_user(g):
@@ -128,8 +134,12 @@ SERVERS = {
     ),
     "cond": dict(
         slot=3, file="COND.BIN", ready="cond: console server ready",
-        fault=cat("/RIGFAULT.TXT"), spin=cat("/RIGSPIN.TXT"), serves=echoes,
-        files={"RIGFAULT.TXT": b"restart-rig-fault\r\n", "RIGSPIN.TXT": b"restart-rig-spin\r\n"},
+        fault=cat("/RIGFAULT.TXT"), spin=cat("/RIGSPIN.TXT"), serves=answers,
+        files={
+            "RIGFAULT.TXT": b"restart-rig-fault\r\n",
+            "RIGSPIN.TXT": b"restart-rig-spin\r\n",
+            "RIGECHO.TXT": b"restart-rig-echo\r\n",
+        },
     ),
     "accountd": dict(
         slot=5, file="ACCOUNTD.BIN", ready="accountd: account server ready",
