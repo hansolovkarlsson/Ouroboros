@@ -57,24 +57,27 @@ use crate::synccell::SyncCell;
 use crate::loader;
 use crate::tasks;
 
-/// Largest supervised-server image kept for restart (was `FSD_IMAGE_SIZE`).
+/// The bytes kept for every supervised server's image together: one arena,
+/// each image taking its own size of it, so the supervised servers can be
+/// restarted as long as their images **sum** to this.
 ///
-/// fsd is the biggest by far and it GREW past the old 128 KB cap (137 KB at the
-/// time of writing, as permission enforcement and a third filesystem landed in
-/// it). Exceeding this is not an error - it silently costs the server its
-/// restartability, announced only by a boot warning that scrolls past - so the
-/// cap carries real headroom rather than tracking the current size. Costs
-/// `MAX_SUPERVISED * IMG_CAP` of kernel `.bss` (768 KB), which is noise against
-/// the 512 MB the machine boots with.
+/// Until 2026-11-16 each server had a fixed slot of `IMG_CAP` (192 KB). fsd
+/// passed it twice: 128 KB to 137 KB (fixed by raising the cap, the
+/// review-and-split postmortem), then 192 KB to 197 KB, unnoticed on every
+/// boot of the Pi since at least `7512000f`, while cond's slot held 14 KB.
+/// An image that does not fit is not a boot failure, only a warning that
+/// scrolls past, so `scripts/check-supervised-images.py` holds the built
+/// images against this at the end of every `make esp`: a server that could
+/// not be restarted cannot be staged. It reads this line, so keep its shape.
 ///
-/// If fsd approaches this again, raise it again: an unsupervised fsd is exactly
-/// the process whose mid-write restart the account tools cannot survive.
-const IMG_CAP: usize = 192 * 1024;
+/// The same 768 KB of kernel `.bss` the four fixed slots took, against
+/// 414 KB of images today (fsd 197, netd 168, accountd 36, cond 14).
+const IMAGE_ARENA: usize = 768 * 1024;
 
 /// How many servers can be supervised at once. **Exactly saturated today** by
-/// fsd/cond/netd/accountd, so a FIFTH server needs this raised - each entry
-/// costs [`IMG_CAP`] (192 KB) of kernel `.bss`, which is why it is not simply
-/// set higher "just in case".
+/// fsd/cond/netd/accountd, so a FIFTH server needs this raised. An entry
+/// costs only its bookkeeping now; its image's bytes come from
+/// [`IMAGE_ARENA`], so this is a count, not a memory trade.
 ///
 /// [`register`] reports a full registry distinctly from an oversized image
 /// precisely because of that: with no slack left, the next server to move out
@@ -127,8 +130,12 @@ pub enum PingAction {
 struct Entry {
     /// The task slot this server runs in once registered; `None` = free.
     slot: Option<usize>,
-    image: [u8; IMG_CAP],
+    /// Where this server's image starts in [`Registry::arena`], its length,
+    /// and the bytes reserved for it there (a later image for the same slot
+    /// reuses them if it fits).
+    image_at: usize,
     image_len: usize,
+    image_room: usize,
     /// Crash + wedge restarts so far this boot, vs [`MAX_RESTARTS`].
     restarts: u32,
     /// Heartbeat: consecutive ticks observed `Runnable`, reset on any
@@ -149,8 +156,9 @@ impl Entry {
     const fn empty() -> Self {
         Entry {
             slot: None,
-            image: [0; IMG_CAP],
+            image_at: 0,
             image_len: 0,
+            image_room: 0,
             restarts: 0,
             runnable_ticks: 0,
             ping_outstanding: false,
@@ -169,27 +177,56 @@ impl Entry {
     }
 }
 
-static REGISTRY: SyncCell<[Entry; MAX_SUPERVISED]> = SyncCell::new([const { Entry::empty() }; MAX_SUPERVISED]);
+/// The supervised servers and the one arena their images are kept in.
+struct Registry {
+    entries: [Entry; MAX_SUPERVISED],
+    arena: [u8; IMAGE_ARENA],
+    /// Bytes of `arena` handed out, from its start; never given back, since
+    /// a server is registered once a boot.
+    used: usize,
+}
+
+static REGISTRY: SyncCell<Registry> = SyncCell::new(Registry {
+    entries: [const { Entry::empty() }; MAX_SUPERVISED],
+    arena: [0; IMAGE_ARENA],
+    used: 0,
+});
 
 /// Stash `slot`'s ELF image and mark it supervised. Called once per server
 /// by `loader.rs` during boot services (`load_fsd`/`load_cond`). Returns
 /// whether the image fit; a too-big image (or a full registry) just means
 /// that server won't be restartable this boot, not a boot failure.
 pub fn register(slot: usize, image: &[u8]) -> Registered {
-    if image.is_empty() || image.len() > IMG_CAP {
+    if image.is_empty() {
         return Registered::ImageTooLarge;
     }
     let reg = unsafe { &mut *REGISTRY.get() };
     let idx = reg
+        .entries
         .iter()
         .position(|e| e.slot == Some(slot))
-        .or_else(|| reg.iter().position(|e| e.slot.is_none()));
+        .or_else(|| reg.entries.iter().position(|e| e.slot.is_none()));
     let Some(idx) = idx else {
         return Registered::RegistryFull;
     };
-    let e = &mut reg[idx];
+    let e = &mut reg.entries[idx];
+    // The slot's own reservation if the image fits it, else fresh bytes
+    // from the arena: nothing is written until it is known to fit.
+    let at = if e.slot == Some(slot) && image.len() <= e.image_room {
+        e.image_at
+    } else {
+        // 16-aligned, so an image starts as a copy from the ESP would.
+        let at = reg.used.next_multiple_of(16);
+        if at > IMAGE_ARENA || image.len() > IMAGE_ARENA - at {
+            return Registered::ImageTooLarge;
+        }
+        reg.used = at + image.len();
+        e.image_room = image.len();
+        at
+    };
     e.slot = Some(slot);
-    e.image[..image.len()].copy_from_slice(image);
+    e.image_at = at;
+    reg.arena[at..at + image.len()].copy_from_slice(image);
     e.image_len = image.len();
     e.restarts = 0;
     e.reset_liveness();
@@ -197,17 +234,17 @@ pub fn register(slot: usize, image: &[u8]) -> Registered {
 }
 
 /// The outcome of [`register`]. Two failures that used to be one `false`: the
-/// image not fitting [`IMG_CAP`], and the registry being full. They call for
-/// completely different fixes - raise a size cap, or raise a slot count - and
+/// image not fitting what is left of [`IMAGE_ARENA`], and the registry being
+/// full. They call for different fixes - raise the arena, or raise a slot
+/// count - and
 /// collapsing them meant the boot warning could name the wrong one, sending
 /// whoever reads it to measure a binary that was never too big.
 #[derive(PartialEq, Eq, Clone, Copy)]
 pub enum Registered {
     Ok,
-    /// The image is empty or larger than [`IMG_CAP`].
+    /// The image is empty or larger than what is left of [`IMAGE_ARENA`].
     ImageTooLarge,
-    /// All [`MAX_SUPERVISED`] entries are taken - raise it (each entry costs
-    /// `IMG_CAP`, 192 KB, so this is a deliberate memory trade, not a typo).
+    /// All [`MAX_SUPERVISED`] entries are taken - raise it.
     RegistryFull,
 }
 
@@ -217,7 +254,7 @@ impl Registered {
     pub fn why(self) -> Option<&'static str> {
         match self {
             Registered::Ok => None,
-            Registered::ImageTooLarge => Some("image too large to keep for crash recovery"),
+            Registered::ImageTooLarge => Some("image too large to keep for crash recovery (the supervisor's IMAGE_ARENA is full)"),
             Registered::RegistryFull => {
                 Some("the supervision registry is full (raise MAX_SUPERVISED)")
             }
@@ -229,7 +266,7 @@ impl Registered {
 /// fault handler's old `if current == FSD_TASK` check.
 pub fn is_supervised(slot: usize) -> bool {
     let reg = unsafe { &*REGISTRY.get() };
-    reg.iter().any(|e| e.slot == Some(slot))
+    reg.entries.iter().any(|e| e.slot == Some(slot))
 }
 
 /// Restart the server in `slot` from its kept image (the generalized
@@ -240,8 +277,8 @@ pub fn is_supervised(slot: usize) -> bool {
 /// cap guards crash/wedge loops. Safe to call whether the dead task was
 /// the current one or not - it only touches this slot.
 pub fn restart(slot: usize) {
-    let reg = unsafe { &mut *REGISTRY.get() };
-    let Some(e) = reg.iter_mut().find(|e| e.slot == Some(slot)) else {
+    let Registry { entries, arena, .. } = unsafe { &mut *REGISTRY.get() };
+    let Some(e) = entries.iter_mut().find(|e| e.slot == Some(slot)) else {
         return;
     };
     // The dead server's children go with it, whether or not a fresh one
@@ -265,8 +302,8 @@ pub fn restart(slot: usize) {
     // from the old one (a wedged server is replaced without end_task).
     e.reset_liveness();
     crate::fbdev::server_ended(slot as u64);
-    let image_len = e.image_len;
-    let (header, phdrs, region_size) = match loader::elf_region_size(&e.image[..image_len]) {
+    let image = &arena[e.image_at..e.image_at + e.image_len];
+    let (header, phdrs, region_size) = match loader::elf_region_size(image) {
         Ok(result) => result,
         Err(err) => {
             console::println!("Ouroboros kernel: kept image for slot {slot} refused by the loader ({err}) - not restarting");
@@ -278,7 +315,7 @@ pub fn restart(slot: usize) {
     // fresh and at least `region_size` bytes - the same contract the fault
     // path's restart already relied on.
     let loaded = match unsafe {
-        loader::populate_region(&e.image[..image_len], &header, phdrs.as_slice(), region_base, region_size)
+        loader::populate_region(image, &header, phdrs.as_slice(), region_base, region_size)
     } {
         Ok(loaded) => loaded,
         Err(_) => {
@@ -308,7 +345,7 @@ pub fn restart(slot: usize) {
 /// unregistered slot.
 pub fn heartbeat(slot: usize, blocked: bool) -> bool {
     let reg = unsafe { &mut *REGISTRY.get() };
-    let Some(e) = reg.iter_mut().find(|e| e.slot == Some(slot)) else {
+    let Some(e) = reg.entries.iter_mut().find(|e| e.slot == Some(slot)) else {
         return false;
     };
     if blocked {
@@ -332,7 +369,7 @@ pub fn heartbeat(slot: usize, blocked: bool) -> bool {
 /// [`KERNEL_SENDER`]: syscall_abi::KERNEL_SENDER
 pub fn note_ack(slot: usize) {
     let reg = unsafe { &mut *REGISTRY.get() };
-    if let Some(e) = reg.iter_mut().find(|e| e.slot == Some(slot)) {
+    if let Some(e) = reg.entries.iter_mut().find(|e| e.slot == Some(slot)) {
         // ALSO clears the PASSIVE counter, which makes this more than "the
         // ping was answered": it is "this server is alive", from the only
         // party that knows. A server may send it UNPROMPTED, and `netd` does
@@ -380,7 +417,7 @@ pub fn note_ack(slot: usize) {
 /// acks for that ([`note_ack`]). A no-op for an unregistered slot.
 pub fn note_progress(slot: usize) {
     let reg = unsafe { &mut *REGISTRY.get() };
-    if let Some(e) = reg.iter_mut().find(|e| e.slot == Some(slot)) {
+    if let Some(e) = reg.entries.iter_mut().find(|e| e.slot == Some(slot)) {
         e.runnable_ticks = 0;
     }
 }
@@ -404,7 +441,7 @@ pub fn note_progress(slot: usize) {
 ///   at a time, so the server's 4-deep mailbox can never fill with pings.
 pub fn poll_ping(slot: usize, blocked: bool) -> PingAction {
     let reg = unsafe { &mut *REGISTRY.get() };
-    let Some(e) = reg.iter_mut().find(|e| e.slot == Some(slot)) else {
+    let Some(e) = reg.entries.iter_mut().find(|e| e.slot == Some(slot)) else {
         return PingAction::None;
     };
     if !blocked {
