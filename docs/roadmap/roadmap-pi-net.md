@@ -1522,11 +1522,13 @@ own. The entries below stand as they were put.
      the parse and each refusal, the values with no file
      (`Config::slirp`, what `netd` held as constants), and the next hop.
      The /24 that `next_hop` assumed is now the file's mask.
-   - *In `netd`,* `load_netconf` reads the file once at start, after
-     `load_auth` has waited out the disk's mount, and sets four atomics
+   - *In `netd`,* `load_netconf` reads the file once at start, called
+     from `load_auth` after its reads have waited out the disk's mount
+     and before its last lines, and sets four atomics
      that `our_ip`, `next_hop` and the DNS code read. One line says the
      configuration on every boot and where it came from: `netd: address
      A/N, gateway G, dns D (from /etc/net)`, or `(no /etc/net: the
+     defaults)`, or `(nothing mounted to read /etc/net from: the
      defaults)`, or a warning that the file could not be read or was
      refused. Every way of having no usable file ends in the defaults.
    - **`ping` goes through the next hop now.** The adapter run
@@ -1540,12 +1542,51 @@ own. The entries below stand as they were put.
      the guest answers); a file whose third line is not understood,
      after a good address line (refused with its line named, the
      defaults used, reached at `.15` and **not** at the `.20` its first
-     line named); and no file, the control. 20 checks, all passed.
-     Controlled: with `netd` ignoring a good file, three checks of the
-     first boot failed.
+     line named); and no file, the control. The first boot also pings
+     an address off the subnet, which must not be refused for want of
+     an ARP reply. 21 checks, all passed. Controlled twice: with `netd`
+     ignoring a good file, three checks of the first boot failed; with
+     `handle_ping` put back to asking for the target's own address, the
+     off-subnet check failed.
    - *Not checked by any rig:* a file that cannot be read (a disk
      error), a configuration with no gateway or no DNS server on the
      wire, and a mask other than /24 past the host tests.
+   **The review of the step (2026-11-15, before the board).** Ten
+   findings, no fault in the path. Fixed:
+   - *The file was taken from one read.* A read may return fewer bytes
+     than asked without being the end, and a file cut short can still
+     parse, to an address nobody wrote. It is read until a read returns
+     nothing, as the users registry is.
+   - *A DNS server at our own subnet's own or broadcast address was
+     accepted,* where the same mistake in the address or the gateway is
+     refused.
+   - *The address line was printed after `load_auth`'s last line,* which
+     two rigs wait for before they type (`test-blank-disk.py`,
+     `test-sd.py`). It is printed before those lines now.
+   - *A boot with nothing mounted,* a supported one, was given a warning
+     and a retry budget of its own, against `load_auth`'s rule of one
+     budget. `NO_FS` is now taken at once and said without a warning.
+   - *Nothing checked the ping through the next hop;* the rig's one ping
+     was on the subnet. The rig pings off it now.
+   - `test-net-config` was not in `.PHONY`; the rig left its image
+     copies behind when its set-up failed; `resolve`'s and `fetch`'s
+     rows, two comments and a sentence saying userland has no statics
+     still described what this step changed.
+   **Left open:**
+   - *A disk that mounts after `load_auth` has given up leaves the
+     machine on the defaults for the boot,* as it leaves it with no
+     cluster identity. `NET_WAIT` is not a sleep (`testing-pi4.md`, risk
+     4b): with a frame or a message waiting it returns at once, so the
+     retries can be spent in a moment, and since step 7 a board on a
+     busy wire always has a frame waiting. Nothing reads either file
+     again. Not seen on the board, whose card mounted in time on every
+     boot; the cure is a wait that is a wait, for both files.
+   - *Three parsers of a dotted address serve `netd`:* `netconf`'s,
+     `clusterkeys::parse_ip` with the same rules, and `netd`'s own
+     `parse_ip4`. One crate holding one is the change.
+   - *The ext2 root's place in the image* is written out in three rigs
+     now (`test-no-identity.py`, `test-net-config.py` and
+     `mkext2.py`, which decides it).
    **On the board** the file is written once at the Pi's shell, as
    root (`echo address 192.168.1.50 > /etc/net`, then a `>>` for each
    further line), and read at the next boot. `make sdcard` stages the
