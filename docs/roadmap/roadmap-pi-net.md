@@ -1674,7 +1674,9 @@ own. The entries below stand as they were put.
    no stuck interrupt (a level-triggered line left uncleared would hang
    the board at the first frame, which is the check that it is cleared).
 
-   **Built 2026-11-16, on the host; not yet run on the board.**
+   **Built 2026-11-16, and run on the board the same day: it works,
+   after one change the board asked for** (the result is at the end of
+   this step).
    - *The crate:* `init` writes the receive ring's `DMA_MBUF_DONE_THRESH`
      to 1, Linux's default, so receive done is raised after every frame
      (U-Boot takes no interrupt and leaves the firmware's value). `start`,
@@ -1708,6 +1710,49 @@ own. The entries below stand as they were put.
    answered; they cannot be until `netd` answers echo, so the fetches are
    the served traffic.) Then the soak: repeated fetches with no fault and
    the board still answering.
+
+   **The board, 2026-11-16, by Hans: five boots.** The Mac sent 100 pings
+   (`netd` answers no echo, so none was answered) and fetched `/etc/net`
+   from the board's HTTP server until the 256-frame line came.
+   - *First boot (build `a0a3a7116a0a`, receive done cleared by the ack
+     alone): it works, with too many interrupts.* `NIC receive interrupt
+     enabled (GIC INTID 189)`, then `first receive interrupt taken (INTID
+     189), and cleared at the device`, and the board went on: the line is
+     cleared, or the first frame would have hung it. At 256 frames, **304
+     interrupts**. A soak of 300 fetches, all equal, no fault.
+   - *Second and third boots (a diagnostic, `ec1587bf`, `d4023736`,
+     removed in `bf9d343d`): every interrupt real, and more than one a
+     frame.* Each ack counted receive done reading clear on entry (0), no
+     frame waiting (0), and receive done still set after the clear (0);
+     the third also said what the device itself had taken, from its
+     producer index: **302 interrupts for 257 frames**, none discarded.
+     So the stale re-delivery first suspected (an end of interrupt before
+     the clear landed) was ruled out by the second boot, and the third
+     showed receive done set again for frames already in the ring and not
+     yet taken.
+   - *The change (`ee9befa2`, `10c90971`), Linux's shape:* the ack masks
+     receive done as well as clearing it (`bcmgenet_isr0` with
+     `rx_ring16_int_disable`), and a drain that finds the ring empty
+     rearms it: clear, look again, unmask only if nothing waits
+     (`rearm_rx_interrupt`, called from `poll_frame`). The model now
+     raises receive done again while frames wait, inferred from the third
+     boot. Controlled on the host: without the mask two tests failed,
+     without the second look one, without the clear before the unmask two.
+   - *Fourth boot (build `10c909712371`, the change, the diagnostic still
+     in): **158 interrupts for 260 frames**,* the three diagnostic counts
+     0. A soak of 400 fetches, all equal, no fault.
+   - *Fifth boot, the control (build `bf9d343dbc0e+dirty`, the unmask
+     left out of `start`):* the GIC's line as before, no first-interrupt
+     line, and at 256 frames **`0 receive interrupts taken`**; 270
+     fetches served, by the tick's poll. (Its 256th frame came only after
+     about 270 fetches, where the interrupt boots reached it after about
+     80; not explained by anything the boot logged, and not part of the
+     check.)
+   **The check, as it stands:** the count is one interrupt for a frame or
+   a burst of them, so it is at most the frames the device took and not
+   at least: 158 for 260 here. With the mask, "at least a hundred after a
+   hundred pings" is met (158) but is not the property; the property is
+   that the count is not 0 with the unmask and is 0 without it.
 
 10. **Two boards.** Two Pi 4s on one switch, each with its address file
     and cluster keys.
