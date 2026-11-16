@@ -33,6 +33,12 @@
 //!   of the producer index, which a firmware that received anything
 //!   leaves off a multiple of 256: on the Pi 4 it stood at 10, and every
 //!   frame was looked for ten descriptors from where it lay (2026-11-15).
+//! - The descriptor a frame is sent from is counted from 0 too, where the
+//!   set-up points the device's read pointer, as Linux keeps its own
+//!   `write_ptr`. U-Boot takes the consumer index's low byte. Not seen to
+//!   matter on the board: the index read 0 on every boot to 2026-11-15,
+//!   where the two agree. Decided by Hans on 2026-11-16, on receive's
+//!   evidence and Linux's reading.
 //! - A send waits for the device's consumer index to **equal** the
 //!   producer, wrapped to 16 bits. U-Boot's `cons < prod` with an unwrapped
 //!   producer never ends at the 65536th frame. The wait is bounded in time
@@ -188,8 +194,9 @@ const _: () = {
     assert!(TX_MAX_FRAME <= RX_BUF_LEN && RX_BUF_LEN <= DMA_BUFLENGTH_MASK as usize);
     // The longest frame returned fits a buffer after the pad.
     assert!(RX_MAX_FRAME + RX_PAD <= RX_BUF_LEN);
-    // The transmit ring's index is the counter's low byte, and the
-    // receive ring's goes round modulo this: 256 divides 65536.
+    // U-Boot's ring size, which the end address above is computed from.
+    // Both rings' descriptors are counted from 0 apart from the 16-bit
+    // indexes, so neither takes its place from an index's low byte.
     assert!(DESCS == 256);
 };
 
@@ -311,8 +318,14 @@ pub struct Genet {
     /// on the board, 2026-11-15: the firmware left the index at 10 and
     /// the first frame was in descriptor 0.
     rx_desc: usize,
-    /// The transmit producer index: frames handed over, 16 bits.
+    /// The transmit producer index: frames handed over, 16 bits. Like
+    /// `rx_cons`, it counts from wherever the device's index stood.
     tx_prod: u16,
+    /// The descriptor the next frame is sent from: counted from 0, where
+    /// `init` sets `TDMA_READ_PTR`, by the rule `rx_desc` follows.
+    /// U-Boot takes the index's low byte, which agrees only when the
+    /// firmware left it at a multiple of 256.
+    tx_desc: usize,
     started: bool,
     /// Whether a `start` has turned the MAC's receiver on.
     receiving: bool,
@@ -533,7 +546,9 @@ impl Genet {
             bus.write(desc + reg::DESC_LENGTH_STATUS, ((RX_BUF_LEN as u32) << DMA_BUFLENGTH_SHIFT) | DMA_OWN);
         }
 
-        // tx_ring_init. The device's consumer index cannot be set either.
+        // tx_ring_init. The device's consumer index cannot be set either,
+        // so the producer is aligned on it; the read pointer is set to 0,
+        // which is where `tx_desc` starts.
         bus.write(reg::TDMA_SCB_BURST_SIZE, DMA_MAX_BURST_LENGTH);
         bus.write(reg::TDMA_START_ADDR, 0);
         bus.write(reg::TDMA_READ_PTR, 0);
@@ -550,7 +565,7 @@ impl Genet {
         bus.write(reg::TDMA_CTRL, DMA_RING16_EN | DMA_EN);
         set(bus, reg::RDMA_CTRL, DMA_RINGS_0_15_EN, DMA_RING16_EN | DMA_EN);
 
-        Ok(Genet { mac: address, rx_cons, rx_desc: 0, tx_prod, started: false, receiving: false, rx_held: false, drops: Drops::default() })
+        Ok(Genet { mac: address, rx_cons, rx_desc: 0, tx_prod, tx_desc: 0, started: false, receiving: false, rx_held: false, drops: Drops::default() })
     }
 
     /// The station address read before the reset and written back after.
@@ -697,11 +712,12 @@ impl Genet {
         if !self.tx_idle(bus) {
             return Err(TxError::Busy);
         }
-        let desc = reg::TX_DESCS + (usize::from(self.tx_prod) % DESCS) * reg::DESC_SIZE;
+        let desc = reg::TX_DESCS + self.tx_desc * reg::DESC_SIZE;
         bus.write(desc + reg::DESC_ADDRESS_LO, addr as u32);
         bus.write(desc + reg::DESC_ADDRESS_HI, (addr >> 32) as u32);
         bus.write(desc + reg::DESC_LENGTH_STATUS, ((len as u32) << DMA_BUFLENGTH_SHIFT) | DMA_TX_QTAG | DMA_TX_APPEND_CRC | DMA_SOP | DMA_EOP);
         self.tx_prod = self.tx_prod.wrapping_add(1);
+        self.tx_desc = (self.tx_desc + 1) % DESCS;
         bus.write(reg::TDMA_PROD_INDEX, u32::from(self.tx_prod));
         for poll in 0..TX_POLLS {
             if poll != 0 {

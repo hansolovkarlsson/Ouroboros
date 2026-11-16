@@ -1491,6 +1491,16 @@ own. The entries below stand as they were put.
    a warning when the transmit one is off a multiple of 256. Counting
    the transmit descriptor from 0 as well is the change to make; it is
    Hans's to decide, since no boot here can show it wrong or right.
+   **Decided by Hans on 2026-11-16: count from 0, and it is done.**
+   The crate's `tx_desc` counts from 0, where the set-up writes
+   `TDMA_READ_PTR`, apart from the producer index, which is Linux's
+   shape (`bcmgenet_init_tx_ring` sets the pointer and keeps a
+   `write_ptr` of its own). The model now reads a sent frame from its
+   read pointer, a rule taken from Linux and **not seen on the board**;
+   with that and the driver unfixed, three tests failed (a fourth
+   failed for the model's sake and was put right). The kernel's line no
+   longer warns: a transmit index off a multiple of 256 is said as the
+   first boot to test the rule on the board.
    **A fourth boot, the same day (build `788ca3491741`, the diagnostic
    removed and that line added): as the third.** `the indexes the
    firmware left: receive 9, transmit 0`, `first frame received: 60

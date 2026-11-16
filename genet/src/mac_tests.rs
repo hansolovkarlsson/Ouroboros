@@ -49,6 +49,15 @@ struct Dev {
     /// the pointer 0, and the first frame went to descriptor 0 with the
     /// pointer then reading 3.
     rx_at: usize,
+    /// The descriptor the device reads its next frame to send from. **Not
+    /// the consumer index's low byte**, by the same rule as `rx_at`: it
+    /// starts where `TDMA_READ_PTR` was last set (in words, three a
+    /// descriptor) and goes round the ring from there. This is Linux's
+    /// reading (`bcmgenet_init_tx_ring` sets the pointer and keeps a
+    /// `write_ptr` of its own from it), **not seen on the board**: every
+    /// boot to 2026-11-15 found the index at 0, where the two readings
+    /// agree.
+    tx_at: usize,
     tx_cons: u16,
     /// Where the consumer index goes once `tx_lag_left` reads have passed.
     tx_target: u16,
@@ -165,6 +174,7 @@ fn board() -> Dev {
         reads: Vec::new(),
         rx_prod: 0,
         rx_at: 0,
+        tx_at: 0,
         tx_cons: 0,
         tx_target: 0,
         tx_lag: 0,
@@ -375,6 +385,10 @@ impl Bus for Dev {
         if offset == 0x3000 {
             self.rx_at = (value as usize / 3) % 256;
         }
+        // TDMA_READ_PTR, in words: where the device reads next.
+        if offset == 0x5000 {
+            self.tx_at = (value as usize / 3) % 256;
+        }
         match offset {
             // The two indexes the device owns.
             RDMA_PROD | TDMA_CONS => {}
@@ -393,8 +407,10 @@ impl Bus for Dev {
                 if self.tx_running() {
                     let mut index = self.tx_target;
                     while index != value as u16 {
-                        let desc = TX_DESC + usize::from(index % 256) * 12;
+                        let desc = TX_DESC + self.tx_at * 12;
                         self.sent.push((u64::from(self.reg(desc + 4)) | u64::from(self.reg(desc + 8)) << 32, self.reg(desc)));
+                        self.tx_at = (self.tx_at + 1) % 256;
+                        self.regs.insert(0x5000, (self.tx_at * 3) as u32);
                         index = index.wrapping_add(1);
                     }
                     self.tx_target = value as u16;
@@ -1022,9 +1038,10 @@ fn a_send_fills_the_descriptor_then_moves_the_producer() {
     d.tx_target = 7;
     let mut g = up(&mut d);
     assert_eq!(g.tx_send(&mut d, TX_ADDR, 60), Ok(()));
-    // Descriptor 7: address low, high, then 60 << 16 with the tag 0x3f at
-    // bit 7, append-CRC, SOP and EOP. Then the producer, 8.
-    assert_eq!(d.ops, [W(0x4000 + 7 * 12 + 4, 0x0000_1000), W(0x4000 + 7 * 12 + 8, 2), W(0x4000 + 7 * 12, 0x003c_7fc0), W(TDMA_PROD, 8)]);
+    // Descriptor 0, where the set-up pointed the device, whatever the
+    // index: address low, high, then 60 << 16 with the tag 0x3f at bit 7,
+    // append-CRC, SOP and EOP. Then the producer, 8.
+    assert_eq!(d.ops, [W(0x4000 + 4, 0x0000_1000), W(0x4000 + 8, 2), W(0x4000, 0x003c_7fc0), W(TDMA_PROD, 8)]);
     assert_eq!(d.sent, [(TX_ADDR, 0x003c_7fc0)]);
 }
 
@@ -1040,8 +1057,28 @@ fn the_transmit_counter_wraps_at_65536_and_the_ring_at_256() {
     let producers: Vec<u32> = d.writes().iter().filter(|w| w.0 == TDMA_PROD).map(|w| w.1).collect();
     assert_eq!(producers, [0xffff, 0, 1, 2]);
     let descriptors: Vec<usize> = d.writes().iter().filter(|w| (TX_DESC..TX_DESC + 256 * 12).contains(&w.0) && (w.0 - TX_DESC).is_multiple_of(12)).map(|w| (w.0 - TX_DESC) / 12).collect();
-    assert_eq!(descriptors, [254, 255, 0, 1]);
-    assert_eq!(d.sent.len(), 4);
+    assert_eq!(descriptors, [0, 1, 2, 3]);
+    assert_eq!(d.sent, [(TX_ADDR, 0x003c_7fc0), (TX_ADDR, 0x003d_7fc0), (TX_ADDR, 0x003e_7fc0), (TX_ADDR, 0x003f_7fc0)]);
+    assert!(d.violations.is_empty(), "{:?}", d.violations);
+}
+
+#[test]
+fn the_transmit_ring_goes_round_from_descriptor_0_whatever_the_counter_started_at() {
+    // 300 sends with the index from 0x00f0, each a length of its own, so
+    // a frame taken from the wrong descriptor is seen by its length: the
+    // descriptors are 0 to 255 and round again, never the counter's low
+    // byte. The same rule as receive's; see `tx_at` for whose reading it is.
+    let mut d = board();
+    d.tx_cons = 0x00f0;
+    d.tx_target = 0x00f0;
+    let mut g = up(&mut d);
+    for n in 0..300usize {
+        let len = 60 + n;
+        assert_eq!(g.tx_send(&mut d, TX_ADDR + n as u64, len), Ok(()), "send {n}");
+        let written = d.writes().iter().rev().find(|w| (TX_DESC..TX_DESC + 256 * 12).contains(&w.0) && (w.0 - TX_DESC).is_multiple_of(12)).unwrap().0;
+        assert_eq!((written - TX_DESC) / 12, n % 256, "send {n}");
+        assert_eq!(d.sent.last(), Some(&(TX_ADDR + n as u64, ((len as u32) << 16) | 0x7fc0)), "send {n}");
+    }
     assert!(d.violations.is_empty(), "{:?}", d.violations);
 }
 
@@ -1095,10 +1132,12 @@ fn a_frame_the_device_never_takes_blocks_the_next_send_until_it_does() {
     assert_eq!(g.tx_send(&mut d, TX_ADDR, 100), Err(TxError::Busy));
     assert!(d.ops.is_empty());
     assert!(d.sent.is_empty());
-    // The device comes back and takes it: the producer is where the
-    // driver left it, so the next send lines up.
+    // The device comes back and takes it, from descriptor 0, so it next
+    // reads descriptor 1: the producer is where the driver left it, so
+    // the next send lines up.
     d.tx_dead = false;
     d.tx_target = 1;
+    d.tx_at = 1;
     assert_eq!(g.tx_send(&mut d, TX_ADDR, 100), Ok(()));
     assert_eq!(d.writes().last(), Some(&(TDMA_PROD, 2)));
     assert_eq!(d.sent, [(TX_ADDR, 0x0064_7fc0)]);
