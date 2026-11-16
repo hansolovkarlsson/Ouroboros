@@ -16,6 +16,13 @@ parttable = { path = "../../../parttable" }
 # shipped fsd.bin, and it says so at startup.
 [features]
 disk-gate-rig = []
+# test-fsd-restart's build alone (`make test-fsd-restart`): any request
+# with a path that ends in `restart-rig-fault` makes fsd fault and
+# `restart-rig-spin` makes it spin, so a rig can have the supervisor restart fsd at a moment it
+# chooses, which no request to the shipped fsd does. Built into
+# target/fsd-restart-rig, apart from the shipped fsd.bin, and it says so at
+# startup. netd's `restart-rig` is the same for netd.
+restart-rig = []
 
 [[bin]]
 name = "fsd"
