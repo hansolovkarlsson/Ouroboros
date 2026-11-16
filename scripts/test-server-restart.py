@@ -23,9 +23,11 @@ trigger only it receives:
 
 - fsd: any request whose path ends in `restart-rig-fault` or
   `restart-rig-spin` (`cat /restart-rig-fault`);
-- cond: text to write that holds the word. Typing it would reach cond a key
-  at a time through the shell's echo, so two files holding it are staged on
-  the image and `cat`ed;
+- cond: a write that is the word and a line end. Typing it would reach cond
+  a key at a time through the shell's echo, so three files are staged on the
+  image's root and `cat`ed: RIGFAULT.TXT, RIGSPIN.TXT, and RIGECHO.TXT, whose
+  `restart-rig-echo` cond answers with a line of its own (the serving check
+  below);
 - accountd: a request naming the account (`passwd restart-rig-fault` as
   root, after its two prompts).
 
@@ -51,7 +53,7 @@ listing after (the shell could not find `ls`, the filesystem being gone). A
 thirteenth check, that the kernel never said it had no kept image, passed in
 the control too (an unregistered server never reaches that line), so it
 could not fail and was removed. cond's and accountd's controls, the same day,
-refused their slot in `register`: 7 of 12 checks failed for each. cond's
+refused their slot in `register`: 7 of the then 12 checks failed for each. cond's
 first control failed only 5: its check then, that an `echo` printed, passed
 with cond dead, which is why cond now answers a word of its own.
 
@@ -89,13 +91,17 @@ def cat(path):
 
 
 def passwd(name):
-    """`passwd NAME` as root: two prompts, then the request to accountd."""
+    """`passwd NAME` as root: two prompts, then the request to accountd. A
+    prompt that does not come is its own failed check, so a trigger that
+    never reached accountd is not reported as a restart that did not
+    happen; nothing more is typed into a shell that is not asking."""
     def go(g):
         g.type_line(f"passwd {name}")
-        g.wait_for("New password", timeout=20)
-        g.type_line("rigpass")
-        g.wait_for("Retype", timeout=20)
-        g.type_line("rigpass")
+        for prompt in ("New password", "Retype"):
+            if not check(g.wait_for(prompt, timeout=20), f"`passwd {name}` prompts {prompt!r}"):
+                return False
+            g.type_line("rigpass")
+        return True
     return go
 
 
@@ -121,7 +127,8 @@ def answers(g):
 
 def no_such_user(g):
     mark = len(g.transcript())
-    passwd("nosuchaccount")(g)
+    if not passwd("nosuchaccount")(g):
+        return False, "`passwd nosuchaccount` did not prompt"
     g.wait_for(PROMPT, timeout=30)
     out = g.transcript()[mark:]
     return "passwd: no such user" in out, f"`passwd nosuchaccount` says no such user: {out.strip()[-80:]!r}"
@@ -151,6 +158,12 @@ failed = 0
 checks = 0
 
 
+def restarted(slot):
+    """The kernel's line for a supervised restart of `slot`, its attempt
+    number captured."""
+    return rf"server slot {slot} restarted \(attempt (\d+)"
+
+
 def check(ok, what):
     global failed, checks
     checks += 1
@@ -163,8 +176,8 @@ def stage(server, s, copy, rig_bin):
     """`copy`: esp.img with the server's image the rig's build, and the
     files its trigger needs (what macOS leaves on a volume it mounts is
     removed, as the Makefile's image recipes do)."""
-    if not rig_bin or not os.path.exists(rig_bin):
-        sys.exit(f"test-server-restart is run by `make test-{server}-restart`, which builds the rig's {server} and names it")
+    if not os.path.exists(rig_bin):
+        sys.exit(f"test-{server}-restart: RIG_BIN {rig_bin} does not exist - `make test-{server}-restart` builds it")
     shutil.copyfile(IMAGE, copy)
     mp = drive_qemu.attach(copy, readonly=False)
     try:
@@ -182,10 +195,9 @@ def stage(server, s, copy, rig_bin):
 def round_(g, server, s, label, trigger, reason):
     """Pull `trigger`, have the server restarted, and check a fresh one
     serves."""
-    restarted = rf"server slot {s['slot']} restarted \(attempt (\d+)"
     before = len(g.transcript())
     trigger(g)
-    ok = g.wait_for(restarted, timeout=40)
+    ok = g.wait_for(restarted(s["slot"]), timeout=40)
     text = g.transcript()[before:]
     check(ok and reason in text, f"{label}: the kernel restarted server slot {s['slot']} ({reason!r} in its lines)")
     # The fresh server's line may have come with the restart's: read the
@@ -206,7 +218,7 @@ def main(server):
     try:
         # Inside the try, so a staging that fails part way still removes
         # its copy of the image.
-        stage(server, s, copy, os.environ.get("RIG_BIN"))
+        stage(server, s, copy, drive_qemu.required_env("RIG_BIN", f"test-{server}-restart"))
         g = drive_qemu.Guest(copy, label=f"[{server}-restart] ")
         if not check(g.run([("login:", "root"), ("assword", "root"), ("# ", "")]), "the guest boots to root's shell"):
             return failed
@@ -218,7 +230,7 @@ def main(server):
         round_(g, server, s, "fault", s["fault"], f"EL0 FAULT task={s['slot']}")
         round_(g, server, s, "spin", s["spin"], f"slot {s['slot']} wedged")
         text = g.transcript()
-        restarts = [int(n) for n in re.findall(rf"server slot {s['slot']} restarted \(attempt (\d+)", text)]
+        restarts = [int(n) for n in re.findall(restarted(s["slot"]), text)]
         check(restarts == [1, 2], f"{server} was restarted twice, once a round: attempts {restarts}")
         check(g.proc.poll() is None, "the guest is alive at the end")
     finally:
@@ -229,7 +241,8 @@ def main(server):
                 f.write(transcript)
         if os.path.exists(copy):
             os.unlink(copy)
-    want = 4 + 2 * 3 + 2
+    # passwd's two prompt checks, each time it runs: before, and twice a round.
+    want = 4 + 2 * 3 + 2 + (2 * 5 if server == "accountd" else 0)
     if checks != want and not failed:
         print(f"[FAIL] {checks} checks ran, want {want}", flush=True)
         return 1

@@ -11,7 +11,7 @@ accounts = { path = "../../../accounts" }
 # test-accountd-restart's build alone (`make test-accountd-restart`): a request naming the account `restart-rig-fault`
 # makes accountd fault and `restart-rig-spin` makes it spin, so a rig
 # can have the supervisor restart accountd at a moment it chooses, which no request
-# to the shipped accountd does. Built into target/accountd-restart-rig, apart from the
+# to the shipped accountd does. Built into target/restart-rigs, apart from the
 # shipped accountd.bin, and it says so at startup. fsd's and netd's `restart-rig`
 # are the same for them.
 [features]

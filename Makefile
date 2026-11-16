@@ -41,16 +41,19 @@ FSD_GATE_BIN := $(FSD_GATE_DIR)/$(USER_TARGET)/release/fsd.bin
 NETD_RESTART_DIR := target/restart-rig
 NETD_RESTART_ELF := $(NETD_RESTART_DIR)/$(USER_TARGET)/release/netd
 NETD_RESTART_BIN := $(NETD_RESTART_DIR)/$(USER_TARGET)/release/netd.bin
-# fsd built for test-fsd-restart alone (fsd's `restart-rig` feature), in a
-# target dir of its own for the reason FSD_GATE_DIR has one.
-FSD_RESTART_DIR := target/fsd-restart-rig
+# fsd, cond and accountd built for their restart rigs alone (each one's
+# `restart-rig` feature), apart from target/ for the reason FSD_GATE_DIR is.
+# One dir for the three: the binaries are named apart, and the crates they
+# share (ulib, syscall-abi, ninep-abi, accounts) are built once, not once a
+# rig (the review of #474). netd's rig keeps NETD_RESTART_DIR.
+RESTART_RIGS_DIR := target/restart-rigs
+FSD_RESTART_DIR := $(RESTART_RIGS_DIR)
 FSD_RESTART_ELF := $(FSD_RESTART_DIR)/$(USER_TARGET)/release/fsd
 FSD_RESTART_BIN := $(FSD_RESTART_DIR)/$(USER_TARGET)/release/fsd.bin
-# cond and accountd built for their restart rigs alone, the same way.
-COND_RESTART_DIR := target/cond-restart-rig
+COND_RESTART_DIR := $(RESTART_RIGS_DIR)
 COND_RESTART_ELF := $(COND_RESTART_DIR)/$(USER_TARGET)/release/cond
 COND_RESTART_BIN := $(COND_RESTART_DIR)/$(USER_TARGET)/release/cond.bin
-ACCOUNTD_RESTART_DIR := target/accountd-restart-rig
+ACCOUNTD_RESTART_DIR := $(RESTART_RIGS_DIR)
 ACCOUNTD_RESTART_ELF := $(ACCOUNTD_RESTART_DIR)/$(USER_TARGET)/release/accountd
 ACCOUNTD_RESTART_BIN := $(ACCOUNTD_RESTART_DIR)/$(USER_TARGET)/release/accountd.bin
 UPPER_ELF    := target/$(USER_TARGET)/release/upper

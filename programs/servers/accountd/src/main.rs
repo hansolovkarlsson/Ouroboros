@@ -132,7 +132,7 @@ fn handle(req: &[u8], reply: &mut [u8]) -> usize {
     let a0 = read_u64(req, 8) as usize;
     let a1 = read_u64(req, 16) as usize;
     let payload = &req[REQ_HDR..];
-    restart_rig(payload);
+    restart_rig(&payload[..a0.min(payload.len())]);
 
     // Who is actually asking. The kernel binds a credential to each message when
     // it is SENT, so it cannot be spoofed by the request's contents - which is
@@ -196,19 +196,19 @@ fn handle(req: &[u8], reply: &mut [u8]) -> usize {
 
 /// The restart rig's build alone (`restart-rig`, never the shipped accountd):
 /// the two ways the supervisor comes to restart a server, on request, by the
-/// account a request names, which every op carries first in its payload.
-/// Before any check of who asks, so `passwd restart-rig-fault` as root reaches
-/// it.
-fn restart_rig(payload: &[u8]) {
+/// account a request names: every op carries the name first in its payload,
+/// `a0` bytes long, and the whole name must be the word. Before any check of
+/// who asks, so `passwd restart-rig-fault` as root reaches it.
+fn restart_rig(name: &[u8]) {
     if !cfg!(feature = "restart-rig") {
         return;
     }
-    if payload.starts_with(b"restart-rig-fault") {
+    if name == b"restart-rig-fault" {
         // SAFETY: none, by design: a read of an address no task maps, which
         // the kernel answers by ending this task.
         unsafe { core::ptr::read_volatile(8 as *const u8) };
     }
-    if payload.starts_with(b"restart-rig-spin") {
+    if name == b"restart-rig-spin" {
         loop {
             core::hint::spin_loop();
         }
