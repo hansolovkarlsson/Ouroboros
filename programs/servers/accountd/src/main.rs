@@ -76,6 +76,9 @@ const PW_MAX: usize = 128;
 #[no_mangle]
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
+    if cfg!(feature = "restart-rig") {
+        ulib::con_write(b"accountd: the restart rig's build: the account restart-rig-fault faults it, restart-rig-spin spins it\r\n");
+    }
     ulib::con_write(b"accountd: account server ready\r\n");
     let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];
     let mut reply = [0u8; syscall_abi::MSG_MAX_LEN as usize];
@@ -129,6 +132,7 @@ fn handle(req: &[u8], reply: &mut [u8]) -> usize {
     let a0 = read_u64(req, 8) as usize;
     let a1 = read_u64(req, 16) as usize;
     let payload = &req[REQ_HDR..];
+    restart_rig(payload);
 
     // Who is actually asking. The kernel binds a credential to each message when
     // it is SENT, so it cannot be spoofed by the request's contents - which is
@@ -187,6 +191,27 @@ fn handle(req: &[u8], reply: &mut [u8]) -> usize {
             status(reply, upgrade(caller_uid, name, pw, new))
         }
         _ => status(reply, syscall_abi::ACCT_ERR_BAD_REQUEST),
+    }
+}
+
+/// The restart rig's build alone (`restart-rig`, never the shipped accountd):
+/// the two ways the supervisor comes to restart a server, on request, by the
+/// account a request names, which every op carries first in its payload.
+/// Before any check of who asks, so `passwd restart-rig-fault` as root reaches
+/// it.
+fn restart_rig(payload: &[u8]) {
+    if !cfg!(feature = "restart-rig") {
+        return;
+    }
+    if payload.starts_with(b"restart-rig-fault") {
+        // SAFETY: none, by design: a read of an address no task maps, which
+        // the kernel answers by ending this task.
+        unsafe { core::ptr::read_volatile(8 as *const u8) };
+    }
+    if payload.starts_with(b"restart-rig-spin") {
+        loop {
+            core::hint::spin_loop();
+        }
     }
 }
 

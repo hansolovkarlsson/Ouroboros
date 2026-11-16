@@ -50,6 +50,9 @@ const NP_HDR: usize = ninep_abi::NP_REQ_PAYLOAD as usize;
 
 fn main() -> ! {
     let mut backend = detect_backend();
+    if cfg!(feature = "restart-rig") {
+        write_text(&mut backend, b"cond: the restart rig's build: text holding restart-rig-fault faults it, restart-rig-spin spins it\r\n");
+    }
     write_text(&mut backend, b"cond: console server ready\r\n");
 
     let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];
@@ -88,9 +91,31 @@ fn handle(backend: &mut Backend, req: &[u8], reply: &mut [u8]) -> usize {
         let text_len = read_u64(req, 24) as usize;
         let payload = &req[NP_HDR..];
         let n = text_len.min(payload.len()).min(DATA_MAX);
+        restart_rig(&payload[..n]);
         write_text(backend, &payload[..n]);
     }
     REPLY_PAYLOAD
+}
+
+/// The restart rig's build alone (`restart-rig`, never the shipped cond): the
+/// two ways the supervisor comes to restart a server, on request, by text
+/// asked to be written. Held whole in one write: a rig `cat`s a file that
+/// holds it, since typing it would reach cond a key at a time.
+fn restart_rig(text: &[u8]) {
+    if !cfg!(feature = "restart-rig") {
+        return;
+    }
+    let holds = |what: &[u8]| text.windows(what.len()).any(|w| w == what);
+    if holds(b"restart-rig-fault") {
+        // SAFETY: none, by design: a read of an address no task maps, which
+        // the kernel answers by ending this task.
+        unsafe { core::ptr::read_volatile(8 as *const u8) };
+    }
+    if holds(b"restart-rig-spin") {
+        loop {
+            core::hint::spin_loop();
+        }
+    }
 }
 
 // ---------------------------------------------------------------------
