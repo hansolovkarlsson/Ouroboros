@@ -415,6 +415,13 @@ pub(crate) struct Device {
     /// only because the IRQ path reaches the device through `&self`; one
     /// core at a time does, under the kernel lock.
     interrupts: AtomicU32,
+    /// DIAGNOSTIC, temporary (step 9's extra interrupts, 304 taken at 256
+    /// frames on 2026-11-16): interrupts whose receive done read clear on
+    /// entry, that found no frame waiting, and whose receive done still
+    /// read set right after the clear.
+    diag_clear_on_entry: AtomicU32,
+    diag_no_frame: AtomicU32,
+    diag_set_after: AtomicU32,
     /// The one PHY, by MDIO address and identifier, once it was found and
     /// its set-up did not fail: what a send asks for the link when the
     /// boot found none.
@@ -468,6 +475,9 @@ pub(crate) unsafe fn init(quieted: Quieted, dma_noncoherent: bool) -> Option<Dev
             genet,
             intid,
             interrupts: AtomicU32::new(0),
+            diag_clear_on_entry: AtomicU32::new(0),
+            diag_no_frame: AtomicU32::new(0),
+            diag_set_after: AtomicU32::new(0),
             phy: None,
             sent: 0,
             received: 0,
@@ -771,6 +781,13 @@ impl Device {
                 d.oversize,
                 self.interrupts.load(Ordering::Relaxed)
             );
+            // DIAGNOSTIC, temporary.
+            console::println!(
+                "Ouroboros kernel: genet: DIAGNOSTIC: of those interrupts, receive done read clear on entry {}, no frame waiting {}, receive done still set after the clear {}",
+                self.diag_clear_on_entry.load(Ordering::Relaxed),
+                self.diag_no_frame.load(Ordering::Relaxed),
+                self.diag_set_after.load(Ordering::Relaxed)
+            );
         }
     }
 
@@ -790,7 +807,18 @@ impl Device {
     /// taken has a line.
     pub(crate) fn ack_interrupt(&self) {
         let mut bus = self.bus;
+        // DIAGNOSTIC, temporary: the state on entry and after the clear.
+        let done = genet::mac::IRQ_RX_DONE;
+        if genet::Bus::read(&mut bus, genet::reg::INTRL2_0_STAT) & done == 0 {
+            self.diag_clear_on_entry.fetch_add(1, Ordering::Relaxed);
+        }
+        if !self.genet.has_frame(&mut bus) {
+            self.diag_no_frame.fetch_add(1, Ordering::Relaxed);
+        }
         self.genet.ack_rx_interrupt(&mut bus);
+        if genet::Bus::read(&mut bus, genet::reg::INTRL2_0_STAT) & done != 0 {
+            self.diag_set_after.fetch_add(1, Ordering::Relaxed);
+        }
         if self.interrupts.fetch_add(1, Ordering::Relaxed) == 0 {
             console::println!(
                 "Ouroboros kernel: genet: first receive interrupt taken (INTID {}), and cleared at the device",
