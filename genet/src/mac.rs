@@ -34,11 +34,12 @@
 //!   leaves off a multiple of 256: on the Pi 4 it stood at 10, and every
 //!   frame was looked for ten descriptors from where it lay (2026-11-15).
 //! - The descriptor a frame is sent from is counted from 0 too, where the
-//!   set-up points the device's read pointer, as Linux keeps its own
-//!   `write_ptr`. U-Boot takes the consumer index's low byte. Not seen to
-//!   matter on the board: the index read 0 on every boot to 2026-11-15,
-//!   where the two agree. Decided by Hans on 2026-11-16, on receive's
-//!   evidence and Linux's reading.
+//!   set-up points the device's read pointer. U-Boot takes the consumer
+//!   index's low byte. **Assumed for transmit, not seen:** the board
+//!   showed the rule for receive, and read the transmit index 0 on every
+//!   boot to 2026-11-15, where the two agree. Linux does not settle it,
+//!   since it writes both indexes 0 at the set-up. Decided by Hans on
+//!   2026-11-16 on receive's evidence, the merge held for a board check.
 //! - A send waits for the device's consumer index to **equal** the
 //!   producer, wrapped to 16 bits. U-Boot's `cons < prod` with an unwrapped
 //!   producer never ends at the 65536th frame. The wait is bounded in time
@@ -322,9 +323,10 @@ pub struct Genet {
     /// `rx_cons`, it counts from wherever the device's index stood.
     tx_prod: u16,
     /// The descriptor the next frame is sent from: counted from 0, where
-    /// `init` sets `TDMA_READ_PTR`, by the rule `rx_desc` follows.
-    /// U-Boot takes the index's low byte, which agrees only when the
-    /// firmware left it at a multiple of 256.
+    /// `init` sets `TDMA_READ_PTR`, by the rule `rx_desc` follows, which
+    /// the board showed for receive and not yet for transmit. U-Boot
+    /// takes the index's low byte, which agrees only when the firmware
+    /// left it at a multiple of 256.
     tx_desc: usize,
     started: bool,
     /// Whether a `start` has turned the MAC's receiver on.
@@ -546,8 +548,9 @@ impl Genet {
             bus.write(desc + reg::DESC_LENGTH_STATUS, ((RX_BUF_LEN as u32) << DMA_BUFLENGTH_SHIFT) | DMA_OWN);
         }
 
-        // tx_ring_init. The device's consumer index cannot be set either,
-        // so the producer is aligned on it; the read pointer is set to 0,
+        // tx_ring_init. U-Boot says the device's consumer index cannot be
+        // set (Linux writes it 0 regardless; not tried here), so the
+        // producer is aligned on it; the read pointer is set to 0,
         // which is where `tx_desc` starts.
         bus.write(reg::TDMA_SCB_BURST_SIZE, DMA_MAX_BURST_LENGTH);
         bus.write(reg::TDMA_START_ADDR, 0);

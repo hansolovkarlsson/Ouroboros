@@ -1491,21 +1491,35 @@ own. The entries below stand as they were put.
    a warning when the transmit one is off a multiple of 256. Counting
    the transmit descriptor from 0 as well is the change to make; it is
    Hans's to decide, since no boot here can show it wrong or right.
-   **Decided by Hans on 2026-11-16: count from 0, and it is done.**
-   The crate's `tx_desc` counts from 0, where the set-up writes
-   `TDMA_READ_PTR`, apart from the producer index, which is Linux's
-   shape (`bcmgenet_init_tx_ring` sets the pointer and keeps a
-   `write_ptr` of its own). The model now reads a sent frame from its
-   read pointer, a rule taken from Linux and **not seen on the board**;
-   with that and the driver unfixed, three tests failed (a fourth
-   failed for the model's sake and was put right). The kernel's line no
-   longer warns: a transmit index off a multiple of 256 is said as the
-   first boot to test the rule on the board.
    **A fourth boot, the same day (build `788ca3491741`, the diagnostic
    removed and that line added): as the third.** `the indexes the
    firmware left: receive 9, transmit 0`, `first frame received: 60
    bytes, from buffer 0`, `ping 10.0.2.2` answered, and one file fetched
    from the board equal to its staged copy.
+   **Decided by Hans on 2026-11-16: count the transmit descriptor from
+   0 (#472), the merge held for a board check.** The crate's `tx_desc`
+   counts from 0, where the set-up writes `TDMA_READ_PTR`, apart from
+   the producer index. The model reads a sent frame from its read
+   pointer; with that and the driver unfixed, three tests failed.
+   **The rule is assumed for transmit, not seen.** Its evidence is the
+   receive ring's, above. #472 first cited Linux's `write_ptr` for it,
+   and its review found that Linux cannot tell the two readings apart:
+   `bcmgenet_init_tx_ring` writes 0 to both indexes, so with ring 16
+   starting at descriptor `tx_queues * tx_bds_per_q` the read pointer
+   and "the ring's start plus the index" name the same descriptor. With
+   our ring starting at 0, the second reading is U-Boot's low byte. A
+   wrong rule would fail silently, the device sending a stale
+   descriptor while its index moves, so the kernel's line still warns
+   when the transmit index is off a multiple of 256.
+   **The board check that settles it,** not yet built: one boot that
+   writes a value off a multiple of 256 (10, say) to `TDMA_CONS_INDEX`
+   before the set-up reads it, and reads it back. If it takes, the
+   board's sends start from an index of 10, the case in question, and
+   a ping answered and frames whole on the wire (`tcpdump`) show the
+   rule right; with the low byte restored for one boot as the control,
+   they must not be. If it does not take, as U-Boot says, the index
+   cannot be put where the question shows, and the rule stays assumed
+   until a firmware leaves it there.
    **Still not shown:** a ping of the Pi from the Mac and a `fetch` by
    address (`netd` does neither), a frame addressed to the board longer
    than 165 bytes, the longest in the capture (the transfers' large

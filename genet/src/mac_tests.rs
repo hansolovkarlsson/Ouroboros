@@ -52,11 +52,12 @@ struct Dev {
     /// The descriptor the device reads its next frame to send from. **Not
     /// the consumer index's low byte**, by the same rule as `rx_at`: it
     /// starts where `TDMA_READ_PTR` was last set (in words, three a
-    /// descriptor) and goes round the ring from there. This is Linux's
-    /// reading (`bcmgenet_init_tx_ring` sets the pointer and keeps a
-    /// `write_ptr` of its own from it), **not seen on the board**: every
-    /// boot to 2026-11-15 found the index at 0, where the two readings
-    /// agree.
+    /// descriptor) and goes round the ring from there. **Assumed, not
+    /// seen:** the board showed this rule for the receive ring
+    /// (2026-11-15), and every boot found the transmit index at 0, where
+    /// it and the low byte agree. Linux does not settle it: it writes both
+    /// indexes 0 at the set-up, so the pointer and the ring's start plus
+    /// the index name the same descriptor there.
     tx_at: usize,
     tx_cons: u16,
     /// Where the consumer index goes once `tx_lag_left` reads have passed.
@@ -321,6 +322,30 @@ impl Dev {
         self.rx_prod = (self.rx_prod & 0xffff_0000) | u32::from(prod.wrapping_add(1));
         true
     }
+    /// The device takes every descriptor queued since it last did, from
+    /// its read pointer on, which it moves (`tx_at`, and the register),
+    /// and the consumer index follows after `tx_lag` reads.
+    fn take_queued(&mut self) {
+        let prod = self.reg(TDMA_PROD) as u16;
+        let mut index = self.tx_target;
+        while index != prod {
+            let desc = TX_DESC + self.tx_at * 12;
+            self.sent.push((u64::from(self.reg(desc + 4)) | u64::from(self.reg(desc + 8)) << 32, self.reg(desc)));
+            self.tx_at = (self.tx_at + 1) % 256;
+            self.regs.insert(0x5000, (self.tx_at * 3) as u32);
+            index = index.wrapping_add(1);
+        }
+        self.tx_target = prod;
+        self.tx_lag_left = self.tx_lag;
+    }
+    /// A device that stopped taking frames (`tx_dead`) starts again, and
+    /// takes what was queued meanwhile as it would have.
+    fn revive(&mut self) {
+        self.tx_dead = false;
+        if self.tx_running() {
+            self.take_queued();
+        }
+    }
     /// A whole, clean frame of `payload` bytes.
     fn deliver(&mut self, payload: u32) -> bool {
         self.deliver_raw(payload + 2, 0x6000)
@@ -405,16 +430,7 @@ impl Bus for Dev {
                 }
                 self.regs.insert(offset, value);
                 if self.tx_running() {
-                    let mut index = self.tx_target;
-                    while index != value as u16 {
-                        let desc = TX_DESC + self.tx_at * 12;
-                        self.sent.push((u64::from(self.reg(desc + 4)) | u64::from(self.reg(desc + 8)) << 32, self.reg(desc)));
-                        self.tx_at = (self.tx_at + 1) % 256;
-                        self.regs.insert(0x5000, (self.tx_at * 3) as u32);
-                        index = index.wrapping_add(1);
-                    }
-                    self.tx_target = value as u16;
-                    self.tx_lag_left = self.tx_lag;
+                    self.take_queued();
                 }
             }
             MDIO => {
@@ -1046,7 +1062,7 @@ fn a_send_fills_the_descriptor_then_moves_the_producer() {
 }
 
 #[test]
-fn the_transmit_counter_wraps_at_65536_and_the_ring_at_256() {
+fn the_transmit_counter_wraps_at_65536_apart_from_the_descriptors() {
     let mut d = board();
     d.tx_cons = 0xfffe;
     d.tx_target = 0xfffe;
@@ -1067,7 +1083,8 @@ fn the_transmit_ring_goes_round_from_descriptor_0_whatever_the_counter_started_a
     // 300 sends with the index from 0x00f0, each a length of its own, so
     // a frame taken from the wrong descriptor is seen by its length: the
     // descriptors are 0 to 255 and round again, never the counter's low
-    // byte. The same rule as receive's; see `tx_at` for whose reading it is.
+    // byte. The one test of the transmit ring's wrap at 256. The rule is
+    // receive's, assumed for transmit: see `tx_at`.
     let mut d = board();
     d.tx_cons = 0x00f0;
     d.tx_target = 0x00f0;
@@ -1132,15 +1149,13 @@ fn a_frame_the_device_never_takes_blocks_the_next_send_until_it_does() {
     assert_eq!(g.tx_send(&mut d, TX_ADDR, 100), Err(TxError::Busy));
     assert!(d.ops.is_empty());
     assert!(d.sent.is_empty());
-    // The device comes back and takes it, from descriptor 0, so it next
-    // reads descriptor 1: the producer is where the driver left it, so
-    // the next send lines up.
-    d.tx_dead = false;
-    d.tx_target = 1;
-    d.tx_at = 1;
+    // The device comes back and takes it: the producer is where the
+    // driver left it, so the next send lines up, in the descriptor after.
+    d.revive();
+    assert_eq!(d.sent, [(TX_ADDR, 0x003c_7fc0)]);
     assert_eq!(g.tx_send(&mut d, TX_ADDR, 100), Ok(()));
     assert_eq!(d.writes().last(), Some(&(TDMA_PROD, 2)));
-    assert_eq!(d.sent, [(TX_ADDR, 0x0064_7fc0)]);
+    assert_eq!(d.sent, [(TX_ADDR, 0x003c_7fc0), (TX_ADDR, 0x0064_7fc0)]);
 }
 
 #[test]
@@ -1154,8 +1169,7 @@ fn tx_idle_says_when_the_shared_buffer_may_be_written() {
     // The frame is still the device's: one read says so, nothing written.
     assert!(!g.tx_idle(&mut d));
     assert!(d.ops.is_empty());
-    d.tx_dead = false;
-    d.tx_target = 1;
+    d.revive();
     assert!(g.tx_idle(&mut d));
 }
 

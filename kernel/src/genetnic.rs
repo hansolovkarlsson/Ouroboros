@@ -478,10 +478,12 @@ pub(crate) unsafe fn init(quieted: Quieted, dma_noncoherent: bool) -> Option<Dev
     // set-up cannot change. Neither ring depends on its own: the crate
     // counts both rings' descriptors from 0 (receive since 2026-11-15,
     // when the index stood at 10 and 9 and every frame was looked for that
-    // far from where it lay; transmit since 2026-11-16). The transmit
-    // index has read 0 on every boot, where counting from 0 and U-Boot's
-    // low byte agree, so a boot that finds it elsewhere is the first to
-    // test the transmit rule on the board, and says so.
+    // far from where it lay; transmit since 2026-11-16, on receive's
+    // evidence alone). The transmit index has read 0 on every boot, where
+    // counting from 0 and U-Boot's low byte agree. A boot that finds it
+    // elsewhere is the first to test the transmit rule, and a wrong rule
+    // fails silently there (the device takes a stale descriptor and the
+    // index still moves, so no send times out): it is said as a warning.
     let rx_index = genet::Bus::read(&mut device.bus, genet::reg::RDMA_PROD_INDEX) & genet::mac::DMA_INDEX_MASK;
     let tx_index = genet::Bus::read(&mut device.bus, genet::reg::TDMA_CONS_INDEX) & genet::mac::DMA_INDEX_MASK;
     console::println!(
@@ -489,7 +491,7 @@ pub(crate) unsafe fn init(quieted: Quieted, dma_noncoherent: bool) -> Option<Dev
         if tx_index.is_multiple_of(256) {
             ""
         } else {
-            " (transmit off a multiple of 256: the sends below test the transmit ring counted from 0)"
+            ": WARNING: the transmit index is off a multiple of 256, the first boot to test the transmit ring counted from 0; a wrong rule sends stale descriptors with no timeout, so check the wire"
         }
     );
     // The MDIO scan's version gate reads the version alone.
