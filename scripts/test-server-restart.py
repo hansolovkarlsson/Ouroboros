@@ -51,9 +51,9 @@ listing after (the shell could not find `ls`, the filesystem being gone). A
 thirteenth check, that the kernel never said it had no kept image, passed in
 the control too (an unregistered server never reaches that line), so it
 could not fail and was removed. cond's and accountd's controls, the same day,
-refused their slot in `register`: 5 and 7 of 12 checks failed. cond's first
-control showed its check then, that an `echo` printed, passing with cond
-dead, which is why cond now answers a word of its own.
+refused their slot in `register`: 7 of 12 checks failed for each. cond's
+first control failed only 5: its check then, that an `echo` printed, passed
+with cond dead, which is why cond now answers a word of its own.
 
 Exit status: the number of failed checks.
 """
