@@ -17,8 +17,9 @@
 //!   after any stale one is cleared, and the ring raises it after every
 //!   frame (`DMA_MBUF_DONE_THRESH` 1): Linux's
 //!   `bcmgenet_rx_ring16_int_enable` and its default coalescing.
-//!   [`Genet::ack_rx_interrupt`] clears it. No other interrupt is
-//!   unmasked.
+//!   [`Genet::ack_rx_interrupt`] masks and clears it, and
+//!   [`Genet::rearm_rx_interrupt`] unmasks it once the ring is drained, as
+//!   Linux's interrupt and poller do. No other interrupt is unmasked.
 //! - `RBUF_64B_EN` is cleared where U-Boot only sets the bit beside it, and
 //!   `TBUF_64B_EN`, which U-Boot never touches, is cleared too. Linux sets
 //!   both. Had the firmware's driver done as Linux does, every received
@@ -649,13 +650,39 @@ impl Genet {
         self.receiving |= receiver == Receiver::On;
     }
 
-    /// Clears receive done at the device, so its level-triggered line
-    /// drops until the next frame: what the kernel's IRQ path does for the
-    /// interrupt, before it wakes the reader (Linux clears it before
-    /// servicing too, "to reduce spurious interrupts"). One write; frames
-    /// that arrive after it raise the line again.
+    /// Masks receive done and clears it, so the level-triggered line drops
+    /// and stays down while the reader drains the ring: what the kernel's
+    /// IRQ path does for the interrupt, before it wakes the reader.
+    /// Linux's `bcmgenet_isr0` clears it and masks it
+    /// (`rx_ring16_int_disable`) until its poller has drained the ring.
+    ///
+    /// The mask is not optional. Cleared alone, receive done was set again
+    /// for frames already in the ring and not yet taken: on the board,
+    /// 2026-11-16, 302 interrupts for 257 frames the device took, every
+    /// one with receive done set on entry and a frame waiting, every
+    /// clear taking effect at once. [`rearm_rx_interrupt`] unmasks it.
+    ///
+    /// [`rearm_rx_interrupt`]: Self::rearm_rx_interrupt
     pub fn ack_rx_interrupt<B: Bus>(&self, bus: &mut B) {
+        bus.write(reg::INTRL2_0_MASK_SET, IRQ_RX_DONE);
         bus.write(reg::INTRL2_0_CLEAR, IRQ_RX_DONE);
+    }
+
+    /// For a reader that found the ring empty after an
+    /// [`ack_rx_interrupt`](Self::ack_rx_interrupt): clears receive done,
+    /// asks again whether a frame waits, and unmasks receive done only if
+    /// none does. Returns whether it unmasked; `false` means a frame came
+    /// in meanwhile, to be taken before asking again (Linux's poller, which
+    /// clears before it looks and enables when it finds no more). A frame
+    /// that arrives after the second look sets receive done, which the
+    /// unmask then raises: none is lost between the two.
+    pub fn rearm_rx_interrupt<B: Bus>(&self, bus: &mut B) -> bool {
+        bus.write(reg::INTRL2_0_CLEAR, IRQ_RX_DONE);
+        if self.has_frame(bus) {
+            return false;
+        }
+        bus.write(reg::INTRL2_0_MASK_CLEAR, IRQ_RX_DONE);
+        true
     }
 
     /// Makes the device quiet, as [`quiet`] does, **and gives the device
