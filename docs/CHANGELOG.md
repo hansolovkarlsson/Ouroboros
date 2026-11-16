@@ -11,6 +11,39 @@ here actually works today, see [`architecture.md`](architecture.md) and
 
 **Not yet released.** Changes since v0.25.0, drafted as they land.
 
+**A machine's network address comes from `/etc/net` (2026-11-15, #470).**
+Step 8 of `docs/roadmap/roadmap-pi-net.md`. `netd` reads its address,
+mask, gateway and DNS server from `/etc/net`, lines of `key value`
+(`address` and `mask` required, `gateway` and `dns` optional), and says
+at every boot what it uses and where it came from. With no file it uses
+QEMU user networking's values, as it always did, so nothing changes on
+QEMU. A file with a line it does not understand is refused whole, with
+the line named, and the defaults are used. `ping` of an address off the
+machine's subnet now goes by way of the gateway, where before it asked
+the wire for the far address and could not be answered. On the Pi 4 the
+file was written at the shell and the board came up and answered at the
+address it named. New: the `netconf` crate, and `make test-net-config`.
+
+**The Pi's Ethernet receives (2026-11-15, #469).**
+Step 7 of `docs/roadmap/roadmap-pi-net.md`. The MAC's receiver is on
+once there is a link, and `NET_RECV` returns frames, polled on the tick.
+On the board, over one cable to a Mac: `ping` of the Mac answers, the
+board's HTTP server served 241 files that came back equal to their
+staged copies, and 1500 transfers of one file equal to each other, with
+more than 131072 frames received and none dropped. The first boot
+received nothing: the driver looked for each frame in the descriptor
+named by the device's producer index, and the device fills the ring
+from descriptor 0, the two ten apart as the firmware had left the
+index. `netd` still answers no ping from another machine, and the
+receive interrupt is step 9. At boot the driver now says the two
+indexes the firmware left, and its counts of frames received and
+dropped at 256 and at each 65536.
+
+**#465 ran on the board (2026-11-15, #468).** The stop's line printed
+(`made quiet in 13 us`, both DMAs stopped), four pings put four equal
+frames on the wire, and a boot of about 14 minutes ended in a `shutdown`
+with no fault.
+
 **The Pi's first frame was seen on the wire, whole (2026-11-14, #466).**
 The check step 6 of `docs/roadmap/roadmap-pi-net.md` still owed, run on
 the code #463 merged: over one cable from the Pi to a USB Ethernet
