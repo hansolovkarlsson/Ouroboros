@@ -224,6 +224,7 @@ make test-run-callback        # a `cpu` run's /host callbacks served while the r
 make test-run-orphan          # a `cpu` run's command dies with the run's connection, closed by a FIN or a RST
 make test-run-silent          # a `cpu` run's command ends when its caller goes silent (a node killed outright), and not while the caller lives
 make test-server-children     # a restarted server's children end with it: netd faulted and spun on request, its `cpu` command ended each time
+make test-fsd-restart         # fsd faulted and spun on request, restarted from the image the kernel kept, and serving again
 make test-cred-client         # the client sends a user credential: served while the user is logged in, refused and its session closed after
 make test-no-identity         # an export with no /etc/cluster/id runs nothing, in either signed format
 make test-net-config          # netd's address from /etc/net: a good file, a refused one and none, each reached where it should be and not elsewhere
@@ -288,6 +289,7 @@ make test                     # host unit tests, clippy and the host-side checks
 make check-relocs             # the PIE contract: no R_AARCH64_ABS64 in any userland binary
 make check-stack-chains       # every userland program's deepest call chain against its stack, read off the built binaries
 make check-xhci-barriers      # the xHCI driver's two DMA barriers and the GENET driver's one, found in the built kernel image
+make check-supervised-images  # every supervised server's built image fits the supervisor's arena (also the last step of every `make esp`)
 make check-site               # the published GitHub Pages site vs the documents it abridges
 make check-statics            # every static in kernel/src against the multi-core plan's inventory
 make check-disk-handle        # no fsd file but disk.rs can reach the disk

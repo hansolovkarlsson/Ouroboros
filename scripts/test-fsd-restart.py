@@ -25,9 +25,13 @@ And over the boot: no line saying an image was too large to keep, the
 restarts numbered 1 and 2, and the guest alive at the end.
 
 The control, run by hand on 2026-11-16 (the PR records it): the same rig
-with the kernel's IMAGE_ARENA cut below fsd's image, so the image is not
-kept. The kernel then says it has no kept image for slot 2, and the listing
-after the fault fails.
+with the old per-image limit put back in `supervisor::register` (192 KB,
+which fsd's 197 KB passed), a mutation the build's check does not see. Eight
+of the then thirteen checks failed: the image-too-large line, no restart in
+either round, no fresh fsd, and no listing after (the shell could not find
+`ls`, the filesystem being gone). A thirteenth check, that the kernel never
+said it had no kept image, passed in the control too (an unregistered server
+never reaches that line), so it could not fail and was removed.
 
 Usage:  make test-fsd-restart      (builds the image and the rig's fsd)
 Exit status: the number of failed checks.
@@ -131,7 +135,6 @@ def main():
         text = g.transcript()
         restarts = [int(n) for n in re.findall(RESTARTED, text)]
         check(restarts == [1, 2], f"fsd was restarted twice, once a round: attempts {restarts}")
-        check("no kept image for server slot 2" not in text, "the kernel had fsd's image to restart from")
         check(g.proc.poll() is None, "the guest is alive at the end")
     finally:
         transcript = g.transcript()
@@ -140,7 +143,7 @@ def main():
             f.write(transcript)
         if os.path.exists(COPY):
             os.unlink(COPY)
-    want = 4 + 2 * 3 + 3
+    want = 4 + 2 * 3 + 2
     if checks != want and not failed:
         print(f"[FAIL] {checks} checks ran, want {want}", flush=True)
         return 1
