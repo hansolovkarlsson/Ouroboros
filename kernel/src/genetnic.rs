@@ -422,6 +422,9 @@ pub(crate) struct Device {
     diag_clear_on_entry: AtomicU32,
     diag_no_frame: AtomicU32,
     diag_set_after: AtomicU32,
+    /// DIAGNOSTIC, temporary: the receive producer index at the set-up,
+    /// so the counts can say how many frames the device took.
+    diag_rx_base: u32,
     /// The one PHY, by MDIO address and identifier, once it was found and
     /// its set-up did not fail: what a send asks for the link when the
     /// boot found none.
@@ -478,6 +481,7 @@ pub(crate) unsafe fn init(quieted: Quieted, dma_noncoherent: bool) -> Option<Dev
             diag_clear_on_entry: AtomicU32::new(0),
             diag_no_frame: AtomicU32::new(0),
             diag_set_after: AtomicU32::new(0),
+            diag_rx_base: 0,
             phy: None,
             sent: 0,
             received: 0,
@@ -511,6 +515,7 @@ pub(crate) unsafe fn init(quieted: Quieted, dma_noncoherent: bool) -> Option<Dev
     // transmit 2026-11-16, with the index written to 10 by a diagnostic,
     // where U-Boot's low byte left the first frame untaken).
     let rx_index = genet::Bus::read(&mut device.bus, genet::reg::RDMA_PROD_INDEX) & genet::mac::DMA_INDEX_MASK;
+    device.diag_rx_base = rx_index;
     let tx_index = genet::Bus::read(&mut device.bus, genet::reg::TDMA_CONS_INDEX) & genet::mac::DMA_INDEX_MASK;
     console::println!(
         "Ouroboros kernel: genet: the indexes the firmware left: receive {rx_index}, transmit {tx_index}"
@@ -781,12 +786,20 @@ impl Device {
                 d.oversize,
                 self.interrupts.load(Ordering::Relaxed)
             );
-            // DIAGNOSTIC, temporary.
+            // DIAGNOSTIC, temporary. Read here, so the interrupts and the
+            // frames the device took are counted at the same moment.
+            let mut bus = self.bus;
+            let prod = genet::Bus::read(&mut bus, genet::reg::RDMA_PROD_INDEX);
+            let arrived = (prod & genet::mac::DMA_INDEX_MASK).wrapping_sub(self.diag_rx_base) & genet::mac::DMA_INDEX_MASK;
             console::println!(
-                "Ouroboros kernel: genet: DIAGNOSTIC: of those interrupts, receive done read clear on entry {}, no frame waiting {}, receive done still set after the clear {}",
+                "Ouroboros kernel: genet: DIAGNOSTIC: of those interrupts, receive done read clear on entry {}, no frame waiting {}, receive done still set after the clear {}; the device has taken {} frames since the set-up (producer index {:#010x}, set-up {:#06x}), {} interrupts",
                 self.diag_clear_on_entry.load(Ordering::Relaxed),
                 self.diag_no_frame.load(Ordering::Relaxed),
-                self.diag_set_after.load(Ordering::Relaxed)
+                self.diag_set_after.load(Ordering::Relaxed),
+                arrived,
+                prod,
+                self.diag_rx_base,
+                self.interrupts.load(Ordering::Relaxed)
             );
         }
     }
