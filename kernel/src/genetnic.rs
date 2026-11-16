@@ -475,21 +475,16 @@ pub(crate) unsafe fn init(quieted: Quieted, dma_noncoherent: bool) -> Option<Dev
         m[0], m[1], m[2], m[3], m[4], m[5]
     );
     // Where the firmware left the two indexes the device owns, which the
-    // set-up cannot change. The receive ring does not depend on its own
-    // (the crate counts descriptors from 0; on 2026-11-15 the index stood
-    // at 10 and 9 and every frame was looked for that far from where it
-    // lay). The transmit ring still takes its descriptor from the index's
-    // low byte, as U-Boot does, which has been right on every boot only
-    // because the index read 0: one off a multiple of 256 is said loudly.
+    // set-up aligns on and does not change. Neither ring depends on its
+    // own: the crate counts both rings' descriptors from 0, as the board
+    // showed for each (receive 2026-11-15, when the index stood at 10 and
+    // 9 and every frame was looked for that far from where it lay;
+    // transmit 2026-11-16, with the index written to 10 by a diagnostic,
+    // where U-Boot's low byte left the first frame untaken).
     let rx_index = genet::Bus::read(&mut device.bus, genet::reg::RDMA_PROD_INDEX) & genet::mac::DMA_INDEX_MASK;
     let tx_index = genet::Bus::read(&mut device.bus, genet::reg::TDMA_CONS_INDEX) & genet::mac::DMA_INDEX_MASK;
     console::println!(
-        "Ouroboros kernel: genet: the indexes the firmware left: receive {rx_index}, transmit {tx_index}{}",
-        if tx_index.is_multiple_of(256) {
-            ""
-        } else {
-            ": WARNING: the transmit index is off a multiple of 256, and a send may be put where the device does not look"
-        }
+        "Ouroboros kernel: genet: the indexes the firmware left: receive {rx_index}, transmit {tx_index}"
     );
     // The MDIO scan's version gate reads the version alone.
     match device.bring_up_phy(&genet::Registers { sys_rev, ..genet::Registers::default() }) {

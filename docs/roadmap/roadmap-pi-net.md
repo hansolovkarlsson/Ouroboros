@@ -1496,6 +1496,50 @@ own. The entries below stand as they were put.
    firmware left: receive 9, transmit 0`, `first frame received: 60
    bytes, from buffer 0`, `ping 10.0.2.2` answered, and one file fetched
    from the board equal to its staged copy.
+   **Decided by Hans on 2026-11-16: count the transmit descriptor from
+   0 (#472), the merge held for a board check, which passed the same
+   day.** The crate's `tx_desc` counts from 0, where the set-up writes
+   `TDMA_READ_PTR`, apart from the producer index. The model reads a
+   sent frame from its read pointer; with that and the driver unfixed,
+   three tests failed. #472 first cited Linux's `write_ptr` as the
+   evidence, and its review found that Linux cannot tell the two
+   readings apart: `bcmgenet_init_tx_ring` writes both indexes 0, so
+   with ring 16 starting at descriptor `tx_queues * tx_bds_per_q` the
+   read pointer and "the ring's start plus the index" name the same
+   descriptor, and with our ring at 0 the second is U-Boot's low byte.
+   So the board was asked.
+   **The board, 2026-11-16, by Hans: two boots with a temporary
+   diagnostic** (`df6fd2a7`, removed before the merge) that wrote 10 to
+   `TDMA_CONS_INDEX` between `quiet` and the set-up, read it back, and
+   gave the read pointer at the first send. The serial logs are
+   `scratch/boot-472.txt` and `-control.txt`, the wire `boot-472.pcap`
+   and `-control.pcap`.
+   - **The index can be set,** whatever U-Boot's comment says: it read
+     0, then `0xa` after the write, and the set-up's line said
+     `transmit 10`, so it survived the MAC's reset.
+   - *First boot (build `df6fd2a7d531`, counted from 0): it sends.*
+     `first frame sent: 42 bytes, taken by the device; DIAGNOSTIC:
+     transmit read pointer now 3 (words), consumer index 0xb`: the
+     device took descriptor 0, with the index at 10. On the wire, the
+     ARP request and the ICMP echo request whole, and `reply from
+     192.168.77.1`. Then 200 fetches of `/etc/net` from the Mac, all
+     equal to the file; 1004 frames from the board in the capture, so
+     the ring went round about four times from that start. No timeout,
+     no busy refusal, no frame dropped, no `EXCEPTION`. (The link was
+     down at boot, a cable not fully in; it came up at a send.)
+   - *The control (build `df6fd2a7d531+dirty`, the driver's transmit
+     descriptor put back to the index's low byte): it does not.* Link
+     up at 1000 Mb/s, then `a frame of 42 bytes was handed to the
+     device and not taken in 100 ms (0 sent before it)`, then `a send
+     refused: the device still has the frame before it`. Not one frame
+     from the board in the 217 captured.
+   - *A claim of mine the control corrected:* I had written that a
+     wrong rule fails silently, the device sending a stale descriptor
+     while its index moves, and the kernel warned on that ground. The
+     device instead took nothing: the descriptor it read was never
+     written. The warning is gone with the question it asked; the
+     indexes line stays. The host model still sends a stale descriptor
+     there, and says at `tx_at` that the board did not.
    **Still not shown:** a ping of the Pi from the Mac and a `fetch` by
    address (`netd` does neither), a frame addressed to the board longer
    than 165 bytes, the longest in the capture (the transfers' large
@@ -1573,6 +1617,9 @@ own. The entries below stand as they were put.
      copies behind when its set-up failed; `resolve`'s and `fetch`'s
      rows, two comments and a sentence saying userland has no statics
      still described what this step changed.
+   **Decided by Hans on 2026-11-16:** `/etc/net` keeps its name and
+   format, and `netd` keeps its configuration in the four atomics. Both
+   were made in this step without asking him.
    **Left open:**
    - *A disk that mounts after `load_auth` has given up leaves the
      machine on the defaults for the boot,* as it leaves it with no
