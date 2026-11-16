@@ -64,7 +64,7 @@
 //! it in the built image.
 
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use genet::mac::{Genet, InitError, Receiver, Rx, RxDrop, TxError, DESCS, RX_AREA_LEN, RX_BUF_LEN, TX_MAX_FRAME, TX_MIN_FRAME};
 use genet::phy::{self, Link, ReadBack, Speed};
@@ -415,6 +415,10 @@ pub(crate) struct Device {
     /// only because the IRQ path reaches the device through `&self`; one
     /// core at a time does, under the kernel lock.
     interrupts: AtomicU32,
+    /// Whether the last interrupt's ack masked receive done and no drain
+    /// has rearmed it yet ([`Device::poll_frame`]). Atomic for the reason
+    /// `interrupts` is.
+    rx_irq_masked: AtomicBool,
     /// DIAGNOSTIC, temporary (step 9's extra interrupts, 304 taken at 256
     /// frames on 2026-11-16): interrupts whose receive done read clear on
     /// entry, that found no frame waiting, and whose receive done still
@@ -478,6 +482,7 @@ pub(crate) unsafe fn init(quieted: Quieted, dma_noncoherent: bool) -> Option<Dev
             genet,
             intid,
             interrupts: AtomicU32::new(0),
+            rx_irq_masked: AtomicBool::new(false),
             diag_clear_on_entry: AtomicU32::new(0),
             diag_no_frame: AtomicU32::new(0),
             diag_set_after: AtomicU32::new(0),
@@ -814,10 +819,13 @@ impl Device {
         self.intid
     }
 
-    /// Clears receive done at the device, so the level-triggered line
-    /// drops until the next frame, and counts the interrupt. From the IRQ
-    /// path under the kernel lock, before `netd` is woken; the first one
-    /// taken has a line.
+    /// Masks and clears receive done at the device, so the level-triggered
+    /// line drops and stays down until a drain finds the ring empty and
+    /// rearms it ([`Device::poll_frame`]), and counts the interrupt. From
+    /// the IRQ path under the kernel lock, before `netd` is woken; the
+    /// first one taken has a line. Masked, not only cleared: cleared alone,
+    /// the device raised it again for frames still waiting (the crate's
+    /// `ack_rx_interrupt`).
     pub(crate) fn ack_interrupt(&self) {
         let mut bus = self.bus;
         // DIAGNOSTIC, temporary: the state on entry and after the clear.
@@ -829,6 +837,7 @@ impl Device {
             self.diag_no_frame.fetch_add(1, Ordering::Relaxed);
         }
         self.genet.ack_rx_interrupt(&mut bus);
+        self.rx_irq_masked.store(true, Ordering::Relaxed);
         if genet::Bus::read(&mut bus, genet::reg::INTRL2_0_STAT) & done != 0 {
             self.diag_set_after.fetch_add(1, Ordering::Relaxed);
         }
@@ -858,6 +867,17 @@ impl Device {
     pub(crate) fn poll_frame(&mut self, out: &mut [u8]) -> Option<usize> {
         for _ in 0..DESCS {
             match self.genet.rx_next(&mut self.bus) {
+                // The ring is empty: rearm the receive interrupt if an ack
+                // masked it. A frame that came in meanwhile keeps it
+                // masked and is taken now; one after the rearm raises the
+                // line. Until a drain gets here, the tick's poll wakes
+                // `netd` as it did before step 9.
+                Rx::None if self.rx_irq_masked.load(Ordering::Relaxed) => {
+                    if self.genet.rearm_rx_interrupt(&mut self.bus) {
+                        self.rx_irq_masked.store(false, Ordering::Relaxed);
+                        return None;
+                    }
+                }
                 Rx::None => return None,
                 Rx::Dropped(why) => {
                     if !self.said_drop {
