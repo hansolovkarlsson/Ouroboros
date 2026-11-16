@@ -1016,6 +1016,26 @@ record is in [`CHANGELOG.md`](CHANGELOG.md):
 
 The small open tails those arcs deliberately left:
 
+- **The supervisor's kept images, sized from the images themselves (from
+  #473's review, 2026-11-16; to look at later, Hans).** #473 put the four
+  supervised servers' images in one fixed arena, `IMAGE_ARENA` (768 KB of
+  kernel `.bss`, 414 KB used), after `fsd` (197 KB) had outgrown its fixed
+  192 KB slot and run unsupervised on every Pi boot. A cap remains: a
+  server that grows, or a fifth one, means raising the constant by hand,
+  and `scripts/check-supervised-images.py` reads it and `loader.rs`'s
+  registrations by pattern to police it. The review's alternative: the
+  loader registers while boot services run, so it could allocate each
+  kept copy at exactly its size as `LOADER_DATA` pages, which survive the
+  exit (the memory map is kept, `mmu.rs` maps RAM from it). That removes
+  the arena, the "image too large" outcome and the check's coupling to two
+  source files. **What to settle first:** that nothing the kernel later
+  hands out from the memory map (task regions, `allocate_runtime_region`,
+  the DMA areas) can reach those pages; that the copies walk as kernel
+  memory after `switch_to_identity_map`; and what a failed allocation
+  says. `make test-fsd-restart` and `make test-server-children` are the
+  rigs that must still pass, with `cond` and `accountd` still having
+  none.
+
 - **`netd` had 1,168 bytes of its stack left after one `resolve <name>`,
   not the 2,528 the rigs read; found and fixed 2026-11-11 (37,296 now).** The kernel counts every task's never-written stack
   (`TASK_STACK_FREE`, `/proc/<n>/stackfree`, `make test-stack-free`), which
