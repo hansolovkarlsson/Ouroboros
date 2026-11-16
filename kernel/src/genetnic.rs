@@ -445,6 +445,30 @@ pub(crate) unsafe fn init(quieted: Quieted, dma_noncoherent: bool) -> Option<Dev
     }
     let (major, minor) = genet::version(sys_rev);
 
+    // DIAGNOSTIC, temporary: #472's board check (roadmap-pi-net.md step 7),
+    // removed before the merge. Every boot so far found the transmit index
+    // at 0, where counting the ring from 0 and U-Boot's low byte agree, so
+    // this tries to put it at 10: written only once the transmit DMA says
+    // it stopped, and read back. The indexes line after the set-up says
+    // whether 10 survived the MAC's reset, and the first send's line where
+    // the device's read pointer went.
+    let tdma_status = genet::Bus::read(&mut bus, genet::reg::TDMA_STATUS);
+    let index_before = genet::Bus::read(&mut bus, genet::reg::TDMA_CONS_INDEX);
+    let wrote = tdma_status & genet::mac::DMA_DISABLED != 0;
+    if wrote {
+        genet::Bus::write(&mut bus, genet::reg::TDMA_CONS_INDEX, 10);
+    }
+    let index_after = genet::Bus::read(&mut bus, genet::reg::TDMA_CONS_INDEX);
+    if wrote {
+        console::println!(
+            "Ouroboros kernel: genet: DIAGNOSTIC: the transmit consumer index read {index_before:#x}, 10 was written, and it read {index_after:#x}"
+        );
+    } else {
+        console::println!(
+            "Ouroboros kernel: genet: DIAGNOSTIC: the transmit consumer index read {index_before:#x} and was not written: the transmit DMA has not said it stopped (status {tdma_status:#010x})"
+        );
+    }
+
     let mut device = match Genet::init(&mut bus, area) {
         Ok(genet) => Device {
             bus,
@@ -724,7 +748,15 @@ impl Device {
         match self.genet.tx_send(&mut self.bus, buffer, len) {
             Ok(()) => {
                 if self.sent == 0 {
-                    console::println!("Ouroboros kernel: genet: first frame sent: {len} bytes, taken by the device");
+                    // DIAGNOSTIC, temporary (#472's board check): where the
+                    // device's read pointer went, in words, three a
+                    // descriptor: 3 if it read descriptor 0, as receive's
+                    // write pointer did, wherever the index started.
+                    let read_ptr = genet::Bus::read(&mut self.bus, genet::reg::TDMA_READ_PTR);
+                    let index = genet::Bus::read(&mut self.bus, genet::reg::TDMA_CONS_INDEX);
+                    console::println!(
+                        "Ouroboros kernel: genet: first frame sent: {len} bytes, taken by the device; DIAGNOSTIC: transmit read pointer now {read_ptr} (words), consumer index {index:#x}"
+                    );
                 }
                 self.sent = self.sent.saturating_add(1);
                 Ok(())
