@@ -929,8 +929,10 @@ not yet checked on this tree are marked (predicted).
       found there (the received frame was looked for in the wrong
       descriptor), `ping` of the Mac answers and 1500 transfers from
       the board's HTTP server came back whole. Step 8, `netd`'s
-      address from `/etc/net`, was built the same day and passes on
-      QEMU (`make test-net-config`); it has not yet run on the board. From there on only the board checks it. What it had to settle first, and what was read:
+      address from `/etc/net`, was built the same day, passes on
+      QEMU (`make test-net-config`) and ran on the board: with the file
+      written at its shell the board came up at `192.168.77.2` and
+      answered there. Step 9, the interrupt, is next. From there on only the board checks it. What it had to settle first, and what was read:
       - **Which NIC: decided by Hans on 2026-11-12, the on-board GENET
         first.** It is Broadcom GENET v5 with a BCM54213PE PHY over MDIO
         (the PHY (predicted)), plain MMIO, discovered from the firmware's

@@ -1510,7 +1510,8 @@ own. The entries below stand as they were put.
    and not the old one; a malformed file is refused with a line and falls
    back.
 
-   **Built 2026-11-15, on QEMU; not yet run on the board.**
+   **Built 2026-11-15, on QEMU; run on the board the same day, and it
+   works** (the result is at the end of this step).
    - *The file is `/etc/net`*, lines of `key value`: `address` and
      `mask` required, `gateway` and `dns` optional, `#` lines and blank
      lines skipped. With no gateway only the machine's own subnet is
@@ -1591,6 +1592,28 @@ own. The entries below stand as they were put.
    root (`echo address 192.168.1.50 > /etc/net`, then a `>>` for each
    further line), and read at the next boot. `make sdcard` stages the
    boot partition alone, so a file on the card's root stays.
+
+   **The board, 2026-11-15, by Hans: two boots of build `2e9d0dc7f73a`,
+   the Mac's adapter moved to `192.168.77.1`.**
+   - *First boot, no file:* `netd: address 10.0.2.34/24, gateway
+     10.0.2.2, dns 10.0.2.3 (no /etc/net: the defaults)`. The file was
+     then written at the shell, three `echo` lines (address
+     `192.168.77.2`, mask `255.255.255.0`, gateway `192.168.77.1`, no
+     `dns`), read back with `cat`, and the board shut down.
+   - *Second boot:* `netd: address 192.168.77.2/24, gateway
+     192.168.77.1, dns none (from /etc/net)`. `ping 192.168.77.1` said
+     `reply from 192.168.77.1`. The Mac's ARP table held `192.168.77.2`
+     at the board's address.
+   - *From the Mac, at the new address:* the 246 files under `include`
+     and `man` by `curl`; 241 equal to the staged copies by SHA-256,
+     827 KB, and the same 5 man pages differing as in step 7 (the
+     card's root is older than the tree). `/etc/net` itself came back
+     as written.
+   - No `EXCEPTION`, no frame dropped, `en9` counting no input error.
+     The firmware's indexes read receive 10, transmit 0 on both boots.
+   **Not shown on the board:** a refused file, a ping off the subnet
+   (the Mac routes nothing on), and a name resolved (no `dns` line).
+   The first two are the rig's on QEMU.
 
 9. **The interrupt.** INTID 189 enabled in the GIC, receive done unmasked,
    cleared in the kernel's IRQ path, `NET_WAIT` woken by it.
