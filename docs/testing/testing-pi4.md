@@ -1796,6 +1796,16 @@ and so is the default address with an `/etc/net` on the card. A disk mounting
 after 2 s still does that, by design: nothing reads either file again
 (`roadmap-pi-net.md`, step 8).
 
+**First boot on this board after the fix, 2026-11-17** (`b4f7a97ef44c`, debug,
+boot 34, the card's boot partition staged by `make sdcard`, the cable in on the
+Mac's `192.168.77.1`): `fsd: ext2 mounted` came before `netd: network server
+ready`, and no `fsd could not answer yet` line was printed, so the load did not
+retry once. netd signed as its identity, read 4 authorized peers and the users
+registry, took `192.168.77.2/24` from `/etc/net`, and opened the export; no
+restart, no exception, no warning, and the boot reached `login:`. So the fix
+caused no regression here, and this card mounts before netd asks: the board
+has not yet run the case the fix is for. That stays shown on QEMU alone.
+
 ### Risk 5: no second console when the first one fails
 
 Unlike a VM, there is no host-side window to fall back on. Serial and HDMI are
