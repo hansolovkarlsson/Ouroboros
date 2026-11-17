@@ -125,10 +125,10 @@ fn log_ip(ip: &[u8; 4]) {
 /// retry budget for that (its comment says why there is one and not one a
 /// read), so `NO_FS` here is taken as "nothing is mounted" at once. The
 /// other transient answers (a full mailbox, a server mid-restart) are asked
-/// again a few times. A disk that mounts after `load_auth` gave up leaves
-/// this machine on the defaults for the boot, as it leaves it with no
-/// cluster identity: `NET_WAIT` is not a sleep (`testing-pi4.md`, risk 4b),
-/// and nothing reads either file again.
+/// again for up to five retries' time, by [`load_pause`] as `load_auth`'s
+/// are. A disk that mounts after `load_auth` gave up leaves this machine on
+/// the defaults for the boot, as it leaves it with no cluster identity:
+/// nothing reads either file again.
 ///
 /// **Every way of not having a usable file ends in the configuration for
 /// no file**, each with its own words: the file absent or nothing mounted
@@ -141,13 +141,11 @@ fn log_ip(ip: &[u8; 4]) {
 /// file cut short could still parse, to an address nobody wrote.
 fn load_netconf() {
     let mut buf = [0u8; netconf::MAX_FILE + 1];
-    let mut budget = 5u32;
+    let deadline = now_us() + 5 * LOAD_RETRY_US;
     let mut len = 0usize;
     let n = loop {
         let r = read_file_chunk(As::FirstParty, NETCONF_PATH, 0, len as u64, &mut buf[len..]);
-        if r != syscall_abi::NO_FS && transient_fs_failure(r) && budget > 0 {
-            budget -= 1;
-            syscall(syscall_abi::NET_WAIT, 40);
+        if r != syscall_abi::NO_FS && transient_fs_failure(r) && load_pause(deadline) {
             continue;
         }
         if r >= syscall_abi::FS_ERR_MIN {
@@ -538,7 +536,7 @@ const USERS_PATH: &[u8] = b"/etc/cluster/users";
 /// because a PERMANENT error is then retried forever. `mkdir /NOEXEC`, a
 /// plausible way to reach for the flag, makes `read_at` return
 /// `FS_ERR_NOT_A_FILE`, and this read is netd's first, so the whole shared
-/// budget is spent sleeping in `NET_WAIT` with the mailbox undrained, for a
+/// budget is spent sleeping with the mailbox undrained, for a
 /// condition waiting cannot change. That starves the two reads that configure
 /// the cluster AND leaves the supervisor's 160ms health ping unacked, which is
 /// the restart loop `testing-parallels.md` Risk #1 is about. Fail-safe applies
@@ -551,6 +549,42 @@ fn transient_fs_failure(r: u64) -> bool {
             | syscall_abi::FS_ERROR
             | syscall_abi::MSG_ERR_FULL
     )
+}
+
+/// How long `load_auth`'s three reads, together, retry while the disk is
+/// not yet mounted: the 2 s they were documented to have when the budget
+/// was 50 waits of 40 ms, now a time on `MONOTONIC_US`'s clock.
+const LOAD_WAIT_US: u64 = 2_000_000;
+
+/// One retry's pause while the files load.
+const LOAD_RETRY_US: u64 = 40_000;
+
+/// The pause before one retry of a read `netd` makes before it serves: a
+/// retry's length, or to `deadline_us` if that is sooner. `false`, with no
+/// pause, once `deadline_us` has passed: the caller stops retrying.
+///
+/// **A SLEEP, NOT `NET_WAIT`.** `NET_WAIT` returns with a frame or a
+/// message waiting, at once since #475, and nothing here takes either, so
+/// the retries were spent in a moment by the first one to arrive. Shown on
+/// QEMU with nothing mounted (`test-blank-disk.py`'s blank disk) and `cpu`
+/// typed while netd loaded: the load took 1.3 s where it took 2.4 s with
+/// nothing typed, and 2.0 s with this sleep. On the Pi a busy wire does
+/// the same (`testing-pi4.md`, risk 4b).
+///
+/// **The mailbox is left as it is**, and that is safe on both counts. A
+/// client's request waits for `serve`, at most this budget, and gets
+/// `serve`'s own answer; answering it here would mean a refusal shaped
+/// for each op (`NETOP_RUN` replies text, not a status). And the
+/// supervisor's ping is never sent: it goes to a server seen `Blocked` by
+/// 64 ticks in a row, and the tick that ends each sleep sees netd
+/// `Runnable`. Shown with the same boot: 2 s of sleeps, no restart.
+fn load_pause(deadline_us: u64) -> bool {
+    let now = now_us();
+    if now >= deadline_us {
+        return false;
+    }
+    syscall(syscall_abi::SLEEP_UNTIL, (now + LOAD_RETRY_US).min(deadline_us));
+    true
 }
 
 /// Load the cluster auth config from disk via `fsd` at boot.
@@ -573,14 +607,19 @@ fn load_auth() -> Auth {
     // Parallels with no USB stick, and a Pi with no card, are both supported
     // configurations where nothing ever mounts; at several seconds of silence
     // the supervisor health ping (160ms) times out often enough to burn all
-    // three restarts and disable netd for the boot. Up to ~2s total, at 40ms
-    // a try.
+    // three restarts and disable netd for the boot. Up to 2 s total
+    // (`LOAD_WAIT_US`), a try every 40 ms.
+    //
+    // A TIME, NOT A COUNT OF WAITS: it was 50 tries of `NET_WAIT(40)`, and
+    // `NET_WAIT` returns early with a frame or a message waiting (at once
+    // since #475), so one message queued for netd while it loaded spent the
+    // rest of the budget in a moment (`load_pause` says how it was shown).
     //
     // THE BUDGET GATES THE RETRY, NEVER THE FIRST ATTEMPT: written first as
     // `while budget > 0`, which meant that exhausting it on the first read left
     // the others never attempted ONCE, so a disk that mounted late gave a node
     // with no identity and no peers for the whole boot.
-    let mut budget = 50u32;
+    let deadline = now_us() + LOAD_WAIT_US;
     // The no-exec flag is presence-only: any successful read (even 0 bytes)
     // means the file exists; FS_ERR_* means it doesn't.
     //
@@ -604,9 +643,7 @@ fn load_auth() -> Auth {
     let m;
     loop {
         let r = read_file_chunk(As::FirstParty, NOEXEC_PATH, 0, 0, &mut one);
-        if transient_fs_failure(r) && budget > 0 {
-            budget -= 1;
-            syscall(syscall_abi::NET_WAIT, 40);
+        if transient_fs_failure(r) && load_pause(deadline) {
             continue;
         }
         m = r;
@@ -630,9 +667,7 @@ fn load_auth() -> Auth {
     let mut idn;
     loop {
         idn = read_file_chunk(As::FirstParty, ID_PATH, 0, 0, &mut idbuf);
-        if transient_fs_failure(idn) && budget > 0 {
-            budget -= 1;
-            syscall(syscall_abi::NET_WAIT, 40);
+        if transient_fs_failure(idn) && load_pause(deadline) {
             continue;
         }
         break;
@@ -674,9 +709,7 @@ fn load_auth() -> Auth {
     let mut n;
     loop {
         n = read_file_chunk(As::FirstParty, AUTHORIZED_PATH, 0, 0, &mut auth.authorized);
-        if transient_fs_failure(n) && budget > 0 {
-            budget -= 1;
-            syscall(syscall_abi::NET_WAIT, 40);
+        if transient_fs_failure(n) && load_pause(deadline) {
             continue;
         }
         break;
