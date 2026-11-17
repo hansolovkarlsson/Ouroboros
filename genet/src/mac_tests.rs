@@ -1004,8 +1004,12 @@ fn the_rearm_lifts_no_mask_with_the_receiver_off() {
     assert!(g.rearm_rx_interrupt(&mut d));
     assert_eq!(d.ops, [], "nothing written with the receiver off");
     assert_eq!(d.irq_mask & RX_DONE, RX_DONE, "receive done stays masked");
-    // The receiver's own start unmasks it, and a frame then raises it.
+    // The receiver's own start unmasks it, so a rearm after it has nothing
+    // to lift, and a frame then raises it.
     g.start(&mut d, Speed::S1000, Receiver::On);
+    d.ops.clear();
+    assert!(g.rearm_rx_interrupt(&mut d));
+    assert_eq!(d.ops, [], "the start unmasked it: nothing for the rearm");
     assert!(d.deliver(64));
     assert!(d.line());
 }
