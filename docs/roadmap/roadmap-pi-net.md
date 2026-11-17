@@ -1814,6 +1814,16 @@ own. The entries below stand as they were put.
      both GIC versions held level already (GICv2 in
      `test-server-children`, GICv3 in a scratch boot with virtio-net that
      served 20 fetches); the board's line says what its firmware left.
+   - *Eighth boot, confirming the third review (build `8956597d9b0c`):*
+     `NIC receive interrupt enabled (GIC INTID 189, level-triggered; the
+     GIC held level)`, so the Pi's firmware leaves it level and the write
+     changed nothing there; the first-interrupt line, and at 256 frames
+     **194 receive interrupts taken**, none dropped. More than the
+     seventh boot's 133, which fits a `NET_WAIT` that now returns for a
+     frame already waiting and so waits, and rearms, more often (one boot
+     each). A hundred pings and three hundred fetches from the Mac, then
+     50 more all equal (1.65 s; earlier boots were not timed), and no
+     fault, restart or warning in the boot.
 
 10. **Two boards.** Two Pi 4s on one switch, each with its address file
     and cluster keys.
