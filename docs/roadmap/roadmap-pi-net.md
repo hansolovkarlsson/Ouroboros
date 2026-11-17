@@ -1771,6 +1771,11 @@ own. The entries below stand as they were put.
      out, and three of the step's constants made wrong, each failed a
      test (the start's write passed at first, and got its own test). The
      register writes the board ran are the same.
+   - *Sixth boot, confirming the review (build `0d920489063b`):* the GIC's
+     line, the first-interrupt line, and at 256 frames **155 receive
+     interrupts taken**, none dropped; a hundred pings and three hundred
+     fetches from the Mac, then 50 more fetches all equal, and no fault,
+     restart or warning in the boot.
    - *The second review of #475 (`7977067d`, and a test after it):* the
      rearm moved from `poll_frame`'s drain to empty into `NET_WAIT`, just
      before the reader blocks (`Nic::rearm_interrupt`), so a `netd`
@@ -1786,6 +1791,14 @@ own. The entries below stand as they were put.
      writes apart, and now records their order). On the board the
      rearm's check is the count: without it every interrupt after the
      first would be masked for good, and the count would stay at 1.
+   - *Seventh boot, confirming the second review (build
+     `2ec4ff0b8973`):* the GIC's line, the first-interrupt line, and at
+     256 frames **133 receive interrupts taken**, none dropped: well above
+     the 1 a missing rearm would leave, so `NET_WAIT` rearms it. A hundred
+     pings and three hundred fetches from the Mac, then 50 more all equal,
+     and no fault, restart or warning in the boot. Fewer interrupts than
+     the sixth boot's 155, which fits the rearm at the wait rather than
+     at every drain to empty, from one boot each.
    - *The third review of #475 (`5a853848`):* `NET_WAIT` blocked without
      asking its wake condition (`block_current_and_switch` does not
      look; only the tick does), so a frame that came in before the wait
@@ -1801,19 +1814,6 @@ own. The entries below stand as they were put.
      both GIC versions held level already (GICv2 in
      `test-server-children`, GICv3 in a scratch boot with virtio-net that
      served 20 fetches); the board's line says what its firmware left.
-   - *Sixth boot, confirming the review (build `0d920489063b`):* the GIC's
-     line, the first-interrupt line, and at 256 frames **155 receive
-     interrupts taken**, none dropped; a hundred pings and three hundred
-     fetches from the Mac, then 50 more fetches all equal, and no fault,
-     restart or warning in the boot.
-   - *Seventh boot, confirming the second review (build
-     `2ec4ff0b8973`):* the GIC's line, the first-interrupt line, and at
-     256 frames **133 receive interrupts taken**, none dropped: well above
-     the 1 a missing rearm would leave, so `NET_WAIT` rearms it. A hundred
-     pings and three hundred fetches from the Mac, then 50 more all equal,
-     and no fault, restart or warning in the boot. Fewer interrupts than
-     the sixth boot's 155, which fits the rearm at the wait rather than
-     at every drain to empty, from one boot each.
 
 10. **Two boards.** Two Pi 4s on one switch, each with its address file
     and cluster keys.
