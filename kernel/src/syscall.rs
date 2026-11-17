@@ -2146,6 +2146,13 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
                 let ticks = arg0.div_ceil(crate::timer::TICK_INTERVAL_MS);
                 crate::exceptions::ticks() + ticks.max(1)
             };
+            // The receive interrupt armed before the wait, whatever the
+            // reader did since the last one (nic.rs's module doc).
+            if let Some(device) = unsafe { &mut *NET.get() } {
+                // SAFETY: under the kernel lock; a device in the cell is
+                // one `main.rs` initialized before installing it.
+                unsafe { device.rearm_interrupt() };
+            }
             unsafe {
                 tasks::block_current_and_switch(frame, tasks::WaitReason::NetInput { deadline })
             }

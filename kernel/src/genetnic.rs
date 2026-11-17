@@ -42,13 +42,15 @@
 //! names (189 on the Pi 4), `main.rs` enables it at the GIC, and the IRQ
 //! path calls [`Device::ack_interrupt`], which masks and clears receive
 //! done at the device and counts, before `netd` is woken. It stays masked
-//! until a [`Device::poll_frame`] finds the ring empty and the crate's
-//! rearm unmasks it, as Linux's interrupt and poller do: cleared alone,
-//! the device raised it again for every frame still waiting (302
-//! interrupts for 257 frames on the board). So the next interrupt comes
-//! only after `netd` has drained the ring. The crate masks every interrupt
-//! at the set-up and unmasks receive done alone when the receiver comes
-//! on. The tick's `net_has_frame()` stays behind it, as it does for
+//! until `netd` next waits (`NET_WAIT`), when [`Device::rearm_interrupt`]
+//! unmasks it if the ring is empty, as Linux's interrupt and poller do:
+//! cleared alone, the device raised it again for every frame still waiting
+//! (302 interrupts for 257 frames on the board). So the next interrupt
+//! comes only once `netd` has drained the ring and asked to wait. The
+//! rearm is the wait's and not the drain's so that no reader, a `netd`
+//! restarted part way through a drain included, can wait with it masked.
+//! The crate masks every interrupt at the set-up and unmasks receive done
+//! alone when the receiver comes on. The tick's `net_has_frame()` stays behind it, as it does for
 //! virtio-net: an interrupt missed costs a tick.
 //!
 //! **The receive buffers** are [`RX_AREA`], one page-aligned static of 256
@@ -780,22 +782,31 @@ impl Device {
     /// at the GIC and `exceptions.rs` wakes `netd` on it. It means receive
     /// done and nothing else, since the crate unmasks that bit alone, and
     /// [`ack_interrupt`](Self::ack_interrupt) takes it down at the device
-    /// until a drain rearms it: `nic.rs`'s two promises. Before the MAC's
-    /// receiver is on (a boot that found no link) nothing is unmasked and
-    /// the line stays low.
+    /// until the reader's next wait rearms it: `nic.rs`'s two promises.
+    /// Before the MAC's receiver is on (a boot that found no link) nothing
+    /// is unmasked and the line stays low.
     pub(crate) fn intid(&self) -> Option<u32> {
         self.intid
     }
 
     /// Masks and clears receive done at the device, so the level-triggered
-    /// line drops and stays down until a drain finds the ring empty and
-    /// rearms it ([`Device::poll_frame`]), and counts the interrupt. From
+    /// line drops and stays down until the reader's next wait finds the
+    /// ring empty and rearms it ([`Device::rearm_interrupt`]), and counts
+    /// the interrupt. From
     /// the IRQ path under the kernel lock, before `netd` is woken; the
     /// first one taken has a line. Masked, not only cleared: cleared alone,
     /// the device raised it again for frames still waiting (the crate's
     /// `ack_rx_interrupt`, which keeps the masked state its rearm reads).
+    ///
+    /// The crate reads the mask back after its two writes, so they have
+    /// reached the device when the read returns; the `dsb` after it holds
+    /// the IRQ path's end of interrupt, a write to the GIC, until the read
+    /// has returned. Without both the GIC could see the line still high
+    /// and deliver the interrupt again.
     pub(crate) fn ack_interrupt(&mut self) {
         self.genet.ack_rx_interrupt(&mut self.bus);
+        // SAFETY: a barrier alone; no memory or register is named.
+        unsafe { core::arch::asm!("dsb sy", options(nostack, preserves_flags)) };
         if self.interrupts == 0 {
             console::println!(
                 "Ouroboros kernel: genet: first receive interrupt taken (INTID {}), and masked at the device until the ring is drained",
@@ -803,6 +814,16 @@ impl Device {
             );
         }
         self.interrupts = self.interrupts.saturating_add(1);
+    }
+
+    /// Rearms the receive interrupt an ack masked, if no frame waits: from
+    /// `NET_WAIT`, under the kernel lock, before the reader blocks. A frame
+    /// that waits leaves it masked, and the wait returns at once for it
+    /// (its first look is `has_frame`); the next wait asks again. One that
+    /// arrives after the rearm raises the line. The crate writes nothing
+    /// when no ack masked it, so a wait that follows a wait costs nothing.
+    pub(crate) fn rearm_interrupt(&mut self) {
+        self.genet.rearm_rx_interrupt(&mut self.bus);
     }
 
     /// Takes one received frame if a usable one waits: copies it into
@@ -823,17 +844,7 @@ impl Device {
     pub(crate) fn poll_frame(&mut self, out: &mut [u8]) -> Option<usize> {
         for _ in 0..DESCS {
             match self.genet.rx_next(&mut self.bus) {
-                // The ring is empty: rearm the receive interrupt, which
-                // the crate does only if an ack masked it. A frame that
-                // came in meanwhile keeps it masked and is taken now; one
-                // after the rearm raises the line. Until a drain gets
-                // here, the tick's poll wakes `netd` as it did before
-                // step 9.
-                Rx::None => {
-                    if self.genet.rearm_rx_interrupt(&mut self.bus) {
-                        return None;
-                    }
-                }
+                Rx::None => return None,
                 Rx::Dropped(why) => {
                     if !self.said_drop {
                         self.said_drop = true;

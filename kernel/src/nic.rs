@@ -24,9 +24,12 @@
 //!   server on it without asking the device what happened. An arm that
 //!   cannot promise both reports `None` and is polled on the tick. When the
 //!   next interrupt can come is the arm's: virtio-net's ack clears, and the
-//!   next frame raises one; the GENET's masks receive done until a
-//!   [`Nic::poll_frame`] finds the ring empty, so its next interrupt comes
-//!   only after the network server has drained it (`genetnic.rs`).
+//!   next frame raises one; the GENET's masks receive done until the
+//!   network server next waits with the ring drained.
+//! - [`Nic::rearm_interrupt`] is called by `NET_WAIT`, under the kernel
+//!   lock, before the reader blocks: an arm whose ack left its interrupt
+//!   masked unmasks it there if no frame waits, so no reader waits with it
+//!   masked. It does nothing for virtio-net.
 //! - Every arm takes a frame to send, and a buffer to receive into, of any
 //!   length up to `syscall_abi::NET_MAX_FRAME`. That bound is the ABI's and
 //!   is the same for every device, so `netd`'s buffers do not depend on the
@@ -90,7 +93,7 @@ impl Nic {
             Nic::Virtio(d) => d.intid(),
             // The declared receive interrupt since the plan's step 9:
             // receive done alone is unmasked, `ack_interrupt` masks and
-            // clears it, and a drain to empty rearms it (design 7).
+            // clears it, and the reader's next wait rearms it.
             Nic::Genet(d) => d.intid(),
         }
     }
@@ -106,6 +109,19 @@ impl Nic {
         match self {
             Nic::Virtio(d) => unsafe { d.ack_interrupt() },
             Nic::Genet(d) => d.ack_interrupt(),
+        }
+    }
+
+    /// Before the reader waits for a frame: rearms a receive interrupt the
+    /// ack left masked, if no frame waits (the module doc).
+    ///
+    /// # Safety
+    /// The driver's own contract: the device initialized, under the kernel
+    /// lock.
+    pub unsafe fn rearm_interrupt(&mut self) {
+        match self {
+            Nic::Virtio(_) => {}
+            Nic::Genet(d) => d.rearm_interrupt(),
         }
     }
 
