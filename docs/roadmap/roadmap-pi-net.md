@@ -1794,8 +1794,8 @@ own. The entries below stand as they were put.
      the 1 a missing rearm would leave, so `NET_WAIT` rearms it. A hundred
      pings and three hundred fetches from the Mac, then 50 more all equal,
      and no fault, restart or warning in the boot. Fewer interrupts than
-     the sixth boot's 155, as expected with the rearm at the wait rather
-     than at every drain to empty.
+     the sixth boot's 155, which fits the rearm at the wait rather than
+     at every drain to empty, from one boot each.
 
 10. **Two boards.** Two Pi 4s on one switch, each with its address file
     and cluster keys.
