@@ -167,8 +167,9 @@ pub const DMA_SOP: u32 = 0x2000;
 /// `UMAC_IRQ_RXDMA_DONE` (Linux's `UMAC_IRQ_RXDMA_MBDONE`, bit 13 of
 /// INTRL2_0): the default ring (16) took a frame, counted against the
 /// ring's `DMA_MBUF_DONE_THRESH`. The one interrupt this driver unmasks
-/// (the plan's step 9); its line is the board's INTID 189. Linux's header
-/// is the only source for the bit: not yet read on the board.
+/// (the plan's step 9); its line is the board's INTID 189. The bit is
+/// Linux's header's; read on the board, 2026-11-16: 158 interrupts for 260
+/// frames with it unmasked, none with the unmask taken out.
 pub const IRQ_RX_DONE: u32 = 1 << 13;
 
 /// `DMA_TX_APPEND_CRC` and `DMA_TX_QTAG_SHIFT` (U-Boot), with the tag
@@ -348,6 +349,10 @@ pub struct Genet {
     receiving: bool,
     /// Whether `rx_next` has returned a frame not yet released.
     rx_held: bool,
+    /// Whether an `ack_rx_interrupt` masked receive done and no
+    /// `rearm_rx_interrupt` has unmasked it since: the rearm writes
+    /// nothing otherwise.
+    rx_irq_masked: bool,
     drops: Drops,
 }
 
@@ -588,7 +593,7 @@ impl Genet {
         bus.write(reg::TDMA_CTRL, DMA_RING16_EN | DMA_EN);
         set(bus, reg::RDMA_CTRL, DMA_RINGS_0_15_EN, DMA_RING16_EN | DMA_EN);
 
-        Ok(Genet { mac: address, rx_cons, rx_desc: 0, tx_prod, tx_desc: 0, started: false, receiving: false, rx_held: false, drops: Drops::default() })
+        Ok(Genet { mac: address, rx_cons, rx_desc: 0, tx_prod, tx_desc: 0, started: false, receiving: false, rx_held: false, rx_irq_masked: false, drops: Drops::default() })
     }
 
     /// The station address read before the reset and written back after.
@@ -619,7 +624,10 @@ impl Genet {
     /// link comes up at another speed: on a MAC already on, the speed
     /// changes with the enables held (U-Boot's own write of the speed
     /// alone would turn a running MAC off for one write). The first time,
-    /// with [`Receiver::On`], the writes are U-Boot's.
+    /// with [`Receiver::On`], the writes are U-Boot's but for two of
+    /// Linux's before the receiver comes on: receive done cleared and
+    /// unmasked (the module doc's list, and the plan's step 9). They are
+    /// the interrupt's, and taking them out leaves the line low for good.
     ///
     /// **`ID_MODE_DIS` is set, as U-Boot sets it:** the MAC adds no delay
     /// to the transmit clock, so the PHY must, and on the Pi 4 it does
@@ -644,6 +652,7 @@ impl Genet {
             // Linux's `bcmgenet_rx_ring16_int_enable`.
             bus.write(reg::INTRL2_0_CLEAR, IRQ_RX_DONE);
             bus.write(reg::INTRL2_0_MASK_CLEAR, IRQ_RX_DONE);
+            self.rx_irq_masked = false;
         }
         set(bus, reg::UMAC_CMD, 0, on);
         self.started = true;
@@ -663,25 +672,35 @@ impl Genet {
     /// clear taking effect at once. [`rearm_rx_interrupt`] unmasks it.
     ///
     /// [`rearm_rx_interrupt`]: Self::rearm_rx_interrupt
-    pub fn ack_rx_interrupt<B: Bus>(&self, bus: &mut B) {
+    pub fn ack_rx_interrupt<B: Bus>(&mut self, bus: &mut B) {
         bus.write(reg::INTRL2_0_MASK_SET, IRQ_RX_DONE);
         bus.write(reg::INTRL2_0_CLEAR, IRQ_RX_DONE);
+        self.rx_irq_masked = true;
     }
 
-    /// For a reader that found the ring empty after an
-    /// [`ack_rx_interrupt`](Self::ack_rx_interrupt): clears receive done,
-    /// asks again whether a frame waits, and unmasks receive done only if
-    /// none does. Returns whether it unmasked; `false` means a frame came
-    /// in meanwhile, to be taken before asking again (Linux's poller, which
-    /// clears before it looks and enables when it finds no more). A frame
-    /// that arrives after the second look sets receive done, which the
-    /// unmask then raises: none is lost between the two.
-    pub fn rearm_rx_interrupt<B: Bus>(&self, bus: &mut B) -> bool {
+    /// For a reader that found the ring empty: if an
+    /// [`ack_rx_interrupt`](Self::ack_rx_interrupt) masked receive done,
+    /// clears it, asks again whether a frame waits, and unmasks it only if
+    /// none does (Linux's poller, which clears before it looks and enables
+    /// when it finds no more). A frame that arrives after the second look
+    /// sets receive done, which the unmask then raises: none is lost
+    /// between the two.
+    ///
+    /// Returns whether receive done is armed when it returns: `false` only
+    /// when a frame came in meanwhile, to be taken before asking again.
+    /// With nothing masked by an ack, or the receiver off, it writes
+    /// nothing and returns `true`: the receiver's own [`start`](Self::start)
+    /// unmasks it, and a mask the receiver never had is not lifted here.
+    pub fn rearm_rx_interrupt<B: Bus>(&mut self, bus: &mut B) -> bool {
+        if !self.rx_irq_masked || !self.receiving {
+            return true;
+        }
         bus.write(reg::INTRL2_0_CLEAR, IRQ_RX_DONE);
         if self.has_frame(bus) {
             return false;
         }
         bus.write(reg::INTRL2_0_MASK_CLEAR, IRQ_RX_DONE);
+        self.rx_irq_masked = false;
         true
     }
 

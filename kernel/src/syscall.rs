@@ -147,12 +147,13 @@ pub(crate) fn net_intid() -> Option<u32> {
 }
 
 /// Acknowledges the NIC's pending interrupt at the device (from the IRQ
-/// handler - see `exceptions::rust_irq_handler`), so it can raise the next
-/// one. A no-op if no NIC is installed. Not gated: it touches only the
-/// device's own interrupt-status/ack registers and is reached only from the
-/// kernel's IRQ handler, never a syscall.
+/// handler - see `exceptions::rust_irq_handler`), so its line is low when
+/// the handler returns; when the device raises the next one is the arm's
+/// (`nic.rs`'s module doc). A no-op if no NIC is installed. Not gated: it
+/// touches only the device's own interrupt registers and is reached only
+/// from the kernel's IRQ handler, never a syscall.
 pub(crate) fn net_ack_interrupt() {
-    if let Some(device) = unsafe { &*NET.get() } {
+    if let Some(device) = unsafe { &mut *NET.get() } {
         // SAFETY: the IRQ path, under the kernel lock (lock.rs); a device
         // in the cell is one `main.rs` initialized before installing it.
         unsafe { device.ack_interrupt() };

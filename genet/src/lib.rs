@@ -56,9 +56,6 @@ pub mod reg {
     pub const SYS_RBUF_FLUSH_CTRL: usize = 0x0008;
     /// `EXT_RGMII_OOB_CTRL`, `GENET_EXT_OFF + 0x0c` (U-Boot).
     pub const EXT_RGMII_OOB_CTRL: usize = 0x0080 + 0x0c;
-    /// `INTRL2_CPU_STAT` of block 0, `GENET_INTRL2_0_OFF + 0x00` (Linux):
-    /// the pending interrupts, masked or not.
-    pub const INTRL2_0_STAT: usize = 0x0200;
     /// `INTRL2_CPU_CLEAR` of block 0, `GENET_INTRL2_0_OFF + 0x08` (Linux):
     /// a bit written clears that pending interrupt.
     pub const INTRL2_0_CLEAR: usize = 0x0200 + 0x08;
@@ -128,8 +125,9 @@ pub mod reg {
     pub const RDMA_RING_BUF_SIZE: usize = RDMA_RING + 0x10;
     pub const RDMA_START_ADDR: usize = RDMA_RING + 0x14;
     pub const RDMA_END_ADDR: usize = RDMA_RING + 0x1c;
-    /// `DMA_MBUF_DONE_THRESH` of the receive ring (Linux's v4+ ring layout,
-    /// 0x24): how many frames the ring takes before it raises receive done.
+    /// `DMA_MBUF_DONE_THRESH` of the receive ring (U-Boot, the ring offset
+    /// 0x24 the transmit ring's uses too): how many frames the ring takes
+    /// before it raises receive done.
     pub const RDMA_MBUF_DONE_THRESH: usize = RDMA_RING + 0x24;
     pub const RDMA_XON_XOFF_THRESH: usize = RDMA_RING + 0x28;
     pub const RDMA_READ_PTR: usize = RDMA_RING + 0x2c;

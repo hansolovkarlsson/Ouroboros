@@ -18,10 +18,15 @@
 //!   `syscall::net_has_frame`). It reads and does nothing else: no side
 //!   effect on the device, no wait.
 //! - [`Nic::intid`] is an interrupt that means "a frame was received" and
-//!   nothing else, and that [`Nic::ack_interrupt`] clears at the device.
-//!   `main.rs` enables whatever INTID is reported, and `exceptions.rs` wakes
-//!   the network server on it without asking the device what happened. An
-//!   arm that cannot promise both reports `None` and is polled on the tick.
+//!   nothing else, and that [`Nic::ack_interrupt`] takes down at the device,
+//!   so the line is low when the IRQ path returns. `main.rs` enables
+//!   whatever INTID is reported, and `exceptions.rs` wakes the network
+//!   server on it without asking the device what happened. An arm that
+//!   cannot promise both reports `None` and is polled on the tick. When the
+//!   next interrupt can come is the arm's: virtio-net's ack clears, and the
+//!   next frame raises one; the GENET's masks receive done until a
+//!   [`Nic::poll_frame`] finds the ring empty, so its next interrupt comes
+//!   only after the network server has drained it (`genetnic.rs`).
 //! - Every arm takes a frame to send, and a buffer to receive into, of any
 //!   length up to `syscall_abi::NET_MAX_FRAME`. That bound is the ABI's and
 //!   is the same for every device, so `netd`'s buffers do not depend on the
@@ -84,19 +89,20 @@ impl Nic {
         match self {
             Nic::Virtio(d) => d.intid(),
             // The declared receive interrupt since the plan's step 9:
-            // receive done alone is unmasked, and `ack_interrupt` clears it
-            // (the level-triggered line held back until then, design 7).
+            // receive done alone is unmasked, `ack_interrupt` masks and
+            // clears it, and a drain to empty rearms it (design 7).
             Nic::Genet(d) => d.intid(),
         }
     }
 
-    /// Clears the pending receive interrupt at the device, so it can raise
-    /// the next one.
+    /// Takes the pending receive interrupt down at the device, so the line
+    /// is low when the IRQ path returns. When the device can raise the next
+    /// one is the arm's (the module doc).
     ///
     /// # Safety
     /// The driver's own contract: the device initialized, called from the
     /// IRQ path.
-    pub unsafe fn ack_interrupt(&self) {
+    pub unsafe fn ack_interrupt(&mut self) {
         match self {
             Nic::Virtio(d) => unsafe { d.ack_interrupt() },
             Nic::Genet(d) => d.ack_interrupt(),

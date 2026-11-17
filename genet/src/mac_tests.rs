@@ -975,6 +975,42 @@ fn the_rearm_leaves_it_masked_while_a_frame_waits() {
 }
 
 #[test]
+fn a_rearm_with_nothing_masked_writes_nothing() {
+    // The reader finds the ring empty on every call; only the first after
+    // an ack is the device's business.
+    let mut d = board();
+    let mut g = up(&mut d);
+    d.ops.clear();
+    assert!(g.rearm_rx_interrupt(&mut d), "never masked: armed");
+    assert_eq!(d.ops, [], "and nothing written");
+    assert!(d.deliver(64));
+    g.ack_rx_interrupt(&mut d);
+    assert!(matches!(g.rx_next(&mut d), Rx::Frame { .. }));
+    g.rx_release(&mut d);
+    assert!(g.rearm_rx_interrupt(&mut d));
+    d.ops.clear();
+    assert!(g.rearm_rx_interrupt(&mut d), "rearmed already");
+    assert_eq!(d.ops, [], "a second rearm writes nothing");
+    assert_eq!(d.irq_mask & RX_DONE, 0, "and leaves it unmasked");
+}
+
+#[test]
+fn the_rearm_lifts_no_mask_with_the_receiver_off() {
+    let mut d = board();
+    let mut g = Genet::init(&mut d, RX_BASE).unwrap();
+    g.start(&mut d, Speed::S1000, Receiver::Off);
+    g.ack_rx_interrupt(&mut d);
+    d.ops.clear();
+    assert!(g.rearm_rx_interrupt(&mut d));
+    assert_eq!(d.ops, [], "nothing written with the receiver off");
+    assert_eq!(d.irq_mask & RX_DONE, RX_DONE, "receive done stays masked");
+    // The receiver's own start unmasks it, and a frame then raises it.
+    g.start(&mut d, Speed::S1000, Receiver::On);
+    assert!(d.deliver(64));
+    assert!(d.line());
+}
+
+#[test]
 fn no_interrupt_is_unmasked_with_the_receiver_off() {
     let mut d = board();
     let mut g = Genet::init(&mut d, RX_BASE).unwrap();
