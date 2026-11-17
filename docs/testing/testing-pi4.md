@@ -1783,6 +1783,30 @@ answering the health ping rather than ignoring it, instead of treating
 `NET_WAIT` as a timer. That touches supervision, which is why it was not written
 blind against a rig that cannot run it.
 
+**Fixed on 2026-11-17 (`netd/load-retry-wait`), and two claims above corrected
+by the boots that fixed it.** The retries now sleep (`SLEEP_UNTIL`, netd's
+`load_pause`) against a 2 s deadline on `MONOTONIC_US`, so the budget is a time
+whatever arrives, for `load_netconf`'s retries too. The mailbox is left as it
+is: a request waits at most the budget and gets `serve`'s own answer.
+
+- *The ping is not what queues.* The supervisor pings a server it has seen
+  `Blocked` for 64 ticks in a row, and a retry that waits by the clock is
+  woken by a tick that sees netd `Runnable`, so during the retries no ping is
+  sent. The messages that do queue are a client's, and frames on a busy wire.
+- *QEMU can test it after all.* `test-blank-disk.py`'s blank disk mounts
+  nothing, so the loop runs its whole budget, and the shell's prompt is up
+  while it does. With a temporary line timing the load: `main` took 2435 ms
+  with nothing typed and **1327 ms** with `cpu 10.0.2.2:564 hello` typed
+  during it; the fix took 2037 ms and 2033 ms, with no restart, and `cpu`
+  answered `cpu: no network` by `serve` after the load. The fix above, the
+  mailbox answered during the load, was built and run as well: it sent the
+  shell 72 bytes of status words as `cpu` output (`NETOP_RUN` replies text,
+  not a status), and a sleep with the answering taken out was not restarted.
+
+Still to see on the board: a boot whose card mounts late, on a busy wire. A
+disk mounting after 2 s still leaves the machine with no identity and the
+default address (`roadmap-pi-net.md`, step 8).
+
 ### Risk 5: no second console when the first one fails
 
 Unlike a VM, there is no host-side window to fall back on. Serial and HDMI are

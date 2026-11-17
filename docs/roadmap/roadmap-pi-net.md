@@ -1634,6 +1634,12 @@ own. The entries below stand as they were put.
      Since #475 it returns at once, which makes this item worse.) Nothing reads either file
      again. Not seen on the board, whose card mounted in time on every
      boot; the cure is a wait that is a wait, for both files.
+     **The wait fixed on 2026-11-17** (`netd/load-retry-wait`): the
+     retries sleep (`SLEEP_UNTIL`) against a 2 s deadline on
+     `MONOTONIC_US`, so the budget is 2 s whatever arrives. Shown on
+     QEMU, not yet on the board (`testing-pi4.md`, risk 4b). What stays
+     open is the rest of this item: a disk that mounts after 2 s still
+     leaves the defaults, and nothing reads either file again.
    - *Three parsers of a dotted address serve `netd`:* `netconf`'s,
      `clusterkeys::parse_ip` with the same rules, and `netd`'s own
      `parse_ip4`. One crate holding one is the change.
