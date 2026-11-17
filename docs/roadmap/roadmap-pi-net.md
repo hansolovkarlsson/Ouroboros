@@ -1786,6 +1786,21 @@ own. The entries below stand as they were put.
      writes apart, and now records their order). On the board the
      rearm's check is the count: without it every interrupt after the
      first would be masked for good, and the count would stay at 1.
+   - *The third review of #475 (`5a853848`):* `NET_WAIT` blocked without
+     asking its wake condition (`block_current_and_switch` does not
+     look; only the tick does), so a frame that came in before the wait
+     waited a tick, and on the GENET with receive done still masked by
+     a rearm that had found it. It now returns at once when the rearm
+     finds a frame or the condition already holds (`tasks::ready_now`).
+     That predates step 9 and holds for virtio-net too: on QEMU, 100
+     HTTP fetches took **0.25 s with the check and 2.78 s without it**
+     (0.26 s with it again). And `gic::enable_declared_spi` sets the
+     SPI level-triggered in `GICD_ICFGR` before the enable and says what
+     the GIC held: the ack's mask and the wait's rearm hold only for a
+     level line, and the reset value is the implementation's. On QEMU
+     both GIC versions held level already (GICv2 in
+     `test-server-children`, GICv3 in a scratch boot with virtio-net that
+     served 20 fetches); the board's line says what its firmware left.
    - *Sixth boot, confirming the review (build `0d920489063b`):* the GIC's
      line, the first-interrupt line, and at 256 frames **155 receive
      interrupts taken**, none dropped; a hundred pings and three hundred
