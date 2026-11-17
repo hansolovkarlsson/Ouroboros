@@ -134,8 +134,10 @@ MAC address in `UMAC_MAC0`/`UMAC_MAC1` for the operating system to read
 it network-booted.
 **What the board said of these on 2026-11-13:** the PHY's address and the
 MAC address were right; "idle unless it network-booted" was **wrong**; the
-two interrupts' roles are still unread, since the driver is polled. The
-block below has the values.
+two interrupts' roles were then unread, the driver being polled. Step 9
+read the first on 2026-11-16: INTID 189 carries the default queue's
+receive done, and the driver takes it (the second, 190, is still unread).
+The block below has the values.
 
 **From the board's registers** (a Pi 4, three boots on 2026-11-13 of build
 `e9cd5de57bfc`, debug, from an SD card with `\NETDUMP`: two with the cable
@@ -1676,7 +1678,10 @@ own. The entries below stand as they were put.
 
    **Built 2026-11-16, and run on the board the same day: it works,
    after one change the board asked for** (the result is at the end of
-   this step).
+   this step). The two items below are the first build's: since the
+   change the ack masks as well as clears, and the first-interrupt line
+   reads `first receive interrupt taken (INTID 189), and masked at the
+   device until the ring is drained`.
    - *The crate:* `init` writes the receive ring's `DMA_MBUF_DONE_THRESH`
      to 1, Linux's default, so receive done is raised after every frame
      (U-Boot takes no interrupt and leaves the firmware's value). `start`,
@@ -1764,6 +1769,20 @@ own. The entries below stand as they were put.
      out, and three of the step's constants made wrong, each failed a
      test (the start's write passed at first, and got its own test). The
      register writes the board ran are the same.
+   - *The second review of #475 (`7977067d`, and a test after it):* the
+     rearm moved from `poll_frame`'s drain to empty into `NET_WAIT`, just
+     before the reader blocks (`Nic::rearm_interrupt`), so a `netd`
+     restarted between its last frame and its next `NET_RECV` no longer
+     waits with receive done masked. The ack reads the mask back after
+     its two posted writes, with a `dsb` after the read in the kernel, so
+     the GIC's end of interrupt cannot see the line still high. `start`
+     unmasks only when it turns the receiver on. The model holds receive
+     done up while frames wait, whatever the driver reads. Controlled on
+     the host: twelve mutations, each failing a test (the read-back moved
+     before the writes passed at first: the test compared reads and
+     writes apart, and now records their order). On the board the
+     rearm's check is the count: without it every interrupt after the
+     first would be masked for good, and the count would stay at 1.
    - *Sixth boot, confirming the review (build `0d920489063b`):* the GIC's
      line, the first-interrupt line, and at 256 frames **155 receive
      interrupts taken**, none dropped; a hundred pings and three hundred
