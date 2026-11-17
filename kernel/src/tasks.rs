@@ -2163,6 +2163,15 @@ impl WaitReason {
     }
 }
 
+/// What `reason`'s wait would answer now for the calling task, asked
+/// before blocking on it, so a syscall whose condition already holds
+/// returns at once instead of waiting for the tick's wake check. For a
+/// reason whose poll consumes nothing (`NetInput`'s), asking costs
+/// nothing.
+pub(crate) fn ready_now(reason: WaitReason) -> Option<u64> {
+    reason.poll(current_index().index())
+}
+
 /// Whether `task`'s mailbox holds at least one queued message - the
 /// message half of `WaitReason::NetInput`'s wake condition.
 fn has_queued_message(task: usize) -> bool {

@@ -161,11 +161,10 @@ pub unsafe fn send_sgi(gicd_base: usize, sgi: u32, core: usize) -> Result<(), &'
 /// a target, reaches no core, so this routes an SPI to the core that
 /// enables it (its own target mask, read back from the banked ITARGETSR
 /// registers by [`own_target_mask`]) before enabling it. Priority
-/// (`GICD_IPRIORITYR`) and trigger mode
-/// (`GICD_ICFGR`) are left at reset: reset priority (0) passes the wide-open
-/// `GICC_PMR` set in [`init`], and QEMU's virtio-mmio drives its line
-/// level-style, matching the level reset default - so no extra config is
-/// needed for this project's one SPI user.
+/// (`GICD_IPRIORITYR`) is left at reset: reset priority (0) passes the
+/// wide-open `GICC_PMR` set in [`init`]. The trigger mode (`GICD_ICFGR`)
+/// is not set here: a firmware-declared SPI, the only kind enabled, is set
+/// to level by `gic::enable_declared_spi` before this runs.
 ///
 /// # Safety
 /// Must run after [`init`].

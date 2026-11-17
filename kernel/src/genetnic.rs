@@ -47,11 +47,13 @@
 //! cleared alone, the device raised it again for every frame still waiting
 //! (302 interrupts for 257 frames on the board). So the next interrupt
 //! comes only once `netd` has drained the ring and asked to wait. The
-//! rearm is the wait's and not the drain's so that no reader, a `netd`
-//! restarted part way through a drain included, can wait with it masked.
-//! The crate masks every interrupt at the set-up and unmasks receive done
-//! alone when the receiver comes on. The tick's `net_has_frame()` stays behind it, as it does for
-//! virtio-net: an interrupt missed costs a tick.
+//! rearm is the wait's and not the drain's, and a wait that finds a frame
+//! there returns for it instead of blocking, so no reader blocks with it
+//! masked, a `netd` restarted part way through a drain included. The
+//! crate masks every interrupt at the set-up and unmasks receive done
+//! alone when the receiver comes on. The tick's `net_has_frame()` stays
+//! behind it, as it does for virtio-net: an interrupt missed costs a
+//! tick.
 //!
 //! **The receive buffers** are [`RX_AREA`], one page-aligned static of 256
 //! buffers of 2048 bytes that the device writes by DMA, and **the
@@ -799,10 +801,14 @@ impl Device {
     /// `ack_rx_interrupt`, which keeps the masked state its rearm reads).
     ///
     /// The crate reads the mask back after its two writes, so they have
-    /// reached the device when the read returns; the `dsb` after it holds
+    /// reached the GENET when the read returns; the `dsb` after it holds
     /// the IRQ path's end of interrupt, a write to the GIC, until the read
-    /// has returned. Without both the GIC could see the line still high
-    /// and deliver the interrupt again.
+    /// has returned. That orders the end of interrupt after the device's
+    /// own registers took the mask. It does not prove the line's fall has
+    /// reached the GIC's input through the SoC's wiring: if it lagged, the
+    /// GIC would deliver once more, this ack would run on a masked
+    /// interrupt (harmless) and count it, and `netd` would be woken with
+    /// nothing new.
     pub(crate) fn ack_interrupt(&mut self) {
         self.genet.ack_rx_interrupt(&mut self.bus);
         // SAFETY: a barrier alone; no memory or register is named.
@@ -817,13 +823,13 @@ impl Device {
     }
 
     /// Rearms the receive interrupt an ack masked, if no frame waits: from
-    /// `NET_WAIT`, under the kernel lock, before the reader blocks. A frame
-    /// that waits leaves it masked, and the wait returns at once for it
-    /// (its first look is `has_frame`); the next wait asks again. One that
+    /// `NET_WAIT`, under the kernel lock, before the reader blocks. `false`
+    /// when a frame waits: it stays masked, and `NET_WAIT` returns for the
+    /// frame instead of blocking; the next wait asks again. One that
     /// arrives after the rearm raises the line. The crate writes nothing
     /// when no ack masked it, so a wait that follows a wait costs nothing.
-    pub(crate) fn rearm_interrupt(&mut self) {
-        self.genet.rearm_rx_interrupt(&mut self.bus);
+    pub(crate) fn rearm_interrupt(&mut self) -> bool {
+        self.genet.rearm_rx_interrupt(&mut self.bus)
     }
 
     /// Takes one received frame if a usable one waits: copies it into

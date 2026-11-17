@@ -676,15 +676,14 @@ impl Genet {
     /// one with receive done set on entry and a frame waiting, every
     /// clear taking effect at once. [`rearm_rx_interrupt`] unmasks it.
     ///
-    ///
     /// **The mask is read back last.** The two writes are posted: a write
     /// to device memory may be acknowledged before it reaches the device,
     /// and the end of interrupt the caller writes next goes to another
-    /// device (the GIC), which nothing orders after them. Had the GIC seen
-    /// the line still high it would have delivered the interrupt again.
-    /// A read of the same block returns only once the writes before it
-    /// have reached it; the caller orders its end of interrupt after the
-    /// read (the kernel's `dsb`, `genetnic.rs`).
+    /// device (the GIC), which nothing orders after them. A read of the
+    /// same block returns only once the writes before it have reached it,
+    /// and the caller orders its end of interrupt after the read (the
+    /// kernel's `dsb`, `genetnic.rs`). That is all it orders: the line's
+    /// fall still has the SoC's wiring to cross to the GIC.
     ///
     /// [`rearm_rx_interrupt`]: Self::rearm_rx_interrupt
     pub fn ack_rx_interrupt<B: Bus>(&mut self, bus: &mut B) {

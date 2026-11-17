@@ -147,11 +147,13 @@ pub(crate) fn net_intid() -> Option<u32> {
 }
 
 /// Acknowledges the NIC's pending interrupt at the device (from the IRQ
-/// handler - see `exceptions::rust_irq_handler`), so its line is low when
-/// the handler returns; when the device raises the next one is the arm's
-/// (`nic.rs`'s module doc). A no-op if no NIC is installed. Not gated: it
-/// touches only the device's own interrupt registers and is reached only
-/// from the kernel's IRQ handler, never a syscall.
+/// handler - see `exceptions::rust_irq_handler`); when the device raises
+/// the next one is the arm's (`nic.rs`'s module doc). A no-op if no NIC
+/// is installed. Not gated: reached only from the kernel's IRQ handler,
+/// never a syscall. What it does under the kernel lock is the arm's:
+/// virtio-net reads its interrupt status and writes it back; the GENET
+/// masks and clears receive done, reads the mask back, has a `dsb`, counts
+/// the interrupt, and prints one line at the first (`genetnic.rs`).
 pub(crate) fn net_ack_interrupt() {
     if let Some(device) = unsafe { &mut *NET.get() } {
         // SAFETY: the IRQ path, under the kernel lock (lock.rs); a device
@@ -2137,9 +2139,9 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
             // nonzero timeout also wakes the caller once it elapses with no
             // input - the timer the network server's TCP retransmit timeout
             // needs when a peer goes silent. Block until a frame arrives, a
-            // message is queued, or the deadline passes (or one is already
-            // true - the poll checks up front, never sleeping through pending
-            // input). Same frame-overwrite blocking contract as READ_CHAR.
+            // message is queued, or the deadline passes; when one is already
+            // true it returns at once (asked below, before blocking). Same
+            // frame-overwrite blocking contract as READ_CHAR.
             let deadline = if arg0 == 0 {
                 0
             } else {
@@ -2147,14 +2149,25 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
                 crate::exceptions::ticks() + ticks.max(1)
             };
             // The receive interrupt armed before the wait, whatever the
-            // reader did since the last one (nic.rs's module doc).
-            if let Some(device) = unsafe { &mut *NET.get() } {
+            // reader did since the last one (nic.rs's module doc). `false`
+            // is a frame waiting, which the reader takes instead.
+            let armed = match unsafe { &mut *NET.get() } {
                 // SAFETY: under the kernel lock; a device in the cell is
                 // one `main.rs` initialized before installing it.
-                unsafe { device.rearm_interrupt() };
+                Some(device) => unsafe { device.rearm_interrupt() },
+                None => true,
+            };
+            let reason = tasks::WaitReason::NetInput { deadline };
+            // The wait's condition asked before blocking, not only on the
+            // tick: `block_current_and_switch` blocks without looking, so a
+            // frame or message already there would wait a tick, and on the
+            // GENET with its interrupt still masked (the third review of
+            // #475).
+            if !armed || tasks::ready_now(reason).is_some() {
+                return 0;
             }
             unsafe {
-                tasks::block_current_and_switch(frame, tasks::WaitReason::NetInput { deadline })
+                tasks::block_current_and_switch(frame, reason)
             }
         }
         syscall_abi::FG => {

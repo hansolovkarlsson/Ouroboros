@@ -1754,8 +1754,10 @@ own. The entries below stand as they were put.
      80; not explained by anything the boot logged, and not part of the
      check.)
    **The check, as it stands:** the count is one interrupt for a frame or
-   a burst of them, so it is at most the frames the device took and not
-   at least: 158 for 260 here. With the mask, "at least a hundred after a
+   a burst of them, so it is not at least the frames the device took, and
+   is expected below them (158 for 260 here) though nothing bounds it
+   there: a line whose fall lagged the ack at the GIC would be delivered
+   and counted once more. With the mask, "at least a hundred after a
    hundred pings" is met (158) but is not the property; the property is
    that the count is not 0 with the unmask and is 0 without it.
    - *The review of #475 (`7e84d248`, `ea22730f`), after the boots:* the
@@ -1775,7 +1777,8 @@ own. The entries below stand as they were put.
      restarted between its last frame and its next `NET_RECV` no longer
      waits with receive done masked. The ack reads the mask back after
      its two posted writes, with a `dsb` after the read in the kernel, so
-     the GIC's end of interrupt cannot see the line still high. `start`
+     the GIC's end of interrupt comes after the device took the mask (the
+     third review: not proof that the line's fall reached the GIC). `start`
      unmasks only when it turns the receiver on. The model holds receive
      done up while frames wait, whatever the driver reads. Controlled on
      the host: twelve mutations, each failing a test (the read-back moved

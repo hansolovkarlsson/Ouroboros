@@ -28,8 +28,10 @@
 //!   network server next waits with the ring drained.
 //! - [`Nic::rearm_interrupt`] is called by `NET_WAIT`, under the kernel
 //!   lock, before the reader blocks: an arm whose ack left its interrupt
-//!   masked unmasks it there if no frame waits, so no reader waits with it
-//!   masked. It does nothing for virtio-net.
+//!   masked unmasks it there if no frame waits, and answers `false` if one
+//!   does, so `NET_WAIT` returns for it instead of blocking. No reader
+//!   blocks with the interrupt masked. virtio-net's answers `true` and
+//!   writes nothing.
 //! - Every arm takes a frame to send, and a buffer to receive into, of any
 //!   length up to `syscall_abi::NET_MAX_FRAME`. That bound is the ABI's and
 //!   is the same for every device, so `netd`'s buffers do not depend on the
@@ -113,14 +115,15 @@ impl Nic {
     }
 
     /// Before the reader waits for a frame: rearms a receive interrupt the
-    /// ack left masked, if no frame waits (the module doc).
+    /// ack left masked, if no frame waits. `false` when one does: the
+    /// reader is to take it rather than wait (the module doc).
     ///
     /// # Safety
     /// The driver's own contract: the device initialized, under the kernel
     /// lock.
-    pub unsafe fn rearm_interrupt(&mut self) {
+    pub unsafe fn rearm_interrupt(&mut self) -> bool {
         match self {
-            Nic::Virtio(_) => {}
+            Nic::Virtio(_) => true,
             Nic::Genet(d) => d.rearm_interrupt(),
         }
     }
