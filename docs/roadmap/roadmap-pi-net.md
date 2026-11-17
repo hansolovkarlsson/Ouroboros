@@ -1763,8 +1763,12 @@ own. The entries below stand as they were put.
      each of the flag's three writes and the rearm's two guards taken
      out, and three of the step's constants made wrong, each failed a
      test (the start's write passed at first, and got its own test). The
-     register writes the board ran are the same; a confirming boot is
-     owed.
+     register writes the board ran are the same.
+   - *Sixth boot, confirming the review (build `0d920489063b`):* the GIC's
+     line, the first-interrupt line, and at 256 frames **155 receive
+     interrupts taken**, none dropped; a hundred pings and three hundred
+     fetches from the Mac, then 50 more fetches all equal, and no fault,
+     restart or warning in the boot.
 
 10. **Two boards.** Two Pi 4s on one switch, each with its address file
     and cluster keys.
