@@ -1,6 +1,6 @@
 # Blind instruments
 
-*A process retrospective, 2026-09-02, extended through 2026-11-15. It began
+*A process retrospective, 2026-09-02, extended through 2026-11-16. It began
 with a day of small roadmap items (five PRs, one release, no arc) during which
 five separate tools reported success while proving nothing. Every later day
 that found another instrument of the same kind added a dated section after
@@ -8,7 +8,7 @@ that found another instrument of the same kind added a dated section after
 off a phone photo, the Raspberry Pi's bench tools, and on 2026-10-09 the
 stale-image guard and the four blind spots in the guard that replaced it, and
 on 2026-10-10 the controls a keyboard change blinded and then the multi-core
-rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's, and on 2026-10-20 the volume bounds', and on 2026-10-21 the exFAT sets' and names', and on 2026-10-22 the stall classifier's and sector 0's, and on 2026-10-23 the blank disk's, and on 2026-10-24 the exFAT frees' mutants and plants, and on 2026-10-25 the disk-trace stalls' classifier, fake, arithmetic and a host sleep, and on 2026-10-28 the read-only gate's control, review, run script and wait, and on 2026-10-29 the open probes' and the disk gate rig's silence, sites, truncate check and unspellable control, and on 2026-10-30 the read-only mount's shared tail, unheld order, overwritten transcript and unread pass, and the disk-gate staging's check run once, and that evening the boot start's bug no mount showed, its rig's absent step read as empty and its recomputed signature, and on 2026-10-31 the exFAT free's counts blind to order, the batch model's assertion that skipped the head, a fix no boot could grade, and a count I predicted for an order, and on 2026-11-01 an exit code that flattened two verdicts, a hint a byte wide read a cluster at a time, a model that started where it assumed and two citations that pointed at nothing, and on 2026-11-04 a rig that attached its disks so macOS could not mount them, a test helper whose encoding broke a deep nest before the walk reached it, and a grep that hid where a fault happened, and on 2026-11-05 a probe whose two writes libc joined into one, a control run without its boot flag, and a diagnostic whose only first run was on the Pi, and on 2026-11-07 a self-test case refused by the wrong rule, a rig that graded only runs that succeed, and a mutation caught as a crash, and on 2026-11-08 a filter that read a refused boot as silence, a control placed where the two answers agree, and a glob that read yesterday's logs, and on 2026-11-09 a control the far side's reap graded, a control a new guard answered for, and a review that read a mutant as the code, and on 2026-11-10 to 2026-11-11 a rig whose two rounds could have been one, a mark that covered only the paths driven, a reading that dropped the calls it could not name, a self-test that passed on text its author wrote, and a clause and a premise nothing observed, and on 2026-11-11 to 2026-11-12 an instrument's note taken for a finding, a check that passed for another reason, an observer too patient to see the fault, and a round that passed with its fix taken out, and later on 2026-11-12, from the Pi's Ethernet scan, a test that broke two things at once, a reading taken at the wrong moment, a rig named as the guard of code it never runs, and a list of what must not appear that was already short, and on 2026-11-13, from the Pi's first frame, an observer placed where neither answer could reach it and a pass that prints nothing, and on 2026-11-15, from the Pi's receive path and its address, a model written from the driver it tests, a line said once, a checksum of an error page, a comparison with a copy the device did not hold, and a wait that passed over its own answer. The spine below has held for all of them.*
+rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's, and on 2026-10-20 the volume bounds', and on 2026-10-21 the exFAT sets' and names', and on 2026-10-22 the stall classifier's and sector 0's, and on 2026-10-23 the blank disk's, and on 2026-10-24 the exFAT frees' mutants and plants, and on 2026-10-25 the disk-trace stalls' classifier, fake, arithmetic and a host sleep, and on 2026-10-28 the read-only gate's control, review, run script and wait, and on 2026-10-29 the open probes' and the disk gate rig's silence, sites, truncate check and unspellable control, and on 2026-10-30 the read-only mount's shared tail, unheld order, overwritten transcript and unread pass, and the disk-gate staging's check run once, and that evening the boot start's bug no mount showed, its rig's absent step read as empty and its recomputed signature, and on 2026-10-31 the exFAT free's counts blind to order, the batch model's assertion that skipped the head, a fix no boot could grade, and a count I predicted for an order, and on 2026-11-01 an exit code that flattened two verdicts, a hint a byte wide read a cluster at a time, a model that started where it assumed and two citations that pointed at nothing, and on 2026-11-04 a rig that attached its disks so macOS could not mount them, a test helper whose encoding broke a deep nest before the walk reached it, and a grep that hid where a fault happened, and on 2026-11-05 a probe whose two writes libc joined into one, a control run without its boot flag, and a diagnostic whose only first run was on the Pi, and on 2026-11-07 a self-test case refused by the wrong rule, a rig that graded only runs that succeed, and a mutation caught as a crash, and on 2026-11-08 a filter that read a refused boot as silence, a control placed where the two answers agree, and a glob that read yesterday's logs, and on 2026-11-09 a control the far side's reap graded, a control a new guard answered for, and a review that read a mutant as the code, and on 2026-11-10 to 2026-11-11 a rig whose two rounds could have been one, a mark that covered only the paths driven, a reading that dropped the calls it could not name, a self-test that passed on text its author wrote, and a clause and a premise nothing observed, and on 2026-11-11 to 2026-11-12 an instrument's note taken for a finding, a check that passed for another reason, an observer too patient to see the fault, and a round that passed with its fix taken out, and later on 2026-11-12, from the Pi's Ethernet scan, a test that broke two things at once, a reading taken at the wrong moment, a rig named as the guard of code it never runs, and a list of what must not appear that was already short, and on 2026-11-13, from the Pi's first frame, an observer placed where neither answer could reach it and a pass that prints nothing, and on 2026-11-15, from the Pi's receive path and its address, a model written from the driver it tests, a line said once, a checksum of an error page, a comparison with a copy the device did not hold, and a wait that passed over its own answer, and on 2026-11-16, from the supervisor's restart rigs and the Pi's receive interrupt, a serving check that passed with its server dead, a check that passed in its own control, a count that passed with the fault in it, two tests that checked the parts and not the property, and a write no emulator could make fail. The spine below has held for all of them.*
 
 The previous day's retrospective
 ([`repairing-the-repairs-postmortem.md`](repairing-the-repairs-postmortem.md))
@@ -3088,3 +3088,70 @@ And one from 2026-11-13 closed. The stop's line (`made quiet in N us`)
 was "a line that a boot which skipped the stop would also not print"
 until a board printed it. It printed on every one of today's seven
 boots, 13 us each time.
+
+## Five more, from the restart rigs and the receive interrupt (2026-11-16)
+
+Every supervised server has a restart rig now, and the Pi's Ethernet
+takes its receive interrupt. Both arcs were built check first, each
+check run against a control, and the controls found five instruments
+that would have read green over the fault.
+
+**A serving check passed with the server dead.** The rig for `cond`
+asked, after each restart, whether an `echo` printed. The control
+refused cond's slot in `supervisor::register` and 5 of 12 checks failed
+where accountd's, built the same way, failed 7 of 12. The `echo` still
+printed with cond gone: `ulib::con_write` hands the bytes of a failed
+call to the kernel's `PUTC`, so anything a program prints reaches the
+console whether cond is alive or not. The rig's cond now answers a file
+holding `restart-rig-echo` with a line only it writes, and the control
+failed 7. **A check that a server serves has to be a request only that
+server can answer. Where a fallback prints the same thing, the fallback
+is part of what the check measures.**
+
+**A check that passed in its own control.** fsd's rig had a thirteenth
+check, that the kernel never said it had no kept image. With the old
+192 KB limit put back, eight others failed and that one passed: an
+unregistered server never reaches the line it looks for. It was removed.
+**A check is only as good as the control that was run against it, and a
+control that is only counted in its failures never says which checks sat
+through it.** The control listed every check's verdict, which is what
+showed it.
+
+**"At least a hundred interrupts" passed with the fault in it.** The
+step's check asked for a count of at least a hundred after a hundred
+pings. The first build took 304 interrupts by 256 frames, more than
+frames, and met it; so did every later build. The count is one interrupt
+for a frame or a burst of them, so it cannot be graded against the
+frames. The property is a count above 0 with the unmask in place and
+exactly 0 with it left out, and that is what the board's control gave.
+The extra interrupts were not found by the check. They were found by
+the log, because I printed the count beside the frames taken. **A
+threshold that the fault also clears is a floor, not a check; say what
+the count must be in the control too.**
+
+**Two tests that checked the parts and not the property.** Both found by
+mutation, in the same pull request. The ack's read-back of the mask was to come
+after its two writes, and the test compared the writes and then the
+reads, each correct; with the read moved in front of the writes it
+passed. It now records the three in the order they came. And `start`'s
+reset of the masked flag, taken out, failed nothing, because every test
+that mattered ended on a rearm that cleared the flag itself. Each got a
+test that fails alone. **When a rule is an order or a state carried
+across calls, a test of the calls one at a time cannot see it.** A third
+was the model's own: a test that wrote a clear to the device's model and
+asserted the model's re-raise, which no change to the driver could make
+fail, and which hung the re-raise on every `Bus::read`, so other tests
+passed on reads the driver happened to make. The model holds the rule
+whatever is read now, and the test says it tests the model.
+
+**A write no emulator can make fail.** The kernel sets a declared SPI
+level-triggered at the GIC before enabling it, because the mask and the
+rearm hold only for a level line. QEMU leaves its SPIs level already, so
+with the write taken out nothing changes on any rig in the tree. It has
+no control and says so: the boot line says what the GIC held, and on the
+Pi's firmware it read level, so the write changed nothing there either.
+A check for it would have to be a boot with the firmware's trigger forced
+to edge, which nothing here can arrange. **Where no control can be
+built, the record says which writes have none, and the board's line is
+the only observer.**
+

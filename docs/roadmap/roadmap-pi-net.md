@@ -1628,7 +1628,10 @@ own. The entries below stand as they were put.
      cluster identity. `NET_WAIT` is not a sleep (`testing-pi4.md`, risk
      4b): with a frame or a message waiting it returns at once, so the
      retries can be spent in a moment, and since step 7 a board on a
-     busy wire always has a frame waiting. Nothing reads either file
+     busy wire always has a frame waiting. (Until #475, 2026-11-16, it
+     returned at the next tick, not at once: it blocked without asking,
+     so each retry cost up to 20 ms and the budget at most half its 2 s.
+     Since #475 it returns at once, which makes this item worse.) Nothing reads either file
      again. Not seen on the board, whose card mounted in time on every
      boot; the cure is a wait that is a wait, for both files.
    - *Three parsers of a dotted address serve `netd`:* `netconf`'s,

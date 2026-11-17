@@ -1,7 +1,7 @@
 # True when written
 
 *A process retrospective, the twenty-ninth, covering 2026-09-03 and extended
-through 2026-11-14. Five PRs, no new subsystem, and four defects that were all
+through 2026-11-16. Five PRs, no new subsystem, and four defects that were all
 the same defect: a statement that was correct on the day someone typed it, and
 stopped being correct without anyone touching the file it lived in. The later
 sections, each dated, add the variants found since: claims false on arrival, a
@@ -18,7 +18,8 @@ update falsified loudly, and a recommendation taken from records the
 board's newest log had overtaken, and a prediction from a store the board
 never had, and a roadmap item asking for what was already built, and four
 sentences about a device no emulator has, each written from memory or from
-an argument and none from the file it was about.*
+an argument and none from the file it was about, and a comment on a wait
+that said it looked first, which it never had.*
 
 The previous day's retrospective
 ([`blind-instruments-postmortem.md`](blind-instruments-postmortem.md)) had the
@@ -1409,6 +1410,80 @@ What stopped it was not a third review, which would have read the second
 round's sentences, but ending the rounds and handing the diff to a
 reader. **A sentence that says a thing cannot be done yet is the one to
 open the code for: it ends the looking, so it is checked by nobody.**
+
+## The comment that said the wait looked first (2026-11-16)
+
+Pi net step 9 changed what the GENET's interrupt ack does and was reviewed
+three times. The reviews found no wrong register and the same kind of
+sentence each time, in four shapes, one of them old enough to have a
+commit.
+
+*The sentences the change falsified, in other files.* The ack had
+cleared receive done so that the device could raise the next interrupt.
+It now masks it, and the next interrupt comes after the reader has asked
+to wait. `nic.rs`'s contract said "clears ... so it can raise the next
+one", `exceptions.rs` said the same at the call, `genetnic.rs`'s module
+doc described the clear-only build, `start`'s doc said its writes were
+U-Boot's when two were Linux's, and the bit's doc said "not yet read on
+the board" the day it was read. Five sentences in four files, each true
+of the commit before. The first review found them by reading the files
+the diff did not touch. This is the file's oldest shape, with one
+difference: they were mine, from the same two days, and the change that
+falsified them was a commit I had just made.
+
+*The invariant written beside its fix.* The second review's fix moved
+the rearm into `NET_WAIT` and the module doc said that no reader, a
+restarted `netd` included, could now wait with receive done masked. It
+was false whenever a frame waited at the rearm: the rearm left it masked,
+`NET_WAIT` blocked anyway, and the reader waited masked until the tick.
+The third review found it, and the fix was to make the sentence true
+rather than reword it: `NET_WAIT` returns for the frame. The same shape
+as the 11-13 section above: the record of a fix written with only the
+fixed code on the screen.
+
+*A comment that had never been true.* In `NET_WAIT`'s arm of the
+syscall: "Block until a frame arrives, a message is queued, or the
+deadline passes (or one is already true - the poll checks up front,
+never sleeping through pending input)." It came in with the TCP
+retransmit timeout on 2026-08-21 (`2fe61b16`), and the arm at that
+commit calls `block_current_and_switch` straight away, which blocks
+without asking: only the tick's wake check ever asked. So for three
+months a frame that came in before `netd` reached its wait cost a tick,
+on virtio-net, with the comment saying it could not. Nothing measured
+it, because nothing gave a tick that meaning. What did was the mask: a
+frame left behind a masked interrupt would wait for the tick with
+nothing to wake it. The measurement came after the finding, as it should
+not have had to: 100 HTTP fetches on QEMU took 0.25 s with the check
+and 2.78 s without it. The comment was a claim that guarded a behaviour
+(latency) and so was a check nobody had written; the review that found
+it read the callee, `block_current_and_switch`, which the diff did not
+touch. And it had been believed: `testing-pi4.md`'s risk 4b said that
+with a frame waiting `NET_WAIT` "returns in microseconds" and the plan's
+step 8 said "returns at once", the second written on 2026-11-15 by me
+and carried in yesterday's standup. Both follow the comment's claim and
+were false of the kernel until #475. The closeout
+found them and says what the old behaviour was.
+
+*A premise about a device the target lacks.* `gicv2.rs` left the trigger
+mode at reset because QEMU's virtio-mmio drives its line level-style,
+"so no extra config is needed for this project's one SPI user". The
+Pi's one SPI user is the GENET, which QEMU does not model, so the
+premise was about a different machine than the code runs on, and the
+mask-and-rearm design holds only for a level line. The kernel now sets
+a declared SPI level and prints what the GIC held. On the Pi's firmware
+that was level, so nothing was wrong. The comment was.
+
+And the one that was not a comment: the kernel's boot warning for a
+transmit index off a multiple of 256, which rested on my claim that a
+wrong rule fails silently. The control for #472 put the old rule back and
+the first send timed out.
+
+**A comment that says the code looks before it acts is a check on a
+behaviour nothing exercised. It stayed for three months because the only
+thing it guarded was a delay, and a delay is the one defect a green suite
+reports as correct. Where a comment claims a wait or a blocking path
+checks its condition first, read the call below it, and time the case
+the comment says is free.**
 
 ## What actually worked
 
