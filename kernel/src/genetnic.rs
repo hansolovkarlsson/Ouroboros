@@ -26,11 +26,14 @@
 //! between the crate's `rx_next` and `rx_release`, while its buffer is
 //! not the device's to fill. A boot with no link starts nothing; every send after
 //! it asks the PHY for the link, until one finds it up and starts the
-//! MAC, so a cable put in later works at the next send (the plan's
-//! decision D3, as recommended). That asking is up to three MDIO reads
-//! under the kernel lock on each such send, and each read may poll for
-//! 20 ms on a bus that does not answer; nothing remembers that the last
-//! one failed (open in the plan's step 6).
+//! MAC (the plan's decision D3, as recommended), and so does `netd`'s
+//! wait, once a second ([`Device::link_at_wait`], since 2026-11-17, by the
+//! rule in `genet::linkask`), so a cable put in later is heard within
+//! about a second whether or not the board sends. That asking is up to
+//! three MDIO reads under the kernel lock, and each read may poll for
+//! 20 ms on a bus that does not answer. The wait stops asking after three
+//! asks running fail to read; a send does not remember that the last one
+//! failed (open in the plan's step 6).
 //!
 //! **Found, never assumed** (the plan's design 1): [`discover`] takes the
 //! one GENET the ACPI tables declare present, before the exit, and nothing
@@ -75,6 +78,7 @@
 use core::cell::UnsafeCell;
 
 use genet::mac::{Genet, InitError, Receiver, Rx, RxDrop, TxError, DESCS, RX_AREA_LEN, RX_BUF_LEN, TX_MAX_FRAME, TX_MIN_FRAME};
+use genet::linkask::{Ask, LinkAsk};
 use genet::phy::{self, Link, ReadBack, Speed};
 
 use crate::{acpi, console, mmu, timer};
@@ -438,6 +442,10 @@ pub(crate) struct Device {
     said_timeout: bool,
     said_busy: bool,
     said_link_error: bool,
+    /// When `netd`'s wait asks the link and when it stops: the crate's
+    /// rule (`genet::linkask`), on `timer::monotonic_us`'s clock
+    /// ([`Device::link_at_wait`]).
+    link_ask: LinkAsk,
 }
 
 /// Brings a quieted device up: the crate's reset and set-up, the PHY found
@@ -481,6 +489,7 @@ pub(crate) unsafe fn init(quieted: Quieted, dma_noncoherent: bool) -> Option<Dev
             said_timeout: false,
             said_busy: false,
             said_link_error: false,
+            link_ask: LinkAsk::new(),
         },
         Err(InitError::NoMac(m)) => {
             console::println!(
@@ -693,21 +702,12 @@ impl Device {
             return Err(TxError::BadLength(len));
         }
         if !self.genet.started() {
-            let Some((addr, id)) = self.phy else {
-                return Err(TxError::NotStarted);
-            };
-            match phy::link_resolved(&mut self.bus, addr, id) {
-                Ok(Link::Up { speed, full }) => {
-                    console::println!(
-                        "Ouroboros kernel: genet: link up at a send, {} Mb/s, {} duplex",
-                        speed.mbps(),
-                        if full { "full" } else { "half" }
-                    );
-                    self.start(speed);
-                }
-                // Down, negotiating, or up at a speed the PHY does not
-                // name: no line, it is the ordinary state of no cable.
-                Ok(_) => return Err(TxError::NotStarted),
+            match self.ask_link("a send") {
+                Ok(true) => {}
+                // Down, negotiating, up at a speed the PHY does not
+                // name, or no PHY: no line, it is the ordinary state of
+                // no cable.
+                Ok(false) => return Err(TxError::NotStarted),
                 // The PHY did not answer, or the bus is stuck: not the
                 // same thing as a link that is down.
                 Err(e) => {
@@ -820,6 +820,80 @@ impl Device {
             );
         }
         self.interrupts = self.interrupts.saturating_add(1);
+    }
+
+    /// Asks the PHY for the link once, with no wait for it to come up (up
+    /// to three MDIO reads, each of which may poll for 20 ms on a bus that
+    /// does not answer), and starts the MAC if it is up, with a line
+    /// naming `who` asked. `Ok(true)` when the MAC is started, by this ask
+    /// or before it; `Ok(false)` for a link not up, or no PHY to ask. The
+    /// one rule for asking after the boot's wait (decision D3), for a send
+    /// and for `netd`'s wait alike.
+    fn ask_link(&mut self, who: &str) -> Result<bool, genet::MdioError> {
+        if self.genet.started() {
+            return Ok(true);
+        }
+        let Some((addr, id)) = self.phy else {
+            return Ok(false);
+        };
+        match phy::link_resolved(&mut self.bus, addr, id)? {
+            Link::Up { speed, full } => {
+                console::println!(
+                    "Ouroboros kernel: genet: link up at {who}, {} Mb/s, {} duplex",
+                    speed.mbps(),
+                    if full { "full" } else { "half" }
+                );
+                self.start(speed);
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    /// From `NET_WAIT`, under the kernel lock, before the reader blocks:
+    /// while the MAC is not started (a boot that found no link), asks the
+    /// link when `genet::linkask` says it is due (once a second) and
+    /// starts the MAC if it is up, and returns how long the wait may block
+    /// in ms, the time left until the next ask, so the reader comes back
+    /// to ask. `None`, no limit, once the MAC is started, with no PHY to
+    /// ask, or once the asking has stopped.
+    ///
+    /// **Why the wait asks** (left open by the plan's step 7): until
+    /// 2026-11-17 only a send asked the link (D3), and nothing makes
+    /// `netd` send, so a cable put in after the boot's wait left the board
+    /// deaf, its receiver off, until a command typed on it sent a frame.
+    /// The wait is where `netd` comes back to, as step 9's rearm is.
+    ///
+    /// **Asks that fail stop it**, three running (`linkask`'s rule), with a
+    /// line: a stuck bus costs 20 ms a read, up to three reads an ask,
+    /// under the kernel lock. A send still asks as before.
+    pub(crate) fn link_at_wait(&mut self) -> Option<u64> {
+        // `ask_link` asks these too; here they decide whether the wait is
+        // limited at all, since with no PHY there is nothing to come back for.
+        if self.genet.started() || self.phy.is_none() {
+            return None;
+        }
+        match self.link_ask.at_wait(timer::monotonic_us()) {
+            Ask::Stopped => None,
+            Ask::Later { in_us } => Some(in_us.div_ceil(1000)),
+            Ask::Now => match self.ask_link("a wait") {
+                Ok(true) => None,
+                Ok(false) => {
+                    self.link_ask.answered(true);
+                    Some(genet::linkask::ASK_INTERVAL_US / 1000)
+                }
+                Err(e) => {
+                    if self.link_ask.answered(false) {
+                        console::println!(
+                            "Ouroboros kernel: genet: the wait asked the link {} times running and it did not read (last: {e:?}): only a send asks it from now on",
+                            genet::linkask::FAILED_ASKS_MAX
+                        );
+                        return None;
+                    }
+                    Some(genet::linkask::ASK_INTERVAL_US / 1000)
+                }
+            },
+        }
     }
 
     /// Rearms the receive interrupt an ack masked, if no frame waits: from

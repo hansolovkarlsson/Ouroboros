@@ -175,6 +175,7 @@ const _: () = {
     assert!(reg::RDMA_SCB_BURST_SIZE < reg::TX_DESCS);
 };
 
+pub mod linkask;
 pub mod mac;
 pub mod phy;
 

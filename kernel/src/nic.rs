@@ -114,6 +114,22 @@ impl Nic {
         }
     }
 
+    /// Before the reader waits for a frame, and before the rearm: for a
+    /// device whose MAC a boot with no link left off, asks the link and
+    /// starts it if it is up, and says how long the wait may block (in
+    /// ms) so the reader comes back to ask again. `None` for no limit.
+    /// virtio-net has no link to ask.
+    ///
+    /// # Safety
+    /// The driver's own contract: the device initialized, under the kernel
+    /// lock.
+    pub unsafe fn link_at_wait(&mut self) -> Option<u64> {
+        match self {
+            Nic::Virtio(_) => None,
+            Nic::Genet(d) => d.link_at_wait(),
+        }
+    }
+
     /// Before the reader waits for a frame: rearms a receive interrupt the
     /// ack left masked, if no frame waits. `false` when one does: the
     /// reader is to take it rather than wait (the module doc).

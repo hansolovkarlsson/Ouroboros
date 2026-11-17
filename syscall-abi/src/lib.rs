@@ -826,6 +826,12 @@ pub const NET_MAC: u64 = 44;
 /// busy-polling one and starving the other. A minimal poll/select, scoped to
 /// exactly the two sources the network server multiplexes. Gated to
 /// [`NET_TASK`] like [`NET_SEND`].
+///
+/// It may also return with neither: at its timeout (in ms; `0` blocks
+/// with no timeout), and, while a NIC's link was not found at boot, at
+/// most a second after it was called, because the wait is where the
+/// kernel asks that link again (the GENET's `link_at_wait`). The caller
+/// drains what there is and waits again.
 pub const NET_WAIT: u64 = 45;
 
 /// `()` -> microseconds since boot, from the ARM generic timer's
