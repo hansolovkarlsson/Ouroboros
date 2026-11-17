@@ -1420,8 +1420,12 @@ own. The entries below stand as they were put.
      `NET_WAIT` asks the link at most once a second while the MAC is
      off (`Device::link_at_wait`, the one ask a send makes, now
      `Device::ask_link`), starts the MAC if it is up, and limits `netd`'s
-     wait to a second so it comes back to ask; an ask whose reads fail
-     stops the wait's asking, with a line. **Shown on the board with a
+     wait to the time left until the next ask; three asks running whose
+     reads fail stop the wait's asking, with a line. That rule is
+     `genet::linkask`, host-tested since the branch's review, which
+     found the first version asking about every two seconds (the wait
+     ends on a 20 ms tick and was told a whole second again) and
+     stopping for good at one failed read. **Shown on the board with a
      control**, each boot with the cable out until after `login:` and
      nothing typed on the Pi, the Mac asking `curl
      http://192.168.77.2/` and `arp -n 192.168.77.2` about 10 s after the
