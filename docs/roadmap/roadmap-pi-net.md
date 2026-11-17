@@ -1434,8 +1434,13 @@ own. The entries below stand as they were put.
      `(incomplete)`. The fix (`a8aaaeef04b4`): `genet: link up at a
      wait, 1000 Mb/s, full duplex`, the MAC on, a frame received and a
      42-byte one sent, `curl` 200 and the ARP entry
-     `d8:3a:dd:85:24:22`. **Still open:** a link that drops and returns
-     is not read again once the MAC is on.
+     `d8:3a:dd:85:24:22`. The reviewed build, with `linkask`
+     (`1aaedc0c0c78`, boot 38), booted the same way and with nobody
+     logged in: `link up at a wait` while the board sat at `login:`, the
+     MAC on, a frame in and a 42-byte one out, no restart, exception or
+     warning; `curl` 200 and the ARP entry `d8:3a:dd:85:24:22`. The
+     control above stands for both. **Still open:** a link that drops and
+     returns is not read again once the MAC is on.
    - *The receiver is never turned off.* With nobody draining it
      (before `netd` first runs, after `netd` is past its restart cap,
      after the kernel halts) the ring fills and the DMA sits at its
