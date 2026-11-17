@@ -31,6 +31,14 @@
 //!   does *not* get woken (the ping just queues, unseen) - so an
 //!   outstanding ping older than [`PING_TIMEOUT`] ⇒ wedged ⇒ restart.
 //!
+//!   **A caller relies on when the ping is not sent:** netd's boot-time
+//!   load (`LoadBudget` in its `main.rs`) sleeps 40 ms at a time for up to
+//!   2 s and reads no mailbox meanwhile. It is never pinged only because
+//!   `tasks::on_tick` wakes a sleeper before this poll in the same tick,
+//!   so the poll sees it `Runnable` and starts its count again. Reordering
+//!   `on_tick`, or waking sleepers on another core's tick, changes that:
+//!   change netd's load with it.
+//!
 //! Both detectors are driven by the tick, and by ONE tick: multi-core step
 //! 3 (decision 2, `docs/roadmap/roadmap-smp.md`) keeps them on the boot
 //! core's tick when every core has one, reading a server's state wherever

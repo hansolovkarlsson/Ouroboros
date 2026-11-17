@@ -2878,16 +2878,18 @@ test-probe-ioerr: image image-exfat image-ext2 image-gpt $(USBSTICK_IMG)
 	python3 scripts/test-probe-ioerr.py
 
 # A blank virtio disk reaches fsd, below any USB stick
-# (scripts/test-blank-disk.py): seven boots from esp.img on NVMe (espgpt.img in
+# (scripts/test-blank-disk.py): eight boots from esp.img on NVMe (espgpt.img in
 # one, a superfloppy of esp.img in another); a blank disk (no table, no volume,
 # parttable::is_blank) alone must be held, installed as the fallback and taken
 # by `partition ext2`, `format ext2` and `mount -a`, also on the boot after
 # `erase disk`; beside a stick that is not the boot disk, with the boot
 # partition known and unknown, the stick must go in; a GPT boot disk with an
 # unsigned protective MBR must go in first, and an MBR with a damaged
-# signature be held as an ordinary disk. About four minutes; run it whenever
-# init_storage, install_boot_disk, parttable::is_blank, fsd's mount line or
-# `erase disk` changes.
+# signature be held as an ordinary disk; and with nothing mounted, netd's
+# boot-time load must keep its 2 s budget of sleeps, waited and not spun,
+# with `cpu` queued during it (LOAD). About four minutes; run it whenever init_storage,
+# install_boot_disk, parttable::is_blank, fsd's mount line, `erase disk` or
+# netd's load_auth/LoadBudget changes.
 test-blank-disk: image image-gpt $(USBSTICK_IMG)
 	python3 scripts/test-blank-disk.py
 

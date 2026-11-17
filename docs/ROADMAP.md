@@ -4563,8 +4563,16 @@ Known small gaps, not yet sequenced (the *completed* parking-lot entries, USB
 keyboard, GOP console, preemption, task destruction, driver isolation, etc., are
 in [`roadmap-completed.md`](roadmap-completed.md)):
 
-- **`NET_WAIT` is not a sleep: TRIGGERED ON PI HARDWARE, deliberately not fixed
-  yet.** `load_auth`'s retry loops treat `NET_WAIT(40)` as a 40 ms timer, but
+- ~~**`NET_WAIT` is not a sleep.**~~ **fixed 2026-11-17 (#477).** The retries
+  sleep against 2 s of slept time (netd's `LoadBudget`), and
+  `test-blank-disk.py`'s LOAD case shows it on QEMU, which this entry said
+  could not. Two of its claims were wrong: the ping is never queued during the
+  load (each sleep's wake is seen `Runnable`); what queues is a client's
+  message, or a frame on a busy wire. And the fix it proposed, the mailbox
+  answered while waiting, was built and sent the shell 72 bytes of status
+  words as `cpu` output. The entry as it stood:
+
+  `load_auth`'s retry loops treat `NET_WAIT(40)` as a 40 ms timer, but
   `tasks.rs` wakes a `NetInput` waiter on `has_queued_message` *without consuming
   it*, and `load_auth`'s reads are sender-filtered `MSG_CALL`s that drain nothing
   else. Once the supervisor's health ping is queued (~1.28 s in) every subsequent
