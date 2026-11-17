@@ -1788,6 +1788,14 @@ own. The entries below stand as they were put.
      interrupts taken**, none dropped; a hundred pings and three hundred
      fetches from the Mac, then 50 more fetches all equal, and no fault,
      restart or warning in the boot.
+   - *Seventh boot, confirming the second review (build
+     `2ec4ff0b8973`):* the GIC's line, the first-interrupt line, and at
+     256 frames **133 receive interrupts taken**, none dropped: well above
+     the 1 a missing rearm would leave, so `NET_WAIT` rearms it. A hundred
+     pings and three hundred fetches from the Mac, then 50 more all equal,
+     and no fault, restart or warning in the boot. Fewer interrupts than
+     the sixth boot's 155, as expected with the rearm at the wait rather
+     than at every drain to empty.
 
 10. **Two boards.** Two Pi 4s on one switch, each with its address file
     and cluster keys.
