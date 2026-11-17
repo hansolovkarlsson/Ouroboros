@@ -32,7 +32,7 @@ partition is known and on no disk the kernel drives.
   not be restarted, and `cpu` must be answered once netd serves. Fails on
   main before the fix (no line: its load was cut to 1327 ms by the queued
   request) and with `load_pause` waiting by `NET_WAIT` again (2702 retries
-  in 2003 ms: the deadline holds, the wait spins).
+  in 2003 ms, a deadline then: it held, and the wait spun).
 - ERASE: two boots of one disk, a copy of esp.img signed as its own. The
   first, the disk installed as the fallback with FAT32 mounted, runs
   `unmount` and `erase disk`; the host must then find sector 0 zero. The
@@ -216,21 +216,28 @@ def run_blank():
 
 # netd's line when its load retried (`load_auth`), and what LOAD types while
 # it does: `cpu` is a shell builtin, so it reaches netd on a blank disk.
-NOT_READY = re.compile(r"^netd: the disk was not ready: (\d+) retries over (\d+) ms\r?$", re.M)
+NOT_READY = re.compile(r"^netd: fsd could not answer yet \(no disk mounted, or busy\): (\d+) retries over (\d+) ms\r?$", re.M)
 LOAD_CPU = "cpu 10.0.2.2:564 hello"
+# The command's echo through its Enter: the shell sends the request to netd
+# when the Enter arrives, so the echo's start alone could precede a request
+# sent after the load (the second review of #477).
+LOAD_SENT = re.compile(re.escape("# " + LOAD_CPU) + r"\r?\n")
 # The budget is 2 s (netd's LOAD_WAIT_US); a wait cut short by the queued
 # request took 1327 ms on main before the fix.
 LOAD_FLOOR_MS = 1900
-# And it is waited, not spun: 2 s at 40 ms a pause is about 50 retries. With
-# the pause a NET_WAIT that returns at once, the deadline still holds and
-# the retries run to thousands (2676 on 2026-11-17), every one a read of fsd.
+# And it is waited, not spun: a 40 ms sleep ends on a 20 ms tick, so a pause
+# is about 53 ms and 2 s is about 38 retries (38 and 42 measured). With the
+# pause a NET_WAIT that returns at once, the retries ran to thousands
+# (2676 and 2702 in two runs on 2026-11-17, a deadline then), every one a
+# read of fsd. The bound is for a spin; a pause shortened to one tick, about
+# 100 retries, fails it too.
 LOAD_RETRIES_MAX = 60
 
 
 def run_load():
     """The blank disk alone, `cpu` typed at the first prompt while netd's
     load is still retrying: the request queued in its mailbox must not
-    shorten the wait (netd's `load_pause`), netd must not be restarted, and
+    shorten the wait (netd's `LoadBudget`), netd must not be restarted, and
     the request must be answered once netd serves."""
     blank(DISK)
     steps = [("# ", LOAD_CPU), (NETD_SETTLED, drive_qemu.ENTER), ("# ", "")]
@@ -238,12 +245,13 @@ def run_load():
     if stalled:
         return [], True
     m = NOT_READY.search(out)
-    typed = out.find("# " + LOAD_CPU)
+    sent = LOAD_SENT.search(out)
     waited = int(m.group(2)) if m else 0
     retries = int(m.group(1)) if m else 0
     return [
         ("LOAD: netd says its load retried (got " + (m.group(0).strip() if m else "no line") + ")", m is not None),
-        ("LOAD: `cpu` was typed while the load was still retrying", m is not None and 0 <= typed < m.start()),
+        ("LOAD: `cpu` sent (its Enter echoed) while the load was still retrying",
+         m is not None and sent is not None and sent.end() <= m.start()),
         (f"LOAD: the load kept its budget, at least {LOAD_FLOOR_MS} ms (got {waited})", waited >= LOAD_FLOOR_MS),
         (f"LOAD: and waited, not spun: at most {LOAD_RETRIES_MAX} retries (got {retries})", 0 < retries <= LOAD_RETRIES_MAX),
         ("LOAD: netd not restarted", "server slot 4" not in out),

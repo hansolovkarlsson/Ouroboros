@@ -125,7 +125,7 @@ fn log_ip(ip: &[u8; 4]) {
 /// retry budget for that (its comment says why there is one and not one a
 /// read), so `NO_FS` here is taken as "nothing is mounted" at once. The
 /// other transient answers (a full mailbox, a server mid-restart) are asked
-/// again for up to five retries' time, by [`load_pause`] as `load_auth`'s
+/// again for up to five retries' time, by a [`LoadBudget`] as `load_auth`'s
 /// are. A disk that mounts after `load_auth` gave up leaves this machine on
 /// the defaults for the boot, as it leaves it with no cluster identity:
 /// nothing reads either file again.
@@ -141,12 +141,11 @@ fn log_ip(ip: &[u8; 4]) {
 /// file cut short could still parse, to an address nobody wrote.
 fn load_netconf() {
     let mut buf = [0u8; netconf::MAX_FILE + 1];
-    let deadline = now_us() + NETCONF_WAIT_US;
-    let mut retries = 0u32;
+    let mut budget = LoadBudget::new(NETCONF_WAIT_US);
     let mut len = 0usize;
     let n = loop {
         let r = read_file_chunk(As::FirstParty, NETCONF_PATH, 0, len as u64, &mut buf[len..]);
-        if r != syscall_abi::NO_FS && transient_fs_failure(r) && load_pause(deadline, &mut retries) {
+        if r != syscall_abi::NO_FS && transient_fs_failure(r) && budget.pause() {
             continue;
         }
         if r >= syscall_abi::FS_ERR_MIN {
@@ -539,9 +538,9 @@ const USERS_PATH: &[u8] = b"/etc/cluster/users";
 /// `FS_ERR_NOT_A_FILE`, and this read is netd's first, so the whole shared
 /// budget is spent sleeping with the mailbox undrained, for a condition
 /// waiting cannot change, and that starves the two reads that configure the
-/// cluster. (When the waits were `NET_WAIT`, it also left the supervisor's
-/// health ping unacked, the restart loop `testing-parallels.md` Risk #1 is
-/// about. The sleeps of [`load_pause`] are not pinged.) Fail-safe applies to
+/// cluster. (`testing-parallels.md` Risk #1 also predicted the supervisor's
+/// ping restarting netd during such a wait; no boot has shown one, and the
+/// sleeps of a [`LoadBudget`] are not pinged.) Fail-safe applies to
 /// the DECISION (see `noexec` below), not to how long to wait for one.
 fn transient_fs_failure(r: u64) -> bool {
     matches!(
@@ -553,40 +552,48 @@ fn transient_fs_failure(r: u64) -> bool {
     )
 }
 
-/// How long `load_auth`'s three reads, together, retry while the disk is
-/// not yet mounted: the 2 s they were documented to have when the budget
-/// was 50 waits of 40 ms, now a time on `MONOTONIC_US`'s clock.
+/// How long `load_auth`'s three reads, together, sleep between retries
+/// while the disk is not yet mounted: the 2 s they were documented to have
+/// when the budget was 50 waits of 40 ms.
 const LOAD_WAIT_US: u64 = 2_000_000;
 
-/// One retry's pause while the files load.
+/// One retry's pause while the files load. The sleep ends on a 20 ms tick,
+/// so a pause is about 53 ms as measured (38 retries in 2006 ms on QEMU).
 const LOAD_RETRY_US: u64 = 40_000;
 
-/// How long `load_netconf` retries `/etc/net` on a transient answer other
-/// than `NO_FS` (a full mailbox, `fsd` mid-restart): five retries' time,
-/// from its own start. Its own, not a share of [`LOAD_WAIT_US`], which has
+/// How long `load_netconf` sleeps between retries of `/etc/net` on a
+/// transient answer other than `NO_FS` (a full mailbox, `fsd` mid-restart):
+/// five retries' time. Its own, not a share of [`LOAD_WAIT_US`], which has
 /// been spent or not by then; it waits for no mount (`load_netconf` says why).
 const NETCONF_WAIT_US: u64 = 5 * LOAD_RETRY_US;
 
-/// The pause before one retry of a read `netd` makes before it serves: a
-/// retry's length, or to `deadline_us` if that is sooner. `false`, with no
-/// pause, once `deadline_us` has passed: the caller stops retrying.
-/// `retries` counts the pauses taken, for `load_auth`'s boot line.
+/// The retry budget of the reads `netd` makes before it serves: TIME SLEPT
+/// between them, never time spent in them, and the retries taken.
+///
+/// **Slept time, not a deadline.** A read can block in `fsd` for seconds:
+/// `fsd` wedged in the middle of it is restarted by the supervisor 1.4 to
+/// 2.5 s later, and the read answers `FS_ERROR` or `TASK_ERR_NO_SUCH_TASK`,
+/// the restart window [`transient_fs_failure`] retries. A deadline would be
+/// spent by then, and the reads after it would get one try each against a
+/// `fsd` still mounting: no identity for the boot (the second review of
+/// #477). The count of 50 this replaced was spent by pauses alone, and so is
+/// this.
 ///
 /// **A SLEEP, NOT `NET_WAIT`.** `NET_WAIT` returns with a frame or a
 /// message waiting, at once since #475, and nothing here takes either, so
 /// the retries were spent in a moment by the first one to arrive. Shown on
-/// QEMU with nothing mounted (`test-blank-disk.py`'s blank disk) and `cpu`
+/// QEMU with nothing mounted (`test-blank-disk.py`'s LOAD case) and `cpu`
 /// typed while netd loaded: the load took 1.3 s where it took 2.4 s with
 /// nothing typed, and 2.0 s with this sleep. On the Pi a busy wire does
 /// the same (`testing-pi4.md`, risk 4b).
 ///
 /// **The mailbox is left as it is**, and that is safe on both counts. A
-/// client's request waits for `serve`, at most this budget, and gets
-/// `serve`'s own answer; answering it here would mean a refusal shaped
-/// for each op (`NETOP_RUN` replies text, not a status). And the
+/// client's request waits for `serve`, at most this budget and the reads,
+/// and gets `serve`'s own answer; answering it here would mean a refusal
+/// shaped for each op (`NETOP_RUN` replies text, not a status). And the
 /// supervisor's ping is never sent: it goes to a server seen `Blocked` by
 /// 64 ticks in a row, and the tick that ends each sleep sees netd
-/// `Runnable`. Shown with the same boot: 2 s of sleeps, no restart.
+/// `Runnable`. LOAD checks it: 2 s of sleeps, and netd not restarted.
 ///
 /// **That last rests on the kernel, in two places, and holds only while
 /// both do:** `tasks::on_tick` wakes a sleeper before it asks the
@@ -595,14 +602,29 @@ const NETCONF_WAIT_US: u64 = 5 * LOAD_RETRY_US;
 /// woken anywhere else could leave netd never seen `Runnable`, pinged, and
 /// restarted as wedged `PING_TIMEOUT` later. `supervisor.rs`'s module doc
 /// names this caller at the ping.
-fn load_pause(deadline_us: u64, retries: &mut u32) -> bool {
-    let now = now_us();
-    if now >= deadline_us {
-        return false;
+struct LoadBudget {
+    left_us: u64,
+    retries: u32,
+}
+
+impl LoadBudget {
+    fn new(us: u64) -> Self {
+        LoadBudget { left_us: us, retries: 0 }
     }
-    *retries += 1;
-    syscall(syscall_abi::SLEEP_UNTIL, (now + LOAD_RETRY_US).min(deadline_us));
-    true
+
+    /// The pause before one retry: a retry's length, or what is left if
+    /// that is less, taken off what is left as slept. `false`, with no
+    /// pause, once nothing is left: the caller stops retrying.
+    fn pause(&mut self) -> bool {
+        if self.left_us == 0 {
+            return false;
+        }
+        self.retries += 1;
+        let before = now_us();
+        syscall(syscall_abi::SLEEP_UNTIL, before + LOAD_RETRY_US.min(self.left_us));
+        self.left_us = self.left_us.saturating_sub(now_us() - before);
+        true
+    }
 }
 
 /// Load the cluster auth config from disk via `fsd` at boot.
@@ -624,23 +646,22 @@ fn load_auth() -> Auth {
     // DISKLESS boot spend three times as long not draining netd's mailbox.
     // Parallels with no USB stick, and a Pi with no card, are both supported
     // configurations where nothing ever mounts, and for all of the budget
-    // netd answers no client and takes no frame. (When the waits were
-    // `NET_WAIT`, several seconds of this also had the supervisor's ping
-    // time out and restart netd; `load_pause` says why its sleeps are not
-    // pinged.) Up to 2 s total (`LOAD_WAIT_US`), a try every 40 ms.
+    // netd answers no client and takes no frame. (`testing-parallels.md`
+    // Risk #1 also predicted the supervisor's ping restarting netd here; no
+    // boot has shown one, and `LoadBudget` says why its sleeps are not
+    // pinged.) Up to 2 s of sleeps (`LOAD_WAIT_US`), about 53 ms each.
     //
     // A TIME, NOT A COUNT OF WAITS: it was 50 tries of `NET_WAIT(40)`, and
     // `NET_WAIT` returns early with a frame or a message waiting (at once
     // since #475), so one message queued for netd while it loaded spent the
-    // rest of the budget in a moment (`load_pause` says how it was shown).
+    // rest of the budget in a moment (`LoadBudget` says how it was shown).
     //
     // THE BUDGET GATES THE RETRY, NEVER THE FIRST ATTEMPT: written first as
     // `while budget > 0`, which meant that exhausting it on the first read left
     // the others never attempted ONCE, so a disk that mounted late gave a node
     // with no identity and no peers for the whole boot.
     let start = now_us();
-    let deadline = start + LOAD_WAIT_US;
-    let mut retries = 0u32;
+    let mut budget = LoadBudget::new(LOAD_WAIT_US);
     // The no-exec flag is presence-only: any successful read (even 0 bytes)
     // means the file exists; FS_ERR_* means it doesn't.
     //
@@ -664,7 +685,7 @@ fn load_auth() -> Auth {
     let m;
     loop {
         let r = read_file_chunk(As::FirstParty, NOEXEC_PATH, 0, 0, &mut one);
-        if transient_fs_failure(r) && load_pause(deadline, &mut retries) {
+        if transient_fs_failure(r) && budget.pause() {
             continue;
         }
         m = r;
@@ -688,7 +709,7 @@ fn load_auth() -> Auth {
     let mut idn;
     loop {
         idn = read_file_chunk(As::FirstParty, ID_PATH, 0, 0, &mut idbuf);
-        if transient_fs_failure(idn) && load_pause(deadline, &mut retries) {
+        if transient_fs_failure(idn) && budget.pause() {
             continue;
         }
         break;
@@ -730,19 +751,22 @@ fn load_auth() -> Auth {
     let mut n;
     loop {
         n = read_file_chunk(As::FirstParty, AUTHORIZED_PATH, 0, 0, &mut auth.authorized);
-        if transient_fs_failure(n) && load_pause(deadline, &mut retries) {
+        if transient_fs_failure(n) && budget.pause() {
             continue;
         }
         break;
     }
     // The last of the retried reads: how long they waited, when they did.
-    // On the Pi it is the card mounting late, read off the boot log; on
-    // QEMU `test-blank-disk.py`'s LOAD case reads it to see the budget kept
-    // with a message queued (it was spent at once while the waits were
-    // `NET_WAIT`). Silent when nothing was retried, as on most boots.
-    if retries > 0 {
-        log(b"netd: the disk was not ready: ");
-        log_dec(u64::from(retries));
+    // Worded for every transient answer, not the mount alone: the retries
+    // also wait out `fsd` mid-restart and a full mailbox, and a line naming
+    // the disk would send a reader to the card for a restart. The lines
+    // before it say which file was not read; `fsd`'s own lines, whether it
+    // mounted or restarted. On QEMU `test-blank-disk.py`'s LOAD case reads
+    // it. Silent when nothing was retried, as on most boots, and silent for
+    // `load_netconf`'s retries, whose own line names the outcome.
+    if budget.retries > 0 {
+        log(b"netd: fsd could not answer yet (no disk mounted, or busy): ");
+        log_dec(u64::from(budget.retries));
         log(b" retries over ");
         log_dec((now_us() - start) / 1000);
         log(b" ms\r\n");
