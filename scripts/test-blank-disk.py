@@ -205,6 +205,38 @@ def run_blank():
     return ([], True) if checks is None else (checks, False)
 
 
+# netd's line when its load retried (`load_auth`), and what LOAD types while
+# it does: `cpu` is a shell builtin, so it reaches netd on a blank disk.
+NOT_READY = re.compile(r"^netd: the disk was not ready: (\d+) retries over (\d+) ms\r?$", re.M)
+LOAD_CPU = "cpu 10.0.2.2:564 hello"
+# The budget is 2 s (netd's LOAD_WAIT_US); a wait cut short by the queued
+# request took 1327 ms on main before the fix.
+LOAD_FLOOR_MS = 1900
+
+
+def run_load():
+    """The blank disk alone, `cpu` typed at the first prompt while netd's
+    load is still retrying: the request queued in its mailbox must not
+    shorten the wait (netd's `load_pause`), netd must not be restarted, and
+    the request must be answered once netd serves."""
+    blank(DISK)
+    steps = [("# ", LOAD_CPU), (NETD_SETTLED, drive_qemu.ENTER), ("# ", "")]
+    _driven, out, faults, stalled = boot("LOAD", steps)
+    if stalled:
+        return [], True
+    m = NOT_READY.search(out)
+    typed = out.find("# " + LOAD_CPU)
+    waited = int(m.group(2)) if m else 0
+    return [
+        ("LOAD: netd says its load retried (got " + (m.group(0).strip() if m else "no line") + ")", m is not None),
+        ("LOAD: `cpu` was typed while the load was still retrying", m is not None and 0 <= typed < m.start()),
+        (f"LOAD: the load kept its budget, at least {LOAD_FLOOR_MS} ms (got {waited})", waited >= LOAD_FLOOR_MS),
+        ("LOAD: netd not restarted", "server slot 4" not in out),
+        ("LOAD: `cpu` answered by netd once it served", "cpu: no network" in out),
+        ("LOAD: no fault lines", faults == 0),
+    ], False
+
+
 def run_erase():
     copy_signed(ESP, DISK)
     pre = [("ERASE: the copy carries a signature of its own",
@@ -322,7 +354,7 @@ def main():
             sys.exit(f"{f} not found - run `make test-blank-disk`, which builds it")
     checks = []
     stalled = 0
-    runs = (run_blank, run_erase, lambda: run_stick("STICK"), run_gpt_unsigned, run_sig_damaged, run_unknown)
+    runs = (run_blank, run_load, run_erase, lambda: run_stick("STICK"), run_gpt_unsigned, run_sig_damaged, run_unknown)
     try:
         for run in runs:
             got, stall = run()

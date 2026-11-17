@@ -1751,61 +1751,41 @@ of real hardware under it than Parallels' did.
 
 ### <a name="risk-4b--net-wait-is-not-a-sleep"></a>Risk 4b: `NET_WAIT` is not a sleep, so the retry budget may not exist
 
-**DEFERRED TO THIS SESSION ON PURPOSE, with the reason written down.** It is a
-known defect with a known fix and no way to test the fix on QEMU. This is the
-rig that can, so it is a task the first bench session should expect to pick up.
+**FIXED ON 2026-11-17 (#477), shown on QEMU, not yet seen on this board.**
 
-`load_auth`'s retry loops call `NET_WAIT(40)` expecting a 40 ms sleep. They do
-not necessarily get one: `tasks.rs` wakes a `WaitReason::NetInput` waiter when
-`net_has_frame() || has_queued_message(waiter) || timed_out`, and it **consumes
-nothing**. `load_auth`'s own `read_file_chunk` is a *sender-filtered* `MSG_CALL`
-on `FSD_TASK`, so it never drains anything else. Once the supervisor's health
-ping is queued (`PING_INTERVAL` is 64 ticks ≈ 1.28 s, and `netd` is Blocked for
-almost all of `load_auth`), that message sits in the mailbox, every later
-`NET_WAIT(40)` returns in microseconds, and the documented "~2 s at 40 ms a try"
-collapses into a busy-spin that burns the whole budget in a moment. (True
-since #475, 2026-11-16. Before it `NET_WAIT` blocked without asking its
-condition and returned at the next tick, up to 20 ms, so the budget shrank
-to at most about a second rather than vanishing.)
+`load_auth`'s retries called `NET_WAIT(40)` expecting a 40 ms sleep. `NET_WAIT`
+returns early with a frame or a message waiting, at once since #475, and
+nothing in the load takes either: `read_file_chunk` is a sender-filtered
+`MSG_CALL` on `fsd`. So the first frame (a busy wire) or client message to
+arrive spent the rest of the 2 s budget in a moment, and a disk mounting after
+that was never read: no cluster identity, the default address.
 
-**Why QEMU cannot test it:** measured, not assumed. Instrumented, the `\NOEXEC`
-probe retries **0 times** there, because virtio-blk has `fsd` ready before `netd`
-asks. The loop never executes, so neither the bug nor a fix for it is
-observable. USB-MSD on this board is the first rig where the loop runs at all.
+The retries now sleep (`SLEEP_UNTIL`, netd's `load_pause`) against a deadline
+on `MONOTONIC_US`: 2 s for `load_auth`'s three reads together
+(`LOAD_WAIT_US`), and 200 ms of its own for `load_netconf`'s
+(`NETCONF_WAIT_US`). The mailbox is left as it is; a request waits for `serve`
+and gets `serve`'s answer.
 
-**What to watch for**, the same signature as Risk 4 above: `netd` restarting at
-boot, or coming up with `export CLOSED` on a card holding a perfectly good
-`/etc/cluster/id`. If the disk mounts later than ~1.3 s the budget is already
-spent, and the id/authorized reads get one attempt each.
+**What this risk used to say, and was wrong about.** It named the supervisor's
+health ping as the message that queues, at about 1.3 s, and prescribed
+answering the mailbox during the load. The ping goes only to a server seen
+`Blocked` 64 ticks in a row, and each sleep's wake is seen `Runnable`, so none
+is sent (`supervisor.rs`'s module doc records the dependency). Answering the
+mailbox was built and run: it sent the shell 72 bytes of status words as `cpu`
+output, since `NETOP_RUN` replies text. It also said QEMU could not test this;
+`test-blank-disk.py`'s blank disk mounts nothing, so the loop runs its whole
+budget there, and its LOAD case types `cpu` during it.
 
-**The fix, if it fires:** `load_auth` must drain its mailbox while it waits,
-answering the health ping rather than ignoring it, instead of treating
-`NET_WAIT` as a timer. That touches supervision, which is why it was not written
-blind against a rig that cannot run it.
+**The boots** (a temporary line timing the load, since removed): `main` took
+2435 ms with nothing typed and 1327 ms with `cpu` typed during the load; the fix
+took 2037 ms and 2033 ms, no restart, `cpu` answered by `serve`.
 
-**Fixed on 2026-11-17 (`netd/load-retry-wait`), and two claims above corrected
-by the boots that fixed it.** The retries now sleep (`SLEEP_UNTIL`, netd's
-`load_pause`) against a 2 s deadline on `MONOTONIC_US`, so the budget is a time
-whatever arrives, for `load_netconf`'s retries too. The mailbox is left as it
-is: a request waits at most the budget and gets `serve`'s own answer.
-
-- *The ping is not what queues.* The supervisor pings a server it has seen
-  `Blocked` for 64 ticks in a row, and a retry that waits by the clock is
-  woken by a tick that sees netd `Runnable`, so during the retries no ping is
-  sent. The messages that do queue are a client's, and frames on a busy wire.
-- *QEMU can test it after all.* `test-blank-disk.py`'s blank disk mounts
-  nothing, so the loop runs its whole budget, and the shell's prompt is up
-  while it does. With a temporary line timing the load: `main` took 2435 ms
-  with nothing typed and **1327 ms** with `cpu 10.0.2.2:564 hello` typed
-  during it; the fix took 2037 ms and 2033 ms, with no restart, and `cpu`
-  answered `cpu: no network` by `serve` after the load. The fix above, the
-  mailbox answered during the load, was built and run as well: it sent the
-  shell 72 bytes of status words as `cpu` output (`NETOP_RUN` replies text,
-  not a status), and a sleep with the answering taken out was not restarted.
-
-Still to see on the board: a boot whose card mounts late, on a busy wire. A
-disk mounting after 2 s still leaves the machine with no identity and the
-default address (`roadmap-pi-net.md`, step 8).
+**What to watch for on this board:** a card that mounts late on a busy wire,
+which is the case the QEMU boots stand in for. A boot that comes up with
+`export CLOSED` on a card holding a good `/etc/cluster/id` is the signature,
+and so is the default address with an `/etc/net` on the card. A disk mounting
+after 2 s still does that, by design: nothing reads either file again
+(`roadmap-pi-net.md`, step 8).
 
 ### Risk 5: no second console when the first one fails
 
@@ -2046,12 +2026,10 @@ The first session is not "run the test matrix." It is:
    checklist; record which prediction each line confirmed or broke.
 3. Only then run the single-machine matrix from
    [`testing-parallels.md`](testing-parallels.md) §"What you *can* validate."
-4. **Pick up the deferred `NET_WAIT` task** (§7 [Risk 4b](#risk-4b--net-wait-is-not-a-sleep)).
-   It is queued for this session specifically: the defect is understood, the fix
-   is sketched, and QEMU cannot exercise either. Instrument `load_auth`'s retry
-   count on this board and see whether the loop runs at all before deciding
-   whether the fix is needed. This is the one piece of open work that has been
-   waiting on **hardware** rather than on a decision.
+4. **Watch `netd`'s load on a busy wire** (§7 [Risk 4b](#risk-4b--net-wait-is-not-a-sleep)).
+   The defect is fixed and shown on QEMU (#477). This board is where a card
+   mounts late with frames arriving, so a boot that comes up with no cluster
+   identity on a card that holds one is the line to look for.
 
 Then update this document in place: turn every **(predicted)** into
 **(confirmed)** or into a numbered entry in a new postmortem. If §7 Risk 1 fires,
