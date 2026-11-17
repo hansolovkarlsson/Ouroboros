@@ -13,7 +13,7 @@ entry), as not the boot disk, and ranks it below any stick, the boot disk or
 not (Hans, 2026-10-23). A disk that is not blank goes to the boot-disk check
 as before, whatever its signature.
 
-Seven boots. In all but UNKNOWN the firmware boots esp.img from NVMe (or
+Eight boots. In all but UNKNOWN the firmware boots esp.img from NVMe (or
 espgpt.img, in GPT-UNSIGNED), which the kernel cannot drive, so the boot
 partition is known and on no disk the kernel drives.
 
@@ -24,6 +24,15 @@ partition is known and on no disk the kernel drives.
   `mount` reporting ext2 at LBA 2048. After the boot the host reads the
   table whole (one entry, type 0x83, LBA 2048 to the disk's end) and the ext2
   magic in its superblock.
+- LOAD (since 2026-11-17, #477): the blank disk alone, which mounts nothing,
+  so netd's boot-time load retries its whole budget. `cpu` is typed at the
+  first prompt, while it does, and queues in netd's mailbox. netd's line
+  "the disk was not ready: N retries over M ms" must say M of at least
+  1900 (the budget is 2 s) and N of at most 60 (40 ms a pause); netd must
+  not be restarted, and `cpu` must be answered once netd serves. Fails on
+  main before the fix (no line: its load was cut to 1327 ms by the queued
+  request) and with `load_pause` waiting by `NET_WAIT` again (2702 retries
+  in 2003 ms: the deadline holds, the wait spins).
 - ERASE: two boots of one disk, a copy of esp.img signed as its own. The
   first, the disk installed as the fallback with FAT32 mounted, runs
   `unmount` and `erase disk`; the host must then find sector 0 zero. The
@@ -62,8 +71,8 @@ disk whose first read fails and whose second reads (the kernel asks
 `is_blank` twice); QEMU's blkdebug can fail a read once, but the firmware
 reads sector 0 first and takes the one failure. Nor the blank disk beside a
 stick whose init fails. About four minutes. Run it whenever `init_storage`,
-`install_boot_disk`, `parttable::is_blank`, fsd's mount line or `erase
-disk` changes.
+`install_boot_disk`, `parttable::is_blank`, fsd's mount line, `erase
+disk`, or netd's boot-time load (`load_auth`, `load_pause`) changes.
 """
 import importlib.util
 import os
@@ -212,6 +221,10 @@ LOAD_CPU = "cpu 10.0.2.2:564 hello"
 # The budget is 2 s (netd's LOAD_WAIT_US); a wait cut short by the queued
 # request took 1327 ms on main before the fix.
 LOAD_FLOOR_MS = 1900
+# And it is waited, not spun: 2 s at 40 ms a pause is about 50 retries. With
+# the pause a NET_WAIT that returns at once, the deadline still holds and
+# the retries run to thousands (2676 on 2026-11-17), every one a read of fsd.
+LOAD_RETRIES_MAX = 60
 
 
 def run_load():
@@ -227,10 +240,12 @@ def run_load():
     m = NOT_READY.search(out)
     typed = out.find("# " + LOAD_CPU)
     waited = int(m.group(2)) if m else 0
+    retries = int(m.group(1)) if m else 0
     return [
         ("LOAD: netd says its load retried (got " + (m.group(0).strip() if m else "no line") + ")", m is not None),
         ("LOAD: `cpu` was typed while the load was still retrying", m is not None and 0 <= typed < m.start()),
         (f"LOAD: the load kept its budget, at least {LOAD_FLOOR_MS} ms (got {waited})", waited >= LOAD_FLOOR_MS),
+        (f"LOAD: and waited, not spun: at most {LOAD_RETRIES_MAX} retries (got {retries})", 0 < retries <= LOAD_RETRIES_MAX),
         ("LOAD: netd not restarted", "server slot 4" not in out),
         ("LOAD: `cpu` answered by netd once it served", "cpu: no network" in out),
         ("LOAD: no fault lines", faults == 0),
