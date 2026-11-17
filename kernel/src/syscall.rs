@@ -2163,8 +2163,14 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
             // frame or message already there would wait a tick, and on the
             // GENET with its interrupt still masked (the third review of
             // #475).
-            if !armed || tasks::ready_now(reason).is_some() {
+            // The answer is the poll's (`WaitReason::NetInput`'s, which
+            // says 0 for every cause today). Not armed is a frame waiting,
+            // for which it says 0 too.
+            if !armed {
                 return 0;
+            }
+            if let Some(answer) = tasks::ready_now(reason) {
+                return answer;
             }
             unsafe {
                 tasks::block_current_and_switch(frame, reason)
