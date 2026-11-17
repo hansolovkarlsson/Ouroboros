@@ -1753,6 +1753,18 @@ own. The entries below stand as they were put.
    at least: 158 for 260 here. With the mask, "at least a hundred after a
    hundred pings" is met (158) but is not the property; the property is
    that the count is not 0 with the unmask and is 0 without it.
+   - *The review of #475 (`7e84d248`, `ea22730f`), after the boots:* the
+     masked state moved from a kernel atomic into `Genet`, so the host
+     tests cover it, and the rearm writes nothing when no ack masked
+     receive done or the receiver is off; `Nic::ack_interrupt` takes
+     `&mut`, so the kernel's count is a plain field, and saturates. The
+     contract in `nic.rs` now says the ack takes the line down and leaves
+     when the next interrupt comes to the arm. Controlled on the host:
+     each of the flag's three writes and the rearm's two guards taken
+     out, and three of the step's constants made wrong, each failed a
+     test (the start's write passed at first, and got its own test). The
+     register writes the board ran are the same; a confirming boot is
+     owed.
 
 10. **Two boards.** Two Pi 4s on one switch, each with its address file
     and cluster keys.
