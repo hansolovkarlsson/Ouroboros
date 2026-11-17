@@ -1744,10 +1744,12 @@ moves the PL011 onto GPIO14/15), not in the kernel.
 [`testing-parallels.md`](testing-parallels.md)'s Risk #1: `load_auth` blocks
 `serve()` while it reads `/etc/cluster/id` and `authorized` through `fsd`, and
 the `\NOEXEC` probe ahead of them, and USB-MSD is markedly
-slower than QEMU's virtio-blk, which can push the health-ping supervisor into a
-restart loop that QEMU never shows. The Pi's runtime storage is USB-MSD too
-(§6), so this risk arrives unchanged, and the Pi's USB stack has one more layer
-of real hardware under it than Parallels' did.
+slower than QEMU's virtio-blk, so the load can run its whole budget. That
+risk predicted the health-ping supervisor restarting netd during it; no boot
+has shown it, and since #477 the load's sleeps are not pinged (Risk 4b; the
+LOAD case of `test-blank-disk.py` checks it). The Pi's runtime storage was
+USB-MSD too (§6) and is the SD card now, and a card that mounts late is the
+case to watch.
 
 ### <a name="risk-4b--net-wait-is-not-a-sleep"></a>Risk 4b: `NET_WAIT` is not a sleep, so the retry budget may not exist
 
@@ -1760,10 +1762,13 @@ nothing in the load takes either: `read_file_chunk` is a sender-filtered
 arrive spent the rest of the 2 s budget in a moment, and a disk mounting after
 that was never read: no cluster identity, the default address.
 
-The retries now sleep (`SLEEP_UNTIL`, netd's `load_pause`) against a deadline
-on `MONOTONIC_US`: 2 s for `load_auth`'s three reads together
-(`LOAD_WAIT_US`), and 200 ms of its own for `load_netconf`'s
-(`NETCONF_WAIT_US`). The mailbox is left as it is; a request waits for `serve`
+The retries now sleep (`SLEEP_UNTIL`, netd's `LoadBudget`), and the budget is
+time slept between reads, not time since the first: 2 s for `load_auth`'s three
+reads together (`LOAD_WAIT_US`), and 200 ms of its own for `load_netconf`'s
+(`NETCONF_WAIT_US`). Not a deadline, because a read can block in `fsd` for
+seconds (a wedged `fsd` is restarted 1.4 to 2.5 s later), and a deadline spent
+by then would leave the next reads one try each against a `fsd` still
+mounting. The mailbox is left as it is; a request waits for `serve`
 and gets `serve`'s answer.
 
 **What this risk used to say, and was wrong about.** It named the supervisor's
@@ -1776,9 +1781,13 @@ output, since `NETOP_RUN` replies text. It also said QEMU could not test this;
 `test-blank-disk.py`'s blank disk mounts nothing, so the loop runs its whole
 budget there, and its LOAD case types `cpu` during it.
 
-**The boots** (a temporary line timing the load, since removed): `main` took
-2435 ms with nothing typed and 1327 ms with `cpu` typed during the load; the fix
-took 2037 ms and 2033 ms, no restart, `cpu` answered by `serve`.
+**The boots.** First with a temporary line timing the load: `main` took
+2435 ms with nothing typed and 1327 ms with `cpu` typed during the load; the
+fix took 2037 ms and 2033 ms, no restart, `cpu` answered by `serve`. Since
+then netd prints a line whenever its load retried, `netd: fsd could not answer
+yet (no disk mounted, or busy): N retries over M ms`, which LOAD reads: 42
+retries over 2033 ms. With the pause made a `NET_WAIT` again it reads 19125
+retries over 6270 ms, and LOAD fails.
 
 **What to watch for on this board:** a card that mounts late on a busy wire,
 which is the case the QEMU boots stand in for. A boot that comes up with

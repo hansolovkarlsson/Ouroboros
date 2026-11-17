@@ -2886,10 +2886,10 @@ test-probe-ioerr: image image-exfat image-ext2 image-gpt $(USBSTICK_IMG)
 # partition known and unknown, the stick must go in; a GPT boot disk with an
 # unsigned protective MBR must go in first, and an MBR with a damaged
 # signature be held as an ordinary disk; and with nothing mounted, netd's
-# boot-time load must keep its 2 s budget, waited and not spun, with `cpu`
-# queued during it (LOAD). About four minutes; run it whenever init_storage,
+# boot-time load must keep its 2 s budget of sleeps, waited and not spun,
+# with `cpu` queued during it (LOAD). About four minutes; run it whenever init_storage,
 # install_boot_disk, parttable::is_blank, fsd's mount line, `erase disk` or
-# netd's load_auth/load_pause changes.
+# netd's load_auth/LoadBudget changes.
 test-blank-disk: image image-gpt $(USBSTICK_IMG)
 	python3 scripts/test-blank-disk.py
 

@@ -26,13 +26,14 @@ partition is known and on no disk the kernel drives.
   magic in its superblock.
 - LOAD (since 2026-11-17, #477): the blank disk alone, which mounts nothing,
   so netd's boot-time load retries its whole budget. `cpu` is typed at the
-  first prompt, while it does, and queues in netd's mailbox. netd's line
-  "the disk was not ready: N retries over M ms" must say M of at least
-  1900 (the budget is 2 s) and N of at most 60 (40 ms a pause); netd must
-  not be restarted, and `cpu` must be answered once netd serves. Fails on
-  main before the fix (no line: its load was cut to 1327 ms by the queued
-  request) and with `load_pause` waiting by `NET_WAIT` again (2702 retries
-  in 2003 ms, a deadline then: it held, and the wait spun).
+  first prompt, while it does, and its Enter reaches the shell before
+  netd's line: the request queues in netd's mailbox. netd's line "fsd could
+  not answer yet (no disk mounted, or busy): N retries over M ms" must say M
+  of at least 1900 (the budget is 2 s of sleeps) and N of at most 60 (a
+  pause is about 53 ms); netd must not be restarted, and `cpu` must be
+  answered once netd serves. Fails on main before the fix (no line: its load
+  was cut to 1327 ms by the queued request) and with `LoadBudget`'s pause a
+  `NET_WAIT` again (19125 retries over 6270 ms: the wait spins).
 - ERASE: two boots of one disk, a copy of esp.img signed as its own. The
   first, the disk installed as the fallback with FAT32 mounted, runs
   `unmount` and `erase disk`; the host must then find sector 0 zero. The
@@ -72,7 +73,7 @@ disk whose first read fails and whose second reads (the kernel asks
 reads sector 0 first and takes the one failure. Nor the blank disk beside a
 stick whose init fails. About four minutes. Run it whenever `init_storage`,
 `install_boot_disk`, `parttable::is_blank`, fsd's mount line, `erase
-disk`, or netd's boot-time load (`load_auth`, `load_pause`) changes.
+disk`, or netd's boot-time load (`load_auth`, `LoadBudget`) changes.
 """
 import importlib.util
 import os

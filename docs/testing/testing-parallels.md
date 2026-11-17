@@ -111,22 +111,27 @@ keyboard↔storage contention, which has real-hardware-only failure modes).
 `netd`'s `serve()` calls `load_auth()` **before** entering its event loop, and
 `load_auth` does *blocking* `read_file_chunk` calls to `fsd` for **three**
 files (the `\NOEXEC` flag, `/etc/cluster/id` and `/etc/cluster/authorized`),
-each retried on a transient failure (**one shared budget** of 50 tries ×
-`NET_WAIT(40)` ≈ 2 s across all three, not per read) for the case where the disk
-isn't mounted yet.
+each retried on a transient failure (**one shared budget** of 2 s of sleeps
+across all three, not per read, since #477: it was 50 tries of `NET_WAIT(40)`,
+which a queued message cut short) for the case where the disk isn't mounted
+yet.
 
 The `\NOEXEC` probe goes **first**, and it is the one that matters most here:
 it is the only one that fails *open* if it never gets an answer, so it now
 defaults to setting the lever rather than clearing it. See its comment in
 `load_auth`, and `testing-pi4.md`'s Risk 4, which mirrors this section.
 
-On QEMU this is a non-event: virtio-blk auto-mounts before `netd` ever asks, so
-`load_auth` returns on the first call. **On Parallels the disk is USB-MSD**,
+On QEMU with a disk this is a non-event: virtio-blk auto-mounts before `netd`
+ever asks, so `load_auth` returns on the first call (with nothing mounted, as in
+`test-blank-disk.py`'s LOAD case, it runs its whole budget). **On Parallels the
+disk is USB-MSD**,
 slower to enumerate, and absent entirely if no stick is attached, so `load_auth`
-can spend the full ~2 s in its retry loop. If the supervisor's health-ping fires
+can spend the full ~2 s in its retry loop. If the supervisor's health-ping fired
 during that window (netd isn't draining its mailbox yet), `netd` could be
 restarted mid-`load_auth`, potentially into the per-boot give-up cap: a boot
-loop that **cannot reproduce on QEMU**. This is precisely the emulator-hides-a-bug
+loop that **cannot reproduce on QEMU**. (A prediction, never seen: and since
+#477 the load's sleeps are not pinged, because each one's wake is seen
+`Runnable`; LOAD checks that netd is not restarted over the whole 2 s.) This is precisely the emulator-hides-a-bug
 class the project keeps hitting (see the filesystems-arc and USB-storage
 postmortems).
 

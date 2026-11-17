@@ -32,7 +32,7 @@
 //!   outstanding ping older than [`PING_TIMEOUT`] ⇒ wedged ⇒ restart.
 //!
 //!   **A caller relies on when the ping is not sent:** netd's boot-time
-//!   load (`load_pause` in its `main.rs`) sleeps 40 ms at a time for up to
+//!   load (`LoadBudget` in its `main.rs`) sleeps 40 ms at a time for up to
 //!   2 s and reads no mailbox meanwhile. It is never pinged only because
 //!   `tasks::on_tick` wakes a sleeper before this poll in the same tick,
 //!   so the poll sees it `Runnable` and starts its count again. Reordering
