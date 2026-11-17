@@ -120,6 +120,22 @@ struct Dev {
     /// A transmit DMA that has not stopped does once the transmit FIFO is
     /// flushed (ours, for a DMA the MAC's reset and flush release).
     tdma_freed_by_flush: bool,
+    /// INTRL2_0's pending interrupts and its mask (all masked out of
+    /// reset), and the frames taken since receive done was last raised.
+    /// Receive done (bit 13) is raised once the ring has taken
+    /// `DMA_MBUF_DONE_THRESH` frames, and the line is pending and not
+    /// masked: Linux's reading (`bcmgenet.h`, `bcmgenet_isr0`), seen on
+    /// the board on 2026-11-16 (an interrupt per frame, cleared by the
+    /// write). **And, inferred and not seen directly:** while frames wait
+    /// in the ring receive done is held up, so a clear does not take it
+    /// down ([`Dev::pending`]). The board took 302 interrupts for 257
+    /// frames with the clear alone, every one with receive done set on
+    /// entry and a frame waiting. Held, here, whatever the driver reads
+    /// or does not, so no test passes by a read the driver happens to
+    /// make.
+    irq_stat: u32,
+    irq_mask: u32,
+    rx_since_irq: u32,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -149,6 +165,14 @@ const TDMA_CONS: usize = 0x5008;
 const TDMA_PROD: usize = 0x500c;
 const TDMA_CTL: usize = 0x5044;
 const RX_DESC: usize = 0x2000;
+const RDMA_THRESH: usize = 0x3024;
+const IRQ_STAT: usize = 0x200;
+const IRQ_CLEAR: usize = 0x208;
+const IRQ_MASK_STATUS: usize = 0x20c;
+const IRQ_MASK_SET: usize = 0x210;
+const IRQ_MASK_CLEAR: usize = 0x214;
+/// Receive done, bit 13.
+const RX_DONE: u32 = 1 << 13;
 const TX_DESC: usize = 0x4000;
 /// Ring 16 enabled and the DMA on.
 const DMA_ON: u32 = 0x0002_0001;
@@ -209,6 +233,9 @@ fn board() -> Dev {
         aux_reads_ones_after_reset: false,
         resets: 0,
         tdma_freed_by_flush: false,
+        irq_stat: 0,
+        irq_mask: 0xffff_ffff,
+        rx_since_irq: 0,
     }
 }
 
@@ -304,6 +331,18 @@ impl Dev {
     fn rx_running(&self) -> bool {
         self.reg(RDMA_CTL) & DMA_ON == DMA_ON && self.reg(UMAC_CMD) & 2 != 0
     }
+    /// Whether the device's interrupt line is raised: a pending
+    /// interrupt that is not masked.
+    fn line(&self) -> bool {
+        self.pending() & !self.irq_mask != 0
+    }
+    /// INTRL2_0's pending interrupts as the device has them: what was
+    /// raised and not cleared, and receive done while frames wait (the
+    /// `irq_stat` doc).
+    fn pending(&self) -> u32 {
+        let waiting = self.reg(RDMA_THRESH) != 0 && self.rx_prod as u16 != self.reg(RDMA_CONS) as u16;
+        self.irq_stat | if waiting { RX_DONE } else { 0 }
+    }
     fn tx_running(&self) -> bool {
         self.reg(TDMA_CTL) & DMA_ON == DMA_ON && self.reg(UMAC_CMD) & 1 != 0 && !self.tx_dead
     }
@@ -320,6 +359,12 @@ impl Dev {
         self.rx_at = (self.rx_at + 1) % 256;
         self.regs.insert(0x3000, (self.rx_at * 3) as u32);
         self.rx_prod = (self.rx_prod & 0xffff_0000) | u32::from(prod.wrapping_add(1));
+        let threshold = self.reg(RDMA_THRESH);
+        self.rx_since_irq += 1;
+        if threshold != 0 && self.rx_since_irq >= threshold {
+            self.irq_stat |= RX_DONE;
+            self.rx_since_irq = 0;
+        }
         true
     }
     /// The device takes every descriptor queued since it last did, from
@@ -358,6 +403,8 @@ impl Bus for Dev {
         self.reads.push(offset);
         match offset {
             RDMA_PROD => self.rx_prod,
+            IRQ_STAT => self.pending(),
+            IRQ_MASK_STATUS => self.irq_mask,
             TDMA_CONS => {
                 if self.tx_cons != self.tx_target {
                     if self.tx_lag_left > 0 {
@@ -388,7 +435,7 @@ impl Bus for Dev {
     fn write(&mut self, offset: usize, value: u32) {
         assert!(offset.is_multiple_of(4) && offset + 4 <= 0x1_0000, "write at {offset:#x}");
         self.ops.push(W(offset, value));
-        let rx_setup = matches!(offset, 0x3000 | 0x3010 | 0x3014 | 0x301c | 0x3028 | 0x302c | 0x3040 | 0x304c) || (RX_DESC..RX_DESC + 256 * 12).contains(&offset);
+        let rx_setup = matches!(offset, 0x3000 | 0x3010 | 0x3014 | 0x301c | 0x3024 | 0x3028 | 0x302c | 0x3040 | 0x304c) || (RX_DESC..RX_DESC + 256 * 12).contains(&offset);
         let tx_setup = matches!(offset, 0x5000 | 0x5010 | 0x5014 | 0x501c | 0x5024 | 0x5028 | 0x502c | 0x5040 | 0x504c);
         let rx_live = self.reg(RDMA_CTL) & 1 != 0 || self.dma_stop_left.1 > 0;
         let tx_live = self.reg(TDMA_CTL) & 1 != 0 || self.dma_stop_left.0 > 0;
@@ -417,6 +464,10 @@ impl Bus for Dev {
         match offset {
             // The two indexes the device owns.
             RDMA_PROD | TDMA_CONS => {}
+            // INTRL2_0: each written bit clears, masks or unmasks.
+            IRQ_CLEAR => self.irq_stat &= !value,
+            IRQ_MASK_SET => self.irq_mask |= value,
+            IRQ_MASK_CLEAR => self.irq_mask &= !value,
             UMAC_CMD => {
                 if value & 0x2000 != 0 {
                     self.regs.insert(MAC0, 0);
@@ -514,7 +565,7 @@ fn init_is_u_boots_sequence_write_for_write() {
         W(0x5044, 0), W(0x3044, 0), W(0xb34, 1), D(10), W(0xb34, 0),
         // rx_ring_init: the consumer aligned on the producer's low half.
         W(0x304c, 8), W(0x3014, 0), W(0x302c, 0), W(0x3000, 0), W(0x301c, 767),
-        W(0x300c, 0x1234), W(0x3010, 0x0100_0800), W(0x3028, 0x0005_0010), W(0x3040, 0x0001_0000),
+        W(0x300c, 0x1234), W(0x3010, 0x0100_0800), W(0x3024, 1), W(0x3028, 0x0005_0010), W(0x3040, 0x0001_0000),
     ];
     let tail = [
         // tx_ring_init: the producer aligned on the consumer.
@@ -779,8 +830,12 @@ fn start_tells_the_mac_the_speed_then_turns_it_on() {
         d.ops.clear();
         g.start(&mut d, speed, Receiver::On);
         // bcmgenet_adjust_link: OOB_DISABLE (0x20) off, RGMII_LINK and
-        // RGMII_MODE_EN on, then ID_MODE_DIS; the speed; the enables.
-        assert_eq!(d.ops, [W(0x8c, 0x50), W(0x8c, 0x0001_0050), W(0x808, word), W(0x808, word | 3)]);
+        // RGMII_MODE_EN on, then ID_MODE_DIS; the speed; receive done
+        // cleared and unmasked (bcmgenet_rx_ring16_int_enable); the enables.
+        assert_eq!(
+            d.ops,
+            [W(0x8c, 0x50), W(0x8c, 0x0001_0050), W(0x808, word), W(IRQ_CLEAR, RX_DONE), W(IRQ_MASK_CLEAR, RX_DONE), W(0x808, word | 3)]
+        );
         assert!(!d.ops.contains(&D(0)));
         assert!(g.started() && g.receiving() && d.rx_running() && d.tx_running());
     }
@@ -793,8 +848,10 @@ fn start_with_the_receiver_off_turns_on_the_transmitter_alone() {
         let mut g = Genet::init(&mut d, RX_BASE).unwrap();
         d.ops.clear();
         g.start(&mut d, speed, Receiver::Off);
-        // The same writes but the last, which has bit 0 alone.
+        // The same writes but the last, which has bit 0 alone, and no
+        // interrupt unmasked: no frame can arrive to raise it.
         assert_eq!(d.ops, [W(0x8c, 0x50), W(0x8c, 0x0001_0050), W(0x808, word), W(0x808, word | 1)]);
+        assert_eq!(d.irq_mask, 0xffff_ffff);
         assert!(g.started() && !g.receiving() && d.tx_running() && !d.rx_running());
     }
 }
@@ -842,6 +899,212 @@ fn a_second_start_changes_the_speed_and_leaves_the_mac_on() {
     // The MAC was never off on the way: every write to it had both enables.
     let cmds: Vec<u32> = d.writes().iter().filter(|w| w.0 == UMAC_CMD).map(|w| w.1).collect();
     assert_eq!(cmds, [0x7, 0x7]);
+}
+
+// ---- the receive interrupt (the plan's step 9) ----
+
+#[test]
+fn set_up_masks_every_interrupt_and_the_threshold_is_one_frame() {
+    let mut d = board();
+    // The firmware's era: receive done unmasked and pending, and a ring
+    // that would raise it every 16 frames.
+    d.irq_mask = 0;
+    d.irq_stat = RX_DONE;
+    d.regs.insert(RDMA_THRESH, 16);
+    let _g = Genet::init(&mut d, RX_BASE).unwrap();
+    assert!(!d.line(), "nothing raised after the set-up");
+    assert_eq!(d.irq_mask, 0xffff_ffff);
+    assert_eq!(d.reg(RDMA_THRESH), 1);
+}
+
+#[test]
+fn a_frame_raises_the_line_and_the_ack_masks_it_until_the_rearm() {
+    let mut d = board();
+    let mut g = up(&mut d);
+    // Only receive done is unmasked.
+    assert_eq!(d.irq_mask, !RX_DONE);
+    assert!(!d.line());
+    assert!(d.deliver(64));
+    assert!(d.line(), "the frame raises the line");
+    d.ops.clear();
+    g.ack_rx_interrupt(&mut d);
+    assert_eq!(d.ops, [W(IRQ_MASK_SET, RX_DONE), W(IRQ_CLEAR, RX_DONE)], "masked, then cleared");
+    assert!(!d.line(), "the ack drops it");
+    // More frames while masked raise nothing, though receive done comes
+    // back for them.
+    assert!(d.deliver(64) && d.deliver(64));
+    assert!(!d.line());
+    // The reader drains the ring, then rearms.
+    for _ in 0..3 {
+        assert!(matches!(g.rx_next(&mut d), Rx::Frame { .. }));
+        g.rx_release(&mut d);
+    }
+    assert_eq!(g.rx_next(&mut d), Rx::None);
+    d.ops.clear();
+    assert!(g.rearm_rx_interrupt(&mut d), "nothing waits: unmasked");
+    assert_eq!(d.ops, [W(IRQ_CLEAR, RX_DONE), W(IRQ_MASK_CLEAR, RX_DONE)]);
+    assert!(!d.line(), "the stale receive done was cleared before the unmask");
+    assert!(d.deliver(64));
+    assert!(d.line(), "the next frame raises it again");
+}
+
+#[test]
+fn the_model_holds_receive_done_up_while_frames_wait() {
+    // A test of the model and not of the driver: the rule the other
+    // interrupt tests stand on (the `irq_stat` doc), inferred from what
+    // the board showed with the clear alone, more interrupts than frames.
+    // It is why the ack masks. Nothing is read between the steps.
+    let mut d = board();
+    let mut g = up(&mut d);
+    assert!(d.deliver(64));
+    d.write(IRQ_CLEAR, RX_DONE);
+    assert!(d.line(), "a clear does not take it down while the frame waits");
+    assert!(matches!(g.rx_next(&mut d), Rx::Frame { .. }));
+    g.rx_release(&mut d);
+    assert!(!d.line(), "cleared, and none waits: down");
+    // Raised and never cleared, it stays raised once the frame is taken.
+    assert!(d.deliver(64));
+    assert!(matches!(g.rx_next(&mut d), Rx::Frame { .. }));
+    g.rx_release(&mut d);
+    assert!(d.line(), "raised and not cleared: still up");
+    d.write(IRQ_CLEAR, RX_DONE);
+    assert!(!d.line(), "with none waiting, the clear takes it down");
+}
+
+#[test]
+fn the_ack_reads_the_mask_back_after_its_writes() {
+    // The read that holds the IRQ path's end of interrupt until the
+    // writes have reached the device (`ack_rx_interrupt`'s doc).
+    // The model keeps reads and writes apart, so a bus in front of it
+    // records the two in the order they came.
+    struct InOrder<'a>(&'a mut Dev, Vec<(char, usize)>);
+    impl Bus for InOrder<'_> {
+        fn read(&mut self, offset: usize) -> u32 {
+            self.1.push(('r', offset));
+            self.0.read(offset)
+        }
+        fn write(&mut self, offset: usize, value: u32) {
+            self.1.push(('w', offset));
+            self.0.write(offset, value)
+        }
+        fn delay_us(&mut self, us: u32) {
+            self.0.delay_us(us)
+        }
+    }
+    let mut d = board();
+    let mut g = up(&mut d);
+    assert!(d.deliver(64));
+    let mut bus = InOrder(&mut d, Vec::new());
+    g.ack_rx_interrupt(&mut bus);
+    assert_eq!(bus.1, [('w', IRQ_MASK_SET), ('w', IRQ_CLEAR), ('r', IRQ_MASK_STATUS)], "one read, of the mask, after both writes");
+    assert!(!d.line());
+}
+
+#[test]
+fn a_later_start_leaves_an_acks_mask_for_the_rearm() {
+    // The link comes back at another speed while an ack has receive done
+    // masked and a frame waits: the start must not unmask it.
+    let mut d = board();
+    let mut g = up(&mut d);
+    assert!(d.deliver(64));
+    g.ack_rx_interrupt(&mut d);
+    d.ops.clear();
+    g.start(&mut d, Speed::S100, Receiver::On);
+    assert!(
+        !d.ops.iter().any(|op| matches!(op, W(IRQ_CLEAR | IRQ_MASK_CLEAR, _))),
+        "no interrupt write from a start with the receiver on already: {:?}",
+        d.ops
+    );
+    assert_eq!(d.irq_mask & RX_DONE, RX_DONE, "still masked");
+    assert!(!g.rearm_rx_interrupt(&mut d), "and the rearm still knows it is: a frame waits");
+}
+
+#[test]
+fn the_rearm_leaves_it_masked_while_a_frame_waits() {
+    let mut d = board();
+    let mut g = up(&mut d);
+    assert!(d.deliver(64));
+    g.ack_rx_interrupt(&mut d);
+    // The reader thought the ring empty, and a frame is there: the rearm
+    // says so and unmasks nothing.
+    d.ops.clear();
+    assert!(!g.rearm_rx_interrupt(&mut d));
+    assert_eq!(d.ops, [W(IRQ_CLEAR, RX_DONE)]);
+    assert!(!d.line());
+    assert_eq!(d.irq_mask & RX_DONE, RX_DONE);
+    assert!(matches!(g.rx_next(&mut d), Rx::Frame { .. }));
+    g.rx_release(&mut d);
+    assert!(g.rearm_rx_interrupt(&mut d));
+    assert!(!d.line());
+}
+
+#[test]
+fn a_rearm_with_nothing_masked_writes_nothing() {
+    // The reader finds the ring empty on every call; only the first after
+    // an ack is the device's business.
+    let mut d = board();
+    let mut g = up(&mut d);
+    d.ops.clear();
+    assert!(g.rearm_rx_interrupt(&mut d), "never masked: armed");
+    assert_eq!(d.ops, [], "and nothing written");
+    assert!(d.deliver(64));
+    g.ack_rx_interrupt(&mut d);
+    assert!(matches!(g.rx_next(&mut d), Rx::Frame { .. }));
+    g.rx_release(&mut d);
+    assert!(g.rearm_rx_interrupt(&mut d));
+    d.ops.clear();
+    assert!(g.rearm_rx_interrupt(&mut d), "rearmed already");
+    assert_eq!(d.ops, [], "a second rearm writes nothing");
+    assert_eq!(d.irq_mask & RX_DONE, 0, "and leaves it unmasked");
+}
+
+#[test]
+fn the_rearm_lifts_no_mask_with_the_receiver_off() {
+    let mut d = board();
+    let mut g = Genet::init(&mut d, RX_BASE).unwrap();
+    g.start(&mut d, Speed::S1000, Receiver::Off);
+    g.ack_rx_interrupt(&mut d);
+    d.ops.clear();
+    assert!(g.rearm_rx_interrupt(&mut d));
+    assert_eq!(d.ops, [], "nothing written with the receiver off");
+    assert_eq!(d.irq_mask & RX_DONE, RX_DONE, "receive done stays masked");
+    // The receiver's own start unmasks it, so a rearm after it has nothing
+    // to lift, and a frame then raises it.
+    g.start(&mut d, Speed::S1000, Receiver::On);
+    d.ops.clear();
+    assert!(g.rearm_rx_interrupt(&mut d));
+    assert_eq!(d.ops, [], "the start unmasked it: nothing for the rearm");
+    assert!(d.deliver(64));
+    assert!(d.line());
+}
+
+#[test]
+fn no_interrupt_is_unmasked_with_the_receiver_off() {
+    let mut d = board();
+    let mut g = Genet::init(&mut d, RX_BASE).unwrap();
+    g.start(&mut d, Speed::S1000, Receiver::Off);
+    d.irq_stat = RX_DONE;
+    assert!(!d.line());
+}
+
+#[test]
+fn a_stale_receive_done_is_cleared_before_the_receiver_comes_on() {
+    let mut d = board();
+    let mut g = Genet::init(&mut d, RX_BASE).unwrap();
+    d.irq_stat = RX_DONE;
+    g.start(&mut d, Speed::S1000, Receiver::On);
+    assert!(!d.line(), "unmasked with nothing pending");
+}
+
+#[test]
+fn the_stop_masks_the_receive_interrupt_again() {
+    let mut d = board();
+    let g = up(&mut d);
+    assert!(d.deliver(64));
+    assert!(d.line());
+    let _ = g.stop(&mut d);
+    assert!(!d.line());
+    assert_eq!(d.irq_mask, 0xffff_ffff);
 }
 
 // ---- receive ----

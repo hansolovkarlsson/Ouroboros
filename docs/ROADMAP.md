@@ -932,7 +932,7 @@ not yet checked on this tree are marked (predicted).
       address from `/etc/net`, was built the same day, passes on
       QEMU (`make test-net-config`) and ran on the board: with the file
       written at its shell the board came up at `192.168.77.2` and
-      answered there. Step 9, the interrupt, is next. From there on only the board checks it. What it had to settle first, and what was read:
+      answered there. Step 9, the receive interrupt (INTID 189), was built and ran on the board on 2026-11-16: after one change the board asked for (the ack masks receive done until a drain finds the ring empty, as Linux does; cleared alone it gave 302 interrupts for 257 frames), 158 interrupts for 260 frames, 0 in the control without the unmask, and a soak of 400 fetches clean. Step 10, two boards, is next. From there on only the board checks it. What it had to settle first, and what was read:
       - **Which NIC: decided by Hans on 2026-11-12, the on-board GENET
         first.** It is Broadcom GENET v5 with a BCM54213PE PHY over MDIO
         (the PHY (predicted)), plain MMIO, discovered from the firmware's

@@ -18,10 +18,20 @@
 //!   `syscall::net_has_frame`). It reads and does nothing else: no side
 //!   effect on the device, no wait.
 //! - [`Nic::intid`] is an interrupt that means "a frame was received" and
-//!   nothing else, and that [`Nic::ack_interrupt`] clears at the device.
-//!   `main.rs` enables whatever INTID is reported, and `exceptions.rs` wakes
-//!   the network server on it without asking the device what happened. An
-//!   arm that cannot promise both reports `None` and is polled on the tick.
+//!   nothing else, and that [`Nic::ack_interrupt`] takes down at the device,
+//!   so the line is low when the IRQ path returns. `main.rs` enables
+//!   whatever INTID is reported, and `exceptions.rs` wakes the network
+//!   server on it without asking the device what happened. An arm that
+//!   cannot promise both reports `None` and is polled on the tick. When the
+//!   next interrupt can come is the arm's: virtio-net's ack clears, and the
+//!   next frame raises one; the GENET's masks receive done until the
+//!   network server next waits with the ring drained.
+//! - [`Nic::rearm_interrupt`] is called by `NET_WAIT`, under the kernel
+//!   lock, before the reader blocks: an arm whose ack left its interrupt
+//!   masked unmasks it there if no frame waits, and answers `false` if one
+//!   does, so `NET_WAIT` returns for it instead of blocking. No reader
+//!   blocks with the interrupt masked. virtio-net's answers `true` and
+//!   writes nothing.
 //! - Every arm takes a frame to send, and a buffer to receive into, of any
 //!   length up to `syscall_abi::NET_MAX_FRAME`. That bound is the ABI's and
 //!   is the same for every device, so `netd`'s buffers do not depend on the
@@ -83,24 +93,38 @@ impl Nic {
     pub fn intid(&self) -> Option<u32> {
         match self {
             Nic::Virtio(d) => d.intid(),
-            // Polled, whatever its `_CRS` names (the plan's design 7): an
-            // INTID reported is one `main.rs` enables, and nothing here
-            // would clear the level-triggered line.
-            Nic::Genet(_) => None,
+            // The declared receive interrupt since the plan's step 9:
+            // receive done alone is unmasked, `ack_interrupt` masks and
+            // clears it, and the reader's next wait rearms it.
+            Nic::Genet(d) => d.intid(),
         }
     }
 
-    /// Clears the pending receive interrupt at the device, so it can raise
-    /// the next one.
+    /// Takes the pending receive interrupt down at the device, so the line
+    /// is low when the IRQ path returns. When the device can raise the next
+    /// one is the arm's (the module doc).
     ///
     /// # Safety
     /// The driver's own contract: the device initialized, called from the
     /// IRQ path.
-    pub unsafe fn ack_interrupt(&self) {
+    pub unsafe fn ack_interrupt(&mut self) {
         match self {
             Nic::Virtio(d) => unsafe { d.ack_interrupt() },
-            // No interrupt is reported, so none is taken.
-            Nic::Genet(_) => {}
+            Nic::Genet(d) => d.ack_interrupt(),
+        }
+    }
+
+    /// Before the reader waits for a frame: rearms a receive interrupt the
+    /// ack left masked, if no frame waits. `false` when one does: the
+    /// reader is to take it rather than wait (the module doc).
+    ///
+    /// # Safety
+    /// The driver's own contract: the device initialized, under the kernel
+    /// lock.
+    pub unsafe fn rearm_interrupt(&mut self) -> bool {
+        match self {
+            Nic::Virtio(_) => true,
+            Nic::Genet(d) => d.rearm_interrupt(),
         }
     }
 

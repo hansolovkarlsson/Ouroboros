@@ -1100,16 +1100,20 @@ extern "C" fn kernel_main() -> ! {
             // would be an SGI or PPI (the kick, the timer), one past the
             // distributor's limit a write past its registers (the review of
             // #407). The tick-poll fallback covers everything otherwise.
-            let nic_spi = nic_intid.filter(|&intid| gic::enable_declared_spi(intid));
-            if let Some(intid) = nic_spi {
+            let nic_spi = nic_intid.and_then(|intid| gic::enable_declared_spi(intid).map(|held| (intid, held)));
+            if let Some((intid, _)) = nic_spi {
                 exceptions::set_net_intid(intid);
             }
             match (nic_intid, nic_spi) {
                 (Some(intid), None) => console::println!(
                     "Ouroboros kernel: NIC interrupt {intid} is not an SPI this GIC implements: the NIC is polled"
                 ),
-                (_, Some(intid)) => console::println!(
-                    "Ouroboros kernel: NIC receive interrupt enabled (GIC INTID {intid})"
+                (_, Some((intid, held))) => console::println!(
+                    "Ouroboros kernel: NIC receive interrupt enabled (GIC INTID {intid}, level-triggered; the GIC held {})",
+                    match held {
+                        gic::Trigger::Level => "level",
+                        gic::Trigger::Edge => "edge, now set to level",
+                    }
                 ),
                 _ => {}
             }

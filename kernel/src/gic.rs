@@ -135,21 +135,54 @@ pub(crate) const GICD_TYPER: usize = 0x004;
 /// reviews of #407). [`enable_interrupt`] stays for the kernel's own
 /// constants (the timer, the kick SGI).
 ///
+/// **Level-triggered, set and not assumed.** Before the enable the SPI's
+/// `GICD_ICFGR` field (0xc00, two bits an INTID, the high one edge; the
+/// same place in GICv2 and GICv3) is set to level, and what it held is
+/// returned for the boot line. Its value out of reset is the
+/// implementation's, and a firmware may have set it: the one caller's
+/// devices raise a level line (virtio-mmio's on QEMU, and the GENET,
+/// whose ack masks it until the reader's next wait, a design that holds
+/// only for a level), so an SPI left edge-triggered would change what
+/// every ack means with nothing said. The firmware's own declaration of
+/// the trigger (the `_CRS` descriptor's flags) is not read. Written
+/// before the enable, as the GIC requires.
+///
 /// # Safety
 /// Must run after [`init`].
-pub unsafe fn enable_declared_spi(intid: u32) -> bool {
+pub unsafe fn enable_declared_spi(intid: u32) -> Option<Trigger> {
     let info = info();
     // SAFETY: the distributor is mapped and discovered from the MADT.
     let typer = unsafe { core::ptr::read_volatile((info.gicd_base as usize + GICD_TYPER) as *const u32) };
     let limit = (32 * ((typer & 0x1f) + 1)).min(1020);
     if !(32..limit).contains(&intid) {
-        return false;
+        return None;
+    }
+    let cfg = (info.gicd_base as usize + GICD_ICFGR + 4 * (intid as usize / 16)) as *mut u32;
+    let edge = 1u32 << (2 * (intid % 16) + 1);
+    // SAFETY: `intid` was just checked to be an SPI the distributor
+    // implements, so its ICFGR word is inside the distributor's registers.
+    let held = unsafe { core::ptr::read_volatile(cfg) };
+    if held & edge != 0 {
+        // SAFETY: as the read; the SPI is not yet enabled here.
+        unsafe { core::ptr::write_volatile(cfg, held & !edge) };
     }
     // SAFETY: after `init` (the caller's contract), and `intid` was just
     // checked to be an SPI the distributor implements, so the enable
     // writes land inside its registers.
     unsafe { enable_interrupt(intid) };
-    true
+    Some(if held & edge != 0 { Trigger::Edge } else { Trigger::Level })
+}
+
+/// `GICD_ICFGR`, the interrupts' trigger modes, two bits an INTID: the
+/// same offset in GICv2 and GICv3.
+const GICD_ICFGR: usize = 0xc00;
+
+/// An SPI's trigger mode, as [`enable_declared_spi`] found it before it
+/// set level.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Trigger {
+    Level,
+    Edge,
 }
 
 /// Enables forwarding of `intid` (e.g. the timer PPI, 30).

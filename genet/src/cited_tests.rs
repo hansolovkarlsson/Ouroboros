@@ -6,9 +6,9 @@
 //! `drivers/net/ethernet/broadcom/genet/bcmgenet.h` (L) and
 //! `include/uapi/linux/mii.h` (M), and U-Boot `v2024.10`
 //! `drivers/net/phy/broadcom.c` (B). The line numbers were checked against
-//! those files by a script on 2026-11-13 (each line holds a `#define` of
-//! the name); the files are not in this tree, so the test below checks the
-//! values and not the lines.
+//! those files by a script on 2026-11-13, and again with step 9's rows on
+//! 2026-11-16 (each line holds a `#define` of the name); the files are not
+//! in this tree, so the test below checks the values and not the lines.
 
 use crate::mac::*;
 use crate::phy::*;
@@ -91,6 +91,7 @@ const CITED: &[(&str, u64, u64, Src, u32)] = &[
     ("DMA_START_ADDR", (reg::RDMA_START_ADDR - reg::RDMA_RING) as u64, 0x14, U, 160),
     ("DMA_END_ADDR", (reg::RDMA_END_ADDR - reg::RDMA_RING) as u64, 0x1c, U, 161),
     ("DMA_MBUF_DONE_THRESH", (reg::TDMA_MBUF_DONE_THRESH - reg::TDMA_RING) as u64, 0x24, U, 162),
+    ("DMA_MBUF_DONE_THRESH", (reg::RDMA_MBUF_DONE_THRESH - reg::RDMA_RING) as u64, 0x24, U, 162),
     ("TDMA_FLOW_PERIOD", reg::TDMA_FLOW_PERIOD as u64, 0x5028, U, 163),
     ("TDMA_WRITE_PTR", reg::TDMA_WRITE_PTR as u64, 0x502c, U, 164),
     ("RDMA_WRITE_PTR", reg::RDMA_WRITE_PTR as u64, 0x3000, U, 168),
@@ -110,6 +111,8 @@ const CITED: &[(&str, u64, u64, Src, u32)] = &[
     ("INTRL2_CPU_CLEAR", (reg::INTRL2_0_CLEAR - 0x200) as u64, 0x08, L, 240),
     ("INTRL2_CPU_MASK_STATUS", (reg::INTRL2_0_MASK_STATUS - 0x200) as u64, 0x0c, L, 241),
     ("INTRL2_CPU_MASK_SET", (reg::INTRL2_0_MASK_SET - 0x200) as u64, 0x10, L, 242),
+    ("INTRL2_CPU_MASK_CLEAR", (reg::INTRL2_0_MASK_CLEAR - 0x200) as u64, 0x14, L, 243),
+    ("UMAC_IRQ_RXDMA_MBDONE", IRQ_RX_DONE as u64, 1 << 13, L, 262),
     ("GENET_INTRL2_0_OFF", (reg::INTRL2_0_CLEAR - 0x08) as u64, 0x0200, L, 284),
     ("GENET_INTRL2_1_OFF", (reg::INTRL2_1_CLEAR - 0x08) as u64, 0x0240, L, 285),
     ("DMA_DISABLED", DMA_DISABLED as u64, 1 << 0, L, 374),

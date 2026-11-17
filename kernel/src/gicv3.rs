@@ -281,9 +281,9 @@ pub unsafe fn enable_ppi_on(sgi_base: usize, intid: u32) {
 /// instead and needs three writes: put it in Group 1 (or it defaults to Group
 /// 0/FIQ and never reaches this kernel's IRQ handler - the exact bug `init`'s
 /// `GICR_IGROUPR0` write already fixed for PPIs), route it to the calling
-/// core, the boot core, via `GICD_IROUTER`, then enable it. Trigger
-/// mode/priority are left at reset for the same reasons
-/// `gicv2.rs::enable_interrupt` documents.
+/// core, the boot core, via `GICD_IROUTER`, then enable it. Priority is
+/// left at reset and the trigger mode is set by
+/// `gic::enable_declared_spi`, as `gicv2.rs::enable_interrupt` documents.
 ///
 /// # Safety
 /// Must run after [`init`].

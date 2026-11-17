@@ -769,7 +769,8 @@ fn irq_locked(frame: *mut Context, acked: gic::Acked) {
     } else if boot_core && intid == NET_INTID.load(Ordering::Relaxed) {
         // A NIC receive frame arrived (the INTID a NIC reports always means
         // receive - nic.rs's module doc; virtio_net.rs for how its arm keeps it).
-        // Ack the device so it can raise the next one, then wake the network
+        // Ack the device, which takes its line down (when it can raise the
+        // next one is the arm's: nic.rs's module doc), then wake the network
         // server (blocked in NET_WAIT) and switch to it now - the latency
         // win over the tick-poll, which stays as a fallback (see
         // tasks::on_net_irq).

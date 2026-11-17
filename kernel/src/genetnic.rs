@@ -37,10 +37,23 @@
 //! here names an address. On QEMU and Parallels none is declared, nothing
 //! is logged, and no register is touched.
 //!
-//! **Polled** (design 7): [`Device`] reports no interrupt whatever the
-//! `_CRS` names, so `main.rs` enables none and the tick's
-//! `net_has_frame()` is the only waker. The crate masks every interrupt at
-//! the device as well.
+//! **The receive interrupt** (the plan's step 9, 2026-11-16; polled
+//! before it, design 7): [`Device`] reports the first INTID the `_CRS`
+//! names (189 on the Pi 4), `main.rs` enables it at the GIC, and the IRQ
+//! path calls [`Device::ack_interrupt`], which masks and clears receive
+//! done at the device and counts, before `netd` is woken. It stays masked
+//! until `netd` next waits (`NET_WAIT`), when [`Device::rearm_interrupt`]
+//! unmasks it if the ring is empty, as Linux's interrupt and poller do:
+//! cleared alone, the device raised it again for every frame still waiting
+//! (302 interrupts for 257 frames on the board). So the next interrupt
+//! comes only once `netd` has drained the ring and asked to wait. The
+//! rearm is the wait's and not the drain's, and a wait that finds a frame
+//! there returns for it instead of blocking, so no reader blocks with it
+//! masked, a `netd` restarted part way through a drain included. The
+//! crate masks every interrupt at the set-up and unmasks receive done
+//! alone when the receiver comes on. The tick's `net_has_frame()` stays
+//! behind it, as it does for virtio-net: an interrupt missed costs a
+//! tick.
 //!
 //! **The receive buffers** are [`RX_AREA`], one page-aligned static of 256
 //! buffers of 2048 bytes that the device writes by DMA, and **the
@@ -243,10 +256,13 @@ impl core::fmt::Display for Took {
     }
 }
 
-/// The GENET the ACPI tables declare, as [`discover`] took it.
+/// The GENET the ACPI tables declare, as [`discover`] took it: its block
+/// and the first interrupt its `_CRS` names (189 on the Pi 4), which
+/// carries the default ring's receive done (the plan's step 9).
 #[derive(Clone, Copy)]
 pub(crate) struct Declared {
     pub base: u64,
+    pub intid: Option<u32>,
 }
 
 /// The one GENET the ACPI tables declare present, with a block the driver
@@ -289,12 +305,12 @@ pub(crate) unsafe fn discover(rsdp: Option<*const u8>) -> Option<Declared> {
         return None;
     }
     log::info!(
-        "Ouroboros kernel: genet: ACPI declares GENET @ {:#x}, {:#x} bytes, INTID {:?} (not used: the device is polled)",
+        "Ouroboros kernel: genet: ACPI declares GENET @ {:#x}, {:#x} bytes, INTID {:?} (its receive interrupt, the tick's poll behind it)",
         c.base,
         c.size,
         c.intid
     );
-    Some(Declared { base: c.base })
+    Some(Declared { base: c.base, intid: c.intid })
 }
 
 /// The longest the boot waits for a link, and how often it asks. The PHY's
@@ -313,6 +329,7 @@ const STUCK_READS: u32 = 3;
 pub(crate) struct Quieted {
     bus: Mmio,
     sys_rev: u32,
+    intid: Option<u32>,
 }
 
 /// Makes the declared device quiet, whatever becomes of it afterwards
@@ -389,7 +406,7 @@ pub(crate) unsafe fn quiet(declared: Declared) -> Option<Quieted> {
                 genet::Bus::read(&mut bus, genet::reg::RDMA_STATUS),
                 genet::Bus::read(&mut bus, genet::reg::TDMA_STATUS)
             );
-            Some(Quieted { bus, sys_rev })
+            Some(Quieted { bus, sys_rev, intid: declared.intid })
         }
     }
 }
@@ -398,6 +415,12 @@ pub(crate) unsafe fn quiet(declared: Declared) -> Option<Quieted> {
 pub(crate) struct Device {
     bus: Mmio,
     genet: Genet,
+    /// The receive interrupt the firmware declares, reported to `nic.rs`
+    /// so `main.rs` enables it at the GIC (the plan's step 9).
+    intid: Option<u32>,
+    /// Interrupts taken on it, saturating: the step's check, said with
+    /// the counts received ([`Device::say_counts`]) and once at the first.
+    interrupts: u32,
     /// The one PHY, by MDIO address and identifier, once it was found and
     /// its set-up did not fail: what a send asks for the link when the
     /// boot found none.
@@ -433,7 +456,7 @@ pub(crate) struct Device {
 /// # Safety
 /// As [`quiet`], which made `quieted`.
 pub(crate) unsafe fn init(quieted: Quieted, dma_noncoherent: bool) -> Option<Device> {
-    let Quieted { mut bus, sys_rev } = quieted;
+    let Quieted { mut bus, sys_rev, intid } = quieted;
     let base = bus.base();
     let (area, _) = dma_region();
     let (nc, pages) = rx_area_noncacheable_pages();
@@ -449,6 +472,8 @@ pub(crate) unsafe fn init(quieted: Quieted, dma_noncoherent: bool) -> Option<Dev
         Ok(genet) => Device {
             bus,
             genet,
+            intid,
+            interrupts: 0,
             phy: None,
             sent: 0,
             received: 0,
@@ -471,7 +496,7 @@ pub(crate) unsafe fn init(quieted: Quieted, dma_noncoherent: bool) -> Option<Dev
     };
     let m = device.genet.mac();
     console::println!(
-        "Ouroboros kernel: genet: GENET v5 (version major {major} minor {minor}) @ {base:#x}, MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, set up on ring 16, polled",
+        "Ouroboros kernel: genet: GENET v5 (version major {major} minor {minor}) @ {base:#x}, MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, set up on ring 16",
         m[0], m[1], m[2], m[3], m[4], m[5]
     );
     // Where the firmware left the two indexes the device owns, which the
@@ -508,7 +533,7 @@ impl Device {
     fn start(&mut self, speed: Speed) {
         self.genet.start(&mut self.bus, speed, Receiver::On);
         console::println!(
-            "Ouroboros kernel: genet: the MAC's transmitter and receiver are on at {} Mb/s (UMAC_CMD {:#010x}, UMAC_MDF_CTRL {:#010x}): frames are sent, and received by the tick's poll",
+            "Ouroboros kernel: genet: the MAC's transmitter and receiver are on at {} Mb/s (UMAC_CMD {:#010x}, UMAC_MDF_CTRL {:#010x}): frames are sent, and received on the receive interrupt and the tick's poll",
             speed.mbps(),
             genet::Bus::read(&mut self.bus, genet::reg::UMAC_CMD),
             genet::Bus::read(&mut self.bus, genet::reg::UMAC_MDF_CTRL)
@@ -744,14 +769,67 @@ impl Device {
         if self.received == DESCS as u32 || self.received.is_multiple_of(65536) {
             let d = self.genet.drops();
             console::println!(
-                "Ouroboros kernel: genet: {} frames received so far; dropped: {} flagged by the device, {} not whole, {} too short, {} too long",
+                "Ouroboros kernel: genet: {} frames received so far; dropped: {} flagged by the device, {} not whole, {} too short, {} too long; {} receive interrupts taken",
                 self.received,
                 d.flagged,
                 d.fragment,
                 d.runt,
-                d.oversize
+                d.oversize,
+                self.interrupts
             );
         }
+    }
+
+    /// The receive interrupt, for `nic.rs` to report: `main.rs` enables it
+    /// at the GIC and `exceptions.rs` wakes `netd` on it. It means receive
+    /// done and nothing else, since the crate unmasks that bit alone, and
+    /// [`ack_interrupt`](Self::ack_interrupt) takes it down at the device
+    /// until the reader's next wait rearms it: `nic.rs`'s two promises.
+    /// Before the MAC's receiver is on (a boot that found no link) nothing
+    /// is unmasked and the line stays low.
+    pub(crate) fn intid(&self) -> Option<u32> {
+        self.intid
+    }
+
+    /// Masks and clears receive done at the device, so the level-triggered
+    /// line drops and stays down until the reader's next wait finds the
+    /// ring empty and rearms it ([`Device::rearm_interrupt`]), and counts
+    /// the interrupt. From
+    /// the IRQ path under the kernel lock, before `netd` is woken; the
+    /// first one taken has a line. Masked, not only cleared: cleared alone,
+    /// the device raised it again for frames still waiting (the crate's
+    /// `ack_rx_interrupt`, which keeps the masked state its rearm reads).
+    ///
+    /// The crate reads the mask back after its two writes, so they have
+    /// reached the GENET when the read returns; the `dsb` after it holds
+    /// the IRQ path's end of interrupt, a write to the GIC, until the read
+    /// has returned. That orders the end of interrupt after the device's
+    /// own registers took the mask. It does not prove the line's fall has
+    /// reached the GIC's input through the SoC's wiring: if it lagged, the
+    /// GIC would deliver once more, this ack would run on a masked
+    /// interrupt (harmless) and count it, and `netd` would be woken with
+    /// nothing new.
+    pub(crate) fn ack_interrupt(&mut self) {
+        self.genet.ack_rx_interrupt(&mut self.bus);
+        // SAFETY: a barrier alone; no memory or register is named.
+        unsafe { core::arch::asm!("dsb sy", options(nostack, preserves_flags)) };
+        if self.interrupts == 0 {
+            console::println!(
+                "Ouroboros kernel: genet: first receive interrupt taken (INTID {}), and masked at the device until the ring is drained",
+                self.intid.unwrap_or(0)
+            );
+        }
+        self.interrupts = self.interrupts.saturating_add(1);
+    }
+
+    /// Rearms the receive interrupt an ack masked, if no frame waits: from
+    /// `NET_WAIT`, under the kernel lock, before the reader blocks. `false`
+    /// when a frame waits: it stays masked, and `NET_WAIT` returns for the
+    /// frame instead of blocking; the next wait asks again. One that
+    /// arrives after the rearm raises the line. The crate writes nothing
+    /// when no ack masked it, so a wait that follows a wait costs nothing.
+    pub(crate) fn rearm_interrupt(&mut self) -> bool {
+        self.genet.rearm_rx_interrupt(&mut self.bus)
     }
 
     /// Takes one received frame if a usable one waits: copies it into

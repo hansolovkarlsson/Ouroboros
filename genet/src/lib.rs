@@ -65,6 +65,9 @@ pub mod reg {
     /// `INTRL2_CPU_MASK_SET` of block 0, `GENET_INTRL2_0_OFF + 0x10`
     /// (Linux): a bit written masks that interrupt.
     pub const INTRL2_0_MASK_SET: usize = 0x0200 + 0x10;
+    /// `INTRL2_CPU_MASK_CLEAR` of block 0, `GENET_INTRL2_0_OFF + 0x14`
+    /// (Linux): a bit written unmasks that interrupt.
+    pub const INTRL2_0_MASK_CLEAR: usize = 0x0200 + 0x14;
     /// The same two of block 1, from `GENET_INTRL2_1_OFF` (0x0240, Linux).
     pub const INTRL2_1_CLEAR: usize = 0x0240 + 0x08;
     pub const INTRL2_1_MASK_SET: usize = 0x0240 + 0x10;
@@ -122,6 +125,10 @@ pub mod reg {
     pub const RDMA_RING_BUF_SIZE: usize = RDMA_RING + 0x10;
     pub const RDMA_START_ADDR: usize = RDMA_RING + 0x14;
     pub const RDMA_END_ADDR: usize = RDMA_RING + 0x1c;
+    /// `DMA_MBUF_DONE_THRESH` of the receive ring (U-Boot, the ring offset
+    /// 0x24 the transmit ring's uses too): how many frames the ring takes
+    /// before it raises receive done.
+    pub const RDMA_MBUF_DONE_THRESH: usize = RDMA_RING + 0x24;
     pub const RDMA_XON_XOFF_THRESH: usize = RDMA_RING + 0x28;
     pub const RDMA_READ_PTR: usize = RDMA_RING + 0x2c;
     /// The transmit ring's registers (U-Boot). **Not the receive ring's

@@ -134,8 +134,10 @@ MAC address in `UMAC_MAC0`/`UMAC_MAC1` for the operating system to read
 it network-booted.
 **What the board said of these on 2026-11-13:** the PHY's address and the
 MAC address were right; "idle unless it network-booted" was **wrong**; the
-two interrupts' roles are still unread, since the driver is polled. The
-block below has the values.
+two interrupts' roles were then unread, the driver being polled. Step 9
+read the first on 2026-11-16: INTID 189 carries the default queue's
+receive done, and the driver takes it (the second, 190, is still unread).
+The block below has the values.
 
 **From the board's registers** (a Pi 4, three boots on 2026-11-13 of build
 `e9cd5de57bfc`, debug, from an SD card with `\NETDUMP`: two with the cable
@@ -1673,6 +1675,155 @@ own. The entries below stand as they were put.
    the kernel lock), and a soak of repeated `fetch`es shows no fault and
    no stuck interrupt (a level-triggered line left uncleared would hang
    the board at the first frame, which is the check that it is cleared).
+
+   **Built 2026-11-16, and run on the board the same day: it works,
+   after one change the board asked for** (the result is at the end of
+   this step). The two items below are the first build's: since the
+   change the ack masks as well as clears, and the first-interrupt line
+   reads `first receive interrupt taken (INTID 189), and masked at the
+   device until the ring is drained`.
+   - *The crate:* `init` writes the receive ring's `DMA_MBUF_DONE_THRESH`
+     to 1, Linux's default, so receive done is raised after every frame
+     (U-Boot takes no interrupt and leaves the firmware's value). `start`,
+     when it turns the receiver on, clears a stale receive done and
+     unmasks that bit alone (`IRQ_RX_DONE`, bit 13 of INTRL2_0, Linux's
+     `UMAC_IRQ_RXDMA_MBDONE`), before the receiver's enable.
+     `ack_rx_interrupt` clears it. The model has the interrupt block
+     (status, mask, clear; the line is status and not mask) and raises
+     receive done by the threshold: **Linux's reading, not seen.** Five
+     tests (94 in the crate). Controlled: with the unmask left out four
+     failed, with the ack clearing bit 14 one, with the threshold left out
+     five.
+   - *The kernel:* `Declared` carries the `_CRS`'s INTID through `quiet`
+     to the `Device`, `nic.rs`'s GENET arm reports it and acks through
+     the device, and `main.rs`'s existing NIC path enables it at the GIC
+     and wakes `netd` on it. The ack counts the interrupts; the first has
+     a line (`first receive interrupt taken (INTID 189), and cleared at
+     the device`) and the count rides on the received-counts line at 256
+     frames and each 65536 (`; N receive interrupts taken`).
+   - *On QEMU,* which has no GENET: `make test`, `test-netdump` and the
+     six boots of `test-smp` pass.
+   **The board's two boots, to run:** this build, and the control with the
+   unmask left out. In each, the boot's `NIC receive interrupt enabled
+   (GIC INTID 189)` line; then a hundred pings from the Mac
+   (`ping -c 100 192.168.77.2`), which `netd` does not answer (it answers
+   no echo request yet) but which arrive as a hundred frames, and fetches
+   from its HTTP server to pass 256 frames. This build: the
+   first-interrupt line, and the count at 256 frames at least a hundred.
+   The control: no such line, the count 0, and the fetches still served,
+   by the tick's poll. (The step's check above says the pings are
+   answered; they cannot be until `netd` answers echo, so the fetches are
+   the served traffic.) Then the soak: repeated fetches with no fault and
+   the board still answering.
+
+   **The board, 2026-11-16, by Hans: five boots.** The Mac sent 100 pings
+   (`netd` answers no echo, so none was answered) and fetched `/etc/net`
+   from the board's HTTP server until the 256-frame line came.
+   - *First boot (build `a0a3a7116a0a`, receive done cleared by the ack
+     alone): it works, with too many interrupts.* `NIC receive interrupt
+     enabled (GIC INTID 189)`, then `first receive interrupt taken (INTID
+     189), and cleared at the device`, and the board went on: the line is
+     cleared, or the first frame would have hung it. At 256 frames, **304
+     interrupts**. A soak of 300 fetches, all equal, no fault.
+   - *Second and third boots (a diagnostic, `ec1587bf`, `d4023736`,
+     removed in `bf9d343d`): every interrupt real, and more than one a
+     frame.* Each ack counted receive done reading clear on entry (0), no
+     frame waiting (0), and receive done still set after the clear (0);
+     the third also said what the device itself had taken, from its
+     producer index: **302 interrupts for 257 frames**, none discarded.
+     So the stale re-delivery first suspected (an end of interrupt before
+     the clear landed) was ruled out by the second boot, and the third
+     showed receive done set again for frames already in the ring and not
+     yet taken.
+   - *The change (`ee9befa2`, `10c90971`), Linux's shape:* the ack masks
+     receive done as well as clearing it (`bcmgenet_isr0` with
+     `rx_ring16_int_disable`), and a drain that finds the ring empty
+     rearms it: clear, look again, unmask only if nothing waits
+     (`rearm_rx_interrupt`, called from `poll_frame`). The model now
+     raises receive done again while frames wait, inferred from the third
+     boot. Controlled on the host: without the mask two tests failed,
+     without the second look one, without the clear before the unmask two.
+   - *Fourth boot (build `10c909712371`, the change, the diagnostic still
+     in): **158 interrupts for 260 frames**,* the three diagnostic counts
+     0. A soak of 400 fetches, all equal, no fault.
+   - *Fifth boot, the control (build `bf9d343dbc0e+dirty`, the unmask
+     left out of `start`):* the GIC's line as before, no first-interrupt
+     line, and at 256 frames **`0 receive interrupts taken`**; 270
+     fetches served, by the tick's poll. (Its 256th frame came only after
+     about 270 fetches, where the interrupt boots reached it after about
+     80; not explained by anything the boot logged, and not part of the
+     check.)
+   **The check, as it stands:** the count is one interrupt for a frame or
+   a burst of them, so it is not at least the frames the device took, and
+   is expected below them (158 for 260 here) though nothing bounds it
+   there: a line whose fall lagged the ack at the GIC would be delivered
+   and counted once more. With the mask, "at least a hundred after a
+   hundred pings" is met (158) but is not the property; the property is
+   that the count is not 0 with the unmask and is 0 without it.
+   - *The review of #475 (`7e84d248`, `ea22730f`), after the boots:* the
+     masked state moved from a kernel atomic into `Genet`, so the host
+     tests cover it, and the rearm writes nothing when no ack masked
+     receive done or the receiver is off; `Nic::ack_interrupt` takes
+     `&mut`, so the kernel's count is a plain field, and saturates. The
+     contract in `nic.rs` now says the ack takes the line down and leaves
+     when the next interrupt comes to the arm. Controlled on the host:
+     each of the flag's three writes and the rearm's two guards taken
+     out, and three of the step's constants made wrong, each failed a
+     test (the start's write passed at first, and got its own test). The
+     register writes the board ran are the same.
+   - *Sixth boot, confirming the review (build `0d920489063b`):* the GIC's
+     line, the first-interrupt line, and at 256 frames **155 receive
+     interrupts taken**, none dropped; a hundred pings and three hundred
+     fetches from the Mac, then 50 more fetches all equal, and no fault,
+     restart or warning in the boot.
+   - *The second review of #475 (`7977067d`, and a test after it):* the
+     rearm moved from `poll_frame`'s drain to empty into `NET_WAIT`, just
+     before the reader blocks (`Nic::rearm_interrupt`), so a `netd`
+     restarted between its last frame and its next `NET_RECV` no longer
+     waits with receive done masked. The ack reads the mask back after
+     its two posted writes, with a `dsb` after the read in the kernel, so
+     the GIC's end of interrupt comes after the device took the mask (the
+     third review: not proof that the line's fall reached the GIC). `start`
+     unmasks only when it turns the receiver on. The model holds receive
+     done up while frames wait, whatever the driver reads. Controlled on
+     the host: twelve mutations, each failing a test (the read-back moved
+     before the writes passed at first: the test compared reads and
+     writes apart, and now records their order). On the board the
+     rearm's check is the count: without it every interrupt after the
+     first would be masked for good, and the count would stay at 1.
+   - *Seventh boot, confirming the second review (build
+     `2ec4ff0b8973`):* the GIC's line, the first-interrupt line, and at
+     256 frames **133 receive interrupts taken**, none dropped: well above
+     the 1 a missing rearm would leave, so `NET_WAIT` rearms it. A hundred
+     pings and three hundred fetches from the Mac, then 50 more all equal,
+     and no fault, restart or warning in the boot. Fewer interrupts than
+     the sixth boot's 155, which fits the rearm at the wait rather than
+     at every drain to empty, from one boot each.
+   - *The third review of #475 (`5a853848`):* `NET_WAIT` blocked without
+     asking its wake condition (`block_current_and_switch` does not
+     look; only the tick does), so a frame that came in before the wait
+     waited a tick, and on the GENET with receive done still masked by
+     a rearm that had found it. It now returns at once when the rearm
+     finds a frame or the condition already holds (`tasks::ready_now`).
+     That predates step 9 and holds for virtio-net too: on QEMU, 100
+     HTTP fetches took **0.25 s with the check and 2.78 s without it**
+     (0.26 s with it again). And `gic::enable_declared_spi` sets the
+     SPI level-triggered in `GICD_ICFGR` before the enable and says what
+     the GIC held: the ack's mask and the wait's rearm hold only for a
+     level line, and the reset value is the implementation's. On QEMU
+     both GIC versions held level already (GICv2 in
+     `test-server-children`, GICv3 in a scratch boot with virtio-net that
+     served 20 fetches); the board's line says what its firmware left.
+   - *Eighth boot, confirming the third review (build `8956597d9b0c`):*
+     `NIC receive interrupt enabled (GIC INTID 189, level-triggered; the
+     GIC held level)`, so the Pi's firmware leaves it level and the write
+     changed nothing there; the first-interrupt line, and at 256 frames
+     **194 receive interrupts taken**, none dropped. More than the
+     seventh boot's 133, which fits a `NET_WAIT` that now returns for a
+     frame already waiting and so waits, and rearms, more often (one boot
+     each). A hundred pings and three hundred fetches from the Mac, then
+     50 more all equal (1.65 s; earlier boots were not timed), and no
+     fault, restart or warning in the boot.
 
 10. **Two boards.** Two Pi 4s on one switch, each with its address file
     and cluster keys.
