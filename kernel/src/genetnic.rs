@@ -864,7 +864,7 @@ impl Device {
     /// back to ask again. `None`, no limit, once the MAC is started, with
     /// no PHY to ask, or after an ask whose reads failed.
     ///
-    /// **Why the wait asks** (the plan's step 8, open since step 6): until
+    /// **Why the wait asks** (left open by the plan's step 7): until
     /// 2026-11-17 only a send asked the link (D3), and nothing makes
     /// `netd` send, so a cable put in after the boot's wait left the board
     /// deaf, its receiver off, until a command typed on it sent a frame.

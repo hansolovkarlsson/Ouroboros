@@ -1073,6 +1073,10 @@ own. The entries below stand as they were put.
    boot with no cable pays it, and a shorter wait leans on the send-time
    read of the link (step 6), which no run on the board has yet shown
    with a cable plugged in late. To be looked at again once one has.
+   (Since 2026-11-17 a late cable is found by `netd`'s wait within a
+   second, shown on the board with a control (step 7's left-open item),
+   so a shorter wait no longer leans on a send. The value is still 5 s:
+   Hans's to look at again.)
 
 6. **The board: transmit.** `netd` sends what it sends now. With the
    address file in place (step 8 may come first if that is simpler), a
@@ -1411,6 +1415,23 @@ own. The entries below stand as they were put.
      someone runs `ping` on the board. A link that drops and returns is
      never read again either. Asking the link from the tick is not
      open to it, since `has_frame` may not write or wait.
+     **The late cable fixed on 2026-11-17** (`genet/late-link`; Hans
+     chose the wait over the tick and over a `netd` announcement):
+     `NET_WAIT` asks the link at most once a second while the MAC is
+     off (`Device::link_at_wait`, the one ask a send makes, now
+     `Device::ask_link`), starts the MAC if it is up, and limits `netd`'s
+     wait to a second so it comes back to ask; an ask whose reads fail
+     stops the wait's asking, with a line. **Shown on the board with a
+     control**, each boot with the cable out until after `login:` and
+     nothing typed on the Pi, the Mac asking `curl
+     http://192.168.77.2/` and `arp -n 192.168.77.2` about 10 s after the
+     cable went in. `main` (`5e4c0980713b`, boot 37): `link down (waited
+     5000 ms)`, no link line after, `curl` 000, the ARP entry
+     `(incomplete)`. The fix (`a8aaaeef04b4`): `genet: link up at a
+     wait, 1000 Mb/s, full duplex`, the MAC on, a frame received and a
+     42-byte one sent, `curl` 200 and the ARP entry
+     `d8:3a:dd:85:24:22`. **Still open:** a link that drops and returns
+     is not read again once the MAC is on.
    - *The receiver is never turned off.* With nobody draining it
      (before `netd` first runs, after `netd` is past its restart cap,
      after the kernel halts) the ring fills and the DMA sits at its
