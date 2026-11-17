@@ -152,6 +152,8 @@ const SHADOW_DEFAULTS: (u16, u16) = (0x0000, 0x0200);
 
 const SYS_REV: usize = 0x00;
 const UMAC_CMD: usize = 0x808;
+/// Bits 8 and 28: pause ignored both ways, by every start (unimac.h).
+const PAUSE: u32 = 0x1000_0100;
 const MAC0: usize = 0x80c;
 const MAC1: usize = 0x810;
 const OOB: usize = 0x8c;
@@ -824,13 +826,14 @@ fn nothing_is_a_frame_before_the_mac_is_started() {
 
 #[test]
 fn start_tells_the_mac_the_speed_then_turns_it_on() {
-    for (speed, word) in [(Speed::S10, 0x0), (Speed::S100, 0x4), (Speed::S1000, 0x8)] {
+    for (speed, word) in [(Speed::S10, PAUSE), (Speed::S100, 0x4 | PAUSE), (Speed::S1000, 0x8 | PAUSE)] {
         let mut d = board();
         let mut g = Genet::init(&mut d, RX_BASE).unwrap();
         d.ops.clear();
         g.start(&mut d, speed, Receiver::On);
         // bcmgenet_adjust_link: OOB_DISABLE (0x20) off, RGMII_LINK and
-        // RGMII_MODE_EN on, then ID_MODE_DIS; the speed; receive done
+        // RGMII_MODE_EN on, then ID_MODE_DIS; the speed, with pause ignored
+        // both ways (CMD_PAUSE_IGNORE, Linux's with no pause negotiated); receive done
         // cleared and unmasked (bcmgenet_rx_ring16_int_enable); the enables.
         assert_eq!(
             d.ops,
@@ -843,7 +846,7 @@ fn start_tells_the_mac_the_speed_then_turns_it_on() {
 
 #[test]
 fn start_with_the_receiver_off_turns_on_the_transmitter_alone() {
-    for (speed, word) in [(Speed::S10, 0x0), (Speed::S100, 0x4), (Speed::S1000, 0x8)] {
+    for (speed, word) in [(Speed::S10, PAUSE), (Speed::S100, 0x4 | PAUSE), (Speed::S1000, 0x8 | PAUSE)] {
         let mut d = board();
         let mut g = Genet::init(&mut d, RX_BASE).unwrap();
         d.ops.clear();
@@ -882,11 +885,11 @@ fn the_receiver_comes_on_at_a_later_start_and_is_not_turned_off_by_one() {
     assert!(g.receiving() && d.rx_running() && d.tx_running());
     // The transmitter was never off on the way.
     let cmds: Vec<u32> = d.writes().iter().filter(|w| w.0 == UMAC_CMD && w.1 & 0xa000 == 0).map(|w| w.1).collect();
-    assert_eq!(&cmds[cmds.len() - 4..], [0x8, 0x9, 0x9, 0xb]);
+    assert_eq!(&cmds[cmds.len() - 4..], [0x8 | PAUSE, 0x9 | PAUSE, 0x9 | PAUSE, 0xb | PAUSE]);
     // A start that asks for no receiver leaves a running one running.
     g.start(&mut d, Speed::S100, Receiver::Off);
     assert!(g.receiving() && d.rx_running());
-    assert_eq!(d.reg(UMAC_CMD), 0x7);
+    assert_eq!(d.reg(UMAC_CMD), 0x7 | PAUSE);
 }
 
 #[test]
@@ -894,11 +897,34 @@ fn a_second_start_changes_the_speed_and_leaves_the_mac_on() {
     let mut d = board();
     let mut g = up(&mut d);
     g.start(&mut d, Speed::S100, Receiver::On);
-    assert_eq!(d.reg(UMAC_CMD), 0x7);
+    assert_eq!(d.reg(UMAC_CMD), 0x7 | PAUSE);
     assert_eq!(d.reg(OOB), 0x0001_0050);
     // The MAC was never off on the way: every write to it had both enables.
     let cmds: Vec<u32> = d.writes().iter().filter(|w| w.0 == UMAC_CMD).map(|w| w.1).collect();
-    assert_eq!(cmds, [0x7, 0x7]);
+    assert_eq!(cmds, [0x7 | PAUSE, 0x7 | PAUSE]);
+}
+
+/// The board's finding of 2026-11-17: with pause not ignored, a ring
+/// nobody drained had the MAC send pause frames for good. Every start
+/// ignores it both ways, whatever the speed or the receiver, and the
+/// first start too.
+#[test]
+fn every_start_ignores_pause_both_ways() {
+    for (speed, receiver) in [
+        (Speed::S1000, Receiver::On),
+        (Speed::S100, Receiver::Off),
+        (Speed::S10, Receiver::On),
+    ] {
+        let mut d = board();
+        let mut g = Genet::init(&mut d, RX_BASE).unwrap();
+        let before = d.writes().len();
+        g.start(&mut d, speed, receiver);
+        assert_eq!(d.reg(UMAC_CMD) & PAUSE, PAUSE, "{speed:?} {receiver:?}");
+        // And from the start's first write to the register, the one with
+        // the speed: the MAC is never on without them.
+        let cmds: Vec<u32> = d.writes()[before..].iter().filter(|w| w.0 == UMAC_CMD).map(|w| w.1).collect();
+        assert!(!cmds.is_empty() && cmds.iter().all(|c| c & PAUSE == PAUSE), "{cmds:x?}");
+    }
 }
 
 // ---- the receive interrupt (the plan's step 9) ----

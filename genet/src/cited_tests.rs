@@ -4,8 +4,9 @@
 //!
 //! The files: U-Boot `v2024.10` `drivers/net/bcmgenet.c` (U), Linux `v6.6`
 //! `drivers/net/ethernet/broadcom/genet/bcmgenet.h` (L) and
-//! `include/uapi/linux/mii.h` (M), and U-Boot `v2024.10`
-//! `drivers/net/phy/broadcom.c` (B). The line numbers were checked against
+//! `include/uapi/linux/mii.h` (M), U-Boot `v2024.10`
+//! `drivers/net/phy/broadcom.c` (B), and Linux `v6.6`
+//! `drivers/net/ethernet/broadcom/unimac.h` (N, since 2026-11-17). The line numbers were checked against
 //! those files by a script on 2026-11-13, and again with step 9's rows on
 //! 2026-11-16 (each line holds a `#define` of the name); the files are not
 //! in this tree, so the test below checks the values and not the lines.
@@ -20,6 +21,7 @@ enum Src {
     L,
     M,
     B,
+    N,
 }
 use Src::*;
 
@@ -59,6 +61,8 @@ const CITED: &[(&str, u64, u64, Src, u32)] = &[
     ("CMD_SPEED_SHIFT", CMD_SPEED_SHIFT as u64, 2, U, 84),
     ("CMD_SW_RESET", CMD_SW_RESET as u64, 1 << 13, U, 86),
     ("CMD_LCL_LOOP_EN", CMD_LCL_LOOP_EN as u64, 1 << 15, U, 87),
+    ("CMD_RX_PAUSE_IGNORE", CMD_RX_PAUSE_IGNORE as u64, 1 << 8, N, 23),
+    ("CMD_TX_PAUSE_IGNORE", CMD_TX_PAUSE_IGNORE as u64, 1 << 28, N, 35),
     ("MIB_RESET_RX", (MIB_RESET_ALL & 1) as u64, 1 << 0, U, 91),
     ("MIB_RESET_RUNT", (MIB_RESET_ALL & 2) as u64, 1 << 1, U, 92),
     ("MIB_RESET_TX", (MIB_RESET_ALL & 4) as u64, 1 << 2, U, 93),
@@ -165,6 +169,7 @@ fn every_constant_has_the_value_its_source_line_gives() {
             L => "Linux bcmgenet.h",
             M => "Linux mii.h",
             B => "U-Boot broadcom.c",
+            N => "Linux unimac.h",
         };
         assert_eq!(ours, cited, "{name} ({file} line {line})");
         assert!(line > 0);

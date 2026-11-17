@@ -122,6 +122,18 @@ pub const RBUF_FLUSH: u32 = 1 << 1;
 /// (U-Boot): the reset is issued with local loopback for a stable clock.
 pub const CMD_SW_RESET: u32 = 1 << 13;
 pub const CMD_LCL_LOOP_EN: u32 = 1 << 15;
+/// `CMD_RX_PAUSE_IGNORE` and `CMD_TX_PAUSE_IGNORE`, `UMAC_CMD` bits 8 and
+/// 28 (Linux `v6.6`, `drivers/net/ethernet/broadcom/unimac.h`): the MAC
+/// takes no notice of pause frames received, and sends none. Linux sets
+/// both whenever pause was not negotiated (`bcmmii.c`,
+/// `bcmgenet_mii_setup`); this driver negotiates none, and U-Boot writes
+/// neither, so the MAC was left free to send them, and did: with nobody
+/// draining the ring it sent about 30 a second for as long as the board
+/// was up (2026-11-17, 10365 in six minutes, the MAC's own count).
+pub const CMD_RX_PAUSE_IGNORE: u32 = 1 << 8;
+pub const CMD_TX_PAUSE_IGNORE: u32 = 1 << 28;
+/// Both, as [`Genet::start`] writes them.
+pub const CMD_PAUSE_IGNORE: u32 = CMD_RX_PAUSE_IGNORE | CMD_TX_PAUSE_IGNORE;
 /// `CMD_SPEED_SHIFT` (U-Boot): where `UMAC_CMD` takes a [`Speed`].
 pub const CMD_SPEED_SHIFT: u32 = 2;
 /// `MIB_RESET_RX`, `_RUNT`, `_TX` (U-Boot), together.
@@ -632,6 +644,13 @@ impl Genet {
     /// taking them out leaves the line low for good. A later start leaves
     /// the interrupt as it is.
     ///
+    /// **Pause is ignored both ways ([`CMD_PAUSE_IGNORE`]), as Linux sets
+    /// it with pause not negotiated:** a ring nobody drains (before `netd`
+    /// runs, past its restart cap, after a halt) then drops what arrives
+    /// and asks nothing of the link's other end. Without it the MAC sent
+    /// pause frames for as long as the ring stayed full. Written with the
+    /// speed, on every start.
+    ///
     /// **`ID_MODE_DIS` is set, as U-Boot sets it:** the MAC adds no delay
     /// to the transmit clock, so the PHY must, and on the Pi 4 it does
     /// after `phy::setup` (`phy.rs`'s module doc; read on the board,
@@ -644,7 +663,7 @@ impl Genet {
         set(bus, reg::EXT_RGMII_OOB_CTRL, OOB_DISABLE, RGMII_LINK | RGMII_MODE_EN);
         set(bus, reg::EXT_RGMII_OOB_CTRL, 0, ID_MODE_DIS);
         let enables = bus.read(reg::UMAC_CMD) & (CMD_TX_EN | CMD_RX_EN);
-        bus.write(reg::UMAC_CMD, ((speed as u32) << CMD_SPEED_SHIFT) | enables);
+        bus.write(reg::UMAC_CMD, ((speed as u32) << CMD_SPEED_SHIFT) | CMD_PAUSE_IGNORE | enables);
         let on = match receiver {
             Receiver::Off => CMD_TX_EN,
             Receiver::On => CMD_TX_EN | CMD_RX_EN,
