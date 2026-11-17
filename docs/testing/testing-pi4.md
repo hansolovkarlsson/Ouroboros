@@ -1763,7 +1763,10 @@ on `FSD_TASK`, so it never drains anything else. Once the supervisor's health
 ping is queued (`PING_INTERVAL` is 64 ticks ≈ 1.28 s, and `netd` is Blocked for
 almost all of `load_auth`), that message sits in the mailbox, every later
 `NET_WAIT(40)` returns in microseconds, and the documented "~2 s at 40 ms a try"
-collapses into a busy-spin that burns the whole budget in a moment.
+collapses into a busy-spin that burns the whole budget in a moment. (True
+since #475, 2026-11-16. Before it `NET_WAIT` blocked without asking its
+condition and returned at the next tick, up to 20 ms, so the budget shrank
+to at most about a second rather than vanishing.)
 
 **Why QEMU cannot test it:** measured, not assumed. Instrumented, the `\NOEXEC`
 probe retries **0 times** there, because virtio-blk has `fsd` ready before `netd`

@@ -11,6 +11,46 @@ here actually works today, see [`architecture.md`](architecture.md) and
 
 **Not yet released.** Changes since v0.25.0, drafted as they land.
 
+**The Pi's Ethernet takes its receive interrupt (2026-11-16, #475).**
+Step 9 of `docs/roadmap/roadmap-pi-net.md`. `netd` is woken by the
+GENET's interrupt (INTID 189, from the firmware's `_CRS`), in place of
+the 20 ms poll, which stays behind it. The interrupt's ack masks and
+clears receive done, and `NET_WAIT` unmasks it just before `netd`
+blocks, as Linux's driver does; cleared alone the device raised it
+again for frames already in the ring, 302 interrupts for 257 frames on
+the board. At 256 frames a boot now says how many interrupts it took
+(133 to 194 over the last three boots, none dropped), and the GIC's line
+for the NIC says the SPI is level-triggered and what the firmware had
+left. **`NET_WAIT` now returns at once when a frame or message is
+already waiting.** It had blocked without asking, so a frame that beat
+`netd` to the wait cost a tick; on QEMU, 100 HTTP fetches took 0.25 s
+where they took 2.78 s, and this holds for virtio-net too. A consequence:
+`load_auth`'s retry loops, which call `NET_WAIT(40)` as a sleep, now
+spend their budget in a moment on a busy wire (open, in the plan).
+
+**fsd is restartable again, and every supervised server's restart is
+tested (2026-11-16, #473, #474).** On every boot of the Pi in the log
+the loader had said `FSD.BIN - image too large to keep for crash
+recovery`: fsd, 197 KB, did not fit its 192 KB slot, so a fault in the
+filesystem server would have left it dead for the boot. The supervisor
+keeps the images in one arena now, each at its own size, and the end
+of every `make esp` checks the built images against it. New:
+`make test-fsd-restart`, `test-cond-restart` and `test-accountd-restart`
+(one script, `scripts/test-server-restart.py`), each a QEMU boot that
+faults and then spins its server and checks that the kernel restarts it
+and a fresh one answers; with `test-server-children` for netd, all four
+supervised servers are covered.
+
+**The transmit ring counts its descriptors from 0 (2026-11-16, #472).**
+The Pi's transmit path took its descriptor from the consumer index's low
+byte, as U-Boot does, which the board had shown wrong for receive; it
+worked only because the firmware left the index at 0. Read on the board:
+the index can be written (U-Boot's comment says it cannot), and with it
+at 10 the device took descriptor 0, so the driver now counts from 0. A
+control with the old rule put back timed out on the first send. The
+kernel's boot warning for an index off a multiple of 256 is gone, having
+rested on a claim that control refuted.
+
 **A machine's network address comes from `/etc/net` (2026-11-15, #470).**
 Step 8 of `docs/roadmap/roadmap-pi-net.md`. `netd` reads its address,
 mask, gateway and DNS server from `/etc/net`, lines of `key value`
