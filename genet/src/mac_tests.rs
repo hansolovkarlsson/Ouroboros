@@ -975,14 +975,29 @@ fn the_model_holds_receive_done_up_while_frames_wait() {
 fn the_ack_reads_the_mask_back_after_its_writes() {
     // The read that holds the IRQ path's end of interrupt until the
     // writes have reached the device (`ack_rx_interrupt`'s doc).
+    // The model keeps reads and writes apart, so a bus in front of it
+    // records the two in the order they came.
+    struct InOrder<'a>(&'a mut Dev, Vec<(char, usize)>);
+    impl Bus for InOrder<'_> {
+        fn read(&mut self, offset: usize) -> u32 {
+            self.1.push(('r', offset));
+            self.0.read(offset)
+        }
+        fn write(&mut self, offset: usize, value: u32) {
+            self.1.push(('w', offset));
+            self.0.write(offset, value)
+        }
+        fn delay_us(&mut self, us: u32) {
+            self.0.delay_us(us)
+        }
+    }
     let mut d = board();
     let mut g = up(&mut d);
     assert!(d.deliver(64));
-    d.reads.clear();
-    d.ops.clear();
-    g.ack_rx_interrupt(&mut d);
-    assert_eq!(d.ops, [W(IRQ_MASK_SET, RX_DONE), W(IRQ_CLEAR, RX_DONE)]);
-    assert_eq!(d.reads, [IRQ_MASK_STATUS], "one read, of the mask, after both writes");
+    let mut bus = InOrder(&mut d, Vec::new());
+    g.ack_rx_interrupt(&mut bus);
+    assert_eq!(bus.1, [('w', IRQ_MASK_SET), ('w', IRQ_CLEAR), ('r', IRQ_MASK_STATUS)], "one read, of the mask, after both writes");
+    assert!(!d.line());
 }
 
 #[test]
