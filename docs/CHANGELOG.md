@@ -11,6 +11,49 @@ here actually works today, see [`architecture.md`](architecture.md) and
 
 **Not yet released.** Changes since v0.25.0, drafted as they land.
 
+**`NET_RECV` never answers a length past the caller's buffer
+(2026-11-18, #482). An ABI change.** A frame longer than the buffer is
+taken off the receive ring, dropped, and answered with a new sentinel,
+`NET_FRAME_CUT`; every other answer is at most the buffer's length, so a
+caller may index its buffer by it. Before, the frame's own length came
+back and only `netd`'s clamp stood between it and a read past the
+buffer. It holds for virtio-net and the Pi's GENET alike, and
+`make test-net-flood` checks it.
+
+**`netd` lives through a flood of frames (2026-11-18, #481).** On the
+Pi a 15 s UDP flood from another machine had `netd` called wedged,
+restarted three times and given up on for the boot, leaving the board
+with no network server: its receive loop took frames for as long as any
+waited and never came back to wait. A pass now takes at most 64 frames,
+and the supervisor counts a return to `NET_WAIT` as progress when the
+pass took a frame or a message, so a `netd` spinning on nothing is still
+restarted. The same flood on the board after the fix: HTTP answered
+before and after, no restart, over 720,000 frames taken. New:
+`make test-net-flood`.
+
+**The Pi's Ethernet sends no PAUSE frames from a ring nobody drains
+(2026-11-17, #480).** With the receive ring full, before `netd` runs or
+after it is given up on, the MAC asked the other end to stop sending,
+about 30 times a second, for as long as the board was up (10,365 in six
+minutes on the board). The driver now has the MAC ignore pause in both
+directions, as Linux does for a direction not negotiated; a full ring
+drops what arrives and asks nothing of the network. Whether the PHY's
+default advertisement offers pause has not been read.
+
+**A cable plugged in after boot is found (2026-11-17, #479).** The Pi's
+link was asked again only when it sent a frame, and nothing sends
+unprompted, so a cable plugged in after the boot's 5 s wait left the
+board unreachable until someone typed a network command on it. Its
+wait now asks the link once a second while the MAC is off.
+
+**`netd`'s load waits by the clock (2026-11-17, #477).** The retries
+for `/etc/cluster` and `/etc/net` while the disk mounts used
+`NET_WAIT(40)` as a sleep, and since #475 that returns at once with a
+message or frame waiting, so a command typed during the boot could
+spend the 2 s budget in a moment and leave the machine without its
+cluster identity or address. The budget is now 2 s of time slept, and
+a boot whose load retried says so.
+
 **The Pi's Ethernet takes its receive interrupt (2026-11-16, #475).**
 Step 9 of `docs/roadmap/roadmap-pi-net.md`. `netd` is woken by the
 GENET's interrupt (INTID 189, from the firmware's `_CRS`), in place of
