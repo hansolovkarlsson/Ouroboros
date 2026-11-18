@@ -536,7 +536,8 @@ impl Device {
     /// on, and says so. From here the device writes received frames into
     /// [`RX_AREA`]. The line carries two registers read back after the
     /// start, for the day nothing is received: `UMAC_CMD` (the enables,
-    /// the speed, and bit 4, promiscuous) and `UMAC_MDF_CTRL` (the
+    /// the speed, bit 4, promiscuous, and bits 8 and 28, pause ignored
+    /// both ways: `0x1000010b` at 1000 Mb/s on the board) and `UMAC_MDF_CTRL` (the
     /// destination filters the firmware left on; this driver sets none,
     /// as U-Boot sets none).
     fn start(&mut self, speed: Speed) {

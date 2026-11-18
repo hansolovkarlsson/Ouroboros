@@ -1447,6 +1447,40 @@ own. The entries below stand as they were put.
      flow-control threshold. Whether the MAC then sends PAUSE frames is
      not known here; U-Boot stops the MAC after each command and never
      leaves it on undrained.
+     **It did, and it is fixed on 2026-11-17** (`genet/receiver-off`; Hans
+     chose ignoring pause over turning the receiver off): every
+     `Mac::start` sets `CMD_TX_PAUSE_IGNORE` and `CMD_RX_PAUSE_IGNORE`
+     (`UMAC_CMD` bits 28 and 8, cited to Linux's `unimac.h`). Linux sets
+     each bit when its direction was not negotiated
+     (`bcmgenet_mac_config`); this driver reads no pause resolution and
+     sets both. The receiver stays on by design: a full ring now
+     drops frames and sends nothing. **Shown on the board with a
+     control**, each boot with `netd` left out (`NETD.BIN` renamed),
+     the Mac flooding `ping -f` at the Pi with a static ARP entry, and a
+     temporary line every 5 s reading the MAC's own counters (never
+     committed). `main` (`d2c12835f18b`, boot 39, `UMAC_CMD
+     0x0000000b`): pause frames sent rose about 30 a second from the
+     second reading, steadily, with or without the flood, and were
+     still rising long after it, 10365 in six minutes; none received,
+     no receive-buffer overflow. The fix (`34a4157799e2`, boot 41,
+     `UMAC_CMD 0x1000010b`): pause frames sent 0 for the whole boot,
+     while the MAC received 20081 frames and the ring's producer stopped
+     at 266 (the firmware's 10 plus 256 descriptors) with 19813
+     discarded. Boot 40, the same build with a diagnostic too narrow to
+     see the frames arrive, proved nothing either way and is not
+     counted. **Still open:** the frames the full ring drops before
+     `netd` runs are lost, which is what a NIC with no reader should do;
+     nothing tells `netd` how many. And whether pause is in fact
+     negotiated has not been read: the PHY keeps its reset-default
+     advertisement (`phy.rs`, `genphy_config_aneg` left out), and neither
+     its `ADVERTISE` nor the partner's `LPA` pause bits (10 and 11) have
+     been logged. If both offer it, the link expects pause honoured and
+     the MAC ignores what the other end sends; a read of the two
+     registers at the link line would settle it (the branch's review,
+     2026-11-17). The firmware's own MAC, on with pause honoured until
+     the kernel quiets it, is left as it is: a window of milliseconds in
+     which the firmware ran the same way before (the review again,
+     declined).
    - *`netd`'s drain loop has no bound and no heartbeat* (`while let
      Some(n) = recv(...)`, and `recv`'s own loop over oversize frames).
      Frames arriving faster than they are handled for 2.56 s would have
