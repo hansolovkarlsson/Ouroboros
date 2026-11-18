@@ -18,17 +18,21 @@ frame `netd` can be sent (it serves nothing there and drops each), while QEMU
 dumps every frame to a pcap. The checks:
 
 1. The boot reaches `login:` and `netd` answers HTTP before the flood.
-2. **The flood reached the guest:** the pcap holds at least `MIN_FLOOD`
-   datagrams to port 9. Without it the checks below pass on a flood that
+2. `netd` answers HTTP after it, and the guest is alive.
+3. No server is called wedged, and none restarted, during the flood, the
+   `SETTLE_S` seconds after, or the HTTP check.
+4. No fault line in QEMU's trace.
+5. **The flood reached the guest:** the pcap holds at least `MIN_FLOOD`
+   datagrams to port 9. Without it the checks above pass on a flood that
    never arrived.
-3. No server is called wedged, and none restarted, during the flood or the
-   `SETTLE_S` seconds after.
-4. `netd` answers HTTP after it, and the guest is alive.
+
+A boot the firmware never started is graded as the other rigs grade one
+(`drive_qemu.boot_stalled`): INCONCLUSIVE, and FAIL once it is every run's.
 
 Controlled 2026-11-17: `main` before the fix (`5f43c890`) had netd called
 wedged four times and given up on in the same flood, and HTTP timed out
 after, and the fix with either half removed (the drain unbounded, or the
-note at `NET_WAIT` taken out) failed checks 3 and 4 the same way.
+note at `NET_WAIT` taken out) failed checks 2 and 3 the same way.
 
 Usage:  python3 scripts/test-net-flood.py      (make test-net-flood builds the image)
 Exit status: 0, 1 for a failed check, drive-qemu's INCONCLUSIVE for a boot
@@ -54,9 +58,9 @@ PORT_UDP, PORT_HTTP = 5665, 5666
 # Six times WEDGE_TICKS (2.56 s): on `main` the first wedge came within it.
 FLOOD_S = 15.0
 SETTLE_S = 5.0
-# Far fewer than a flood delivers (QEMU's user networking passed several
-# hundred thousand in FLOOD_S here), and far more than `netd` drains in
-# 2.56 s, which it did not on `main`.
+# Far fewer than a flood delivers: the pcap held 1.7 to 2.0 million in
+# FLOOD_S on 2026-11-17. And no smaller than what wedged `main`: about
+# 65,000 frames into the Pi's flood (boot 42).
 MIN_FLOOD = 50_000
 
 
@@ -105,12 +109,11 @@ def port9_datagrams(path):
 
 
 def main():
-    failed = 0
+    checks = []
 
     def check(ok, what):
-        nonlocal failed
+        checks.append((ok, what))
         print(f"[{'PASS' if ok else 'FAIL'}] {what}", flush=True)
-        failed += 0 if ok else 1
 
     if os.path.exists(PCAP):
         os.unlink(PCAP)
@@ -119,36 +122,43 @@ def main():
         "-device", "virtio-net-device,netdev=net0",
         "-object", f"filter-dump,id=f0,netdev=net0,file={PCAP}",
     ), label="[net-flood] ")
-    stalled = 0
     try:
         deadline = time.time() + 120
         while time.time() < deadline and not all(x in g.transcript() for x in ["netd: network server ready", "login:"]):
             time.sleep(0.2)
         text = g.transcript()
-        if "login:" not in text and drive_qemu.firmware_stalled(text, 0):
-            stalled = 1
-            return drive_qemu.verdict("test-net-flood", 0, stalled)
-        check("netd: network server ready" in text and "login:" in text, "the boot reaches netd and a login")
-        check(http(), "netd answers HTTP before the flood")
-        before = len(g.transcript())
-        sent = flood(FLOOD_S)
-        time.sleep(SETTLE_S)
-        during = g.transcript()[before:]
-        print(f"[net-flood] sent {sent} datagrams in {FLOOD_S:.0f} s", flush=True)
-        check(http(), "netd answers HTTP after the flood")
-        check(g.proc.poll() is None, "the guest is alive at the end")
-        wedged = during.count("wedged")
-        restarted = during.count("restarted")
-        check(wedged == 0 and restarted == 0,
-              f"no server called wedged or restarted during the flood ({wedged} wedged, {restarted} restarted)")
-        if wedged or restarted:
-            lines = [l for l in during.splitlines() if "slot" in l or l.startswith("netd:")]
-            print("[net-flood] the guest's lines:\n  " + "\n  ".join(lines[-12:]), flush=True)
+        booted = "netd: network server ready" in text and "login:" in text
+        if booted:
+            check(True, "the boot reaches netd and a login")
+            check(http(), "netd answers HTTP before the flood")
+            before = len(g.transcript())
+            sent = flood(FLOOD_S)
+            time.sleep(SETTLE_S)
+            print(f"[net-flood] sent {sent} datagrams in {FLOOD_S:.0f} s", flush=True)
+            check(http(), "netd answers HTTP after the flood")
+            check(g.proc.poll() is None, "the guest is alive at the end")
+            # Read after the HTTP check, so a wedge during that request counts.
+            during = g.transcript()[before:]
+            wedged, restarted = during.count("wedged"), during.count("restarted")
+            check(wedged == 0 and restarted == 0,
+                  f"no server called wedged or restarted during the flood or after ({wedged} wedged, {restarted} restarted)")
+            if wedged or restarted:
+                lines = [l for l in during.splitlines() if "slot" in l or l.startswith("netd:")]
+                print("[net-flood] the guest's lines:\n  " + "\n  ".join(lines[-12:]), flush=True)
+        out = g.transcript()
+        faults = g.aborts()
     finally:
         g.stop()
-    reached = port9_datagrams(PCAP)
-    check(reached >= MIN_FLOOD, f"the flood reached the guest: {reached} datagrams to port 9 in the pcap, at least {MIN_FLOOD}")
-    return drive_qemu.verdict("test-net-flood", failed, stalled)
+    # Every boot is logged; a stall grades none of its checks.
+    if drive_qemu.boot_stalled("test-net-flood", "boot", out, faults):
+        return drive_qemu.verdict("test-net-flood", 0, 1)
+    if not booted:
+        check(False, "the boot reaches netd and a login")
+    check(faults == 0, f"no fault lines in QEMU's trace ({faults})")
+    if booted:
+        reached = port9_datagrams(PCAP)
+        check(reached >= MIN_FLOOD, f"the flood reached the guest: {reached} datagrams to port 9 in the pcap, at least {MIN_FLOOD}")
+    return drive_qemu.verdict("test-net-flood", sum(1 for ok, _ in checks if not ok), 0)
 
 
 if __name__ == "__main__":
