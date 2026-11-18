@@ -1538,11 +1538,23 @@ own. The entries below stand as they were put.
      `netd` (none measured near that; the second review, declined).
      Declined too: the registry looked up for every frame taken (four
      entries, under the lock `NET_RECV` already holds).
-   - *`NET_RECV` still returns a length longer than the buffer it
-     filled*, and the clamp is in `netd`'s one `recv`. A second caller
-     would meet the trap again; the kernel returning the copied length,
-     or a sentinel for a cut frame, would make it unspellable. It is a
-     change to the ABI.
+   - *`NET_RECV` returned a length longer than the buffer it filled*,
+     and the clamp was in `netd`'s one `recv`, so a second caller would
+     meet the trap again. **Fixed 2026-11-18:** a frame longer than the
+     buffer is taken and dropped and answered `NET_FRAME_CUT`
+     (`syscall_abi`, `u64::MAX - 2`), so every answer but a sentinel is
+     at most the buffer's length. One place for both drivers,
+     `Nic::poll_frame`, which turns a driver's length past the buffer
+     into `Received::Cut`; `netd`'s `recv_one` reads the sentinel, and
+     keeps a length past its buffer as a dropped frame, never an index.
+     Chosen over the copied length (a cut frame handed on as whole) and
+     over leaving the frame on the ring (a caller that never retries
+     spins on it). **Checked:** `make test-net-flood` pings 192.0.2.249,
+     on which the rig's `netd` reads an ARP reply into 16 bytes; the
+     answer must be `NET_FRAME_CUT`. Controlled: with `Nic::poll_frame`
+     answering every frame whole, it answered 64. **Still open:**
+     `netd`'s own branch for the sentinel runs only on a frame over 1600
+     bytes, which SLIRP never sends, so it is checked by reading.
 
    **The board, 2026-11-15, by Hans: three boots, one cable to the Mac's
    adapter, `en9` set to `10.0.2.2` by hand.** The wire of each is in
