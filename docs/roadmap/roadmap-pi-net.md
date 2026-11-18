@@ -1447,6 +1447,29 @@ own. The entries below stand as they were put.
      flow-control threshold. Whether the MAC then sends PAUSE frames is
      not known here; U-Boot stops the MAC after each command and never
      leaves it on undrained.
+     **It did, and it is fixed on 2026-11-17** (`genet/receiver-off`; Hans
+     chose ignoring pause over turning the receiver off): every
+     `Mac::start` sets `CMD_TX_PAUSE_IGNORE` and `CMD_RX_PAUSE_IGNORE`
+     (`UMAC_CMD` bits 28 and 8, cited to Linux's `unimac.h`), which is
+     what Linux writes when no pause was negotiated, and this driver
+     negotiates none. The receiver stays on by design: a full ring now
+     drops frames and sends nothing. **Shown on the board with a
+     control**, each boot with `netd` left out (`NETD.BIN` renamed),
+     the Mac flooding `ping -f` at the Pi with a static ARP entry, and a
+     temporary line every 5 s reading the MAC's own counters (never
+     committed). `main` (`d2c12835f18b`, boot 39, `UMAC_CMD
+     0x0000000b`): pause frames sent rose about 30 a second from the
+     second reading, steadily, with or without the flood, and were
+     still rising long after it, 10365 in six minutes; none received,
+     no receive-buffer overflow. The fix (`34a4157799e2`, boot 41,
+     `UMAC_CMD 0x1000010b`): pause frames sent 0 for the whole boot,
+     while the MAC received 20081 frames and the ring's producer stopped
+     at 266 (the firmware's 10 plus 256 descriptors) with 19813
+     discarded. Boot 40, the same build with a diagnostic too narrow to
+     see the frames arrive, proved nothing either way and is not
+     counted. **Still open:** the frames the full ring drops before
+     `netd` runs are lost, which is what a NIC with no reader should do;
+     nothing tells `netd` how many.
    - *`netd`'s drain loop has no bound and no heartbeat* (`while let
      Some(n) = recv(...)`, and `recv`'s own loop over oversize frames).
      Frames arriving faster than they are handled for 2.56 s would have
