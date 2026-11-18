@@ -377,7 +377,7 @@ pub extern "C" fn _start() -> ! {
 
 fn main() -> ! {
     if cfg!(feature = "restart-rig") {
-        log(b"netd: the restart rig's build: a ping of 192.0.2.250 faults it, of 192.0.2.251 spins it\r\n");
+        log(b"netd: the restart rig's build: a ping of 192.0.2.250 faults it, of 192.0.2.251 spins it, of 192.0.2.252 spins it at NET_WAIT\r\n");
     }
     log(b"netd: network server ready\r\n");
     let packed_mac = syscall(syscall_abi::NET_MAC, 0);
@@ -1519,6 +1519,16 @@ fn handle_ping(packed_mac: u64, target_packed: u64) -> u64 {
         if target == [192, 0, 2, 251] {
             loop {
                 core::hint::spin_loop();
+            }
+        }
+        // Passes that take nothing: `NET_WAIT` and back, the mailbox never
+        // read. Once the supervisor's ping is queued every wait returns at
+        // once, and no frame is taken, so none of them is progress
+        // (`supervisor::note_pass`): the supervisor must call this wedged
+        // (`make test-net-flood`).
+        if target == [192, 0, 2, 252] {
+            loop {
+                syscall(syscall_abi::NET_WAIT, 0);
             }
         }
     }

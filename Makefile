@@ -2431,12 +2431,13 @@ test-net-config: image-ext2
 	python3 scripts/test-net-config.py
 
 # netd lives through a flood of frames (scripts/test-net-flood.py, Pi net
-# step 7): one boot of the FAT32 image, the host flooding a forwarded UDP
-# port for 15 s; no server may be called wedged, and netd must answer HTTP
-# after. About a minute. Run it whenever netd's serve loop or recv, the
+# step 7): one boot of the FAT32 image with netd's restart-rig build, the
+# host flooding a forwarded UDP port for 15 s; no server may be called
+# wedged, and netd must answer HTTP after. Then netd spun on NET_WAIT,
+# taking nothing, must be called wedged. About a minute and a half. Run it whenever netd's serve loop or recv, the
 # NET_WAIT arm, or the supervisor's wedge rules change.
-test-net-flood: image
-	python3 scripts/test-net-flood.py
+test-net-flood: image netd-restart-rig-bin
+	NETD_RESTART_BIN=$(NETD_RESTART_BIN) python3 scripts/test-net-flood.py
 
 # The user heap on a booted image: /bin/CMEM twice in one boot
 # (scripts/test-heap.py). Each run checks its heap is at least 1 MiB, that

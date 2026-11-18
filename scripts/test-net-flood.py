@@ -21,8 +21,15 @@ dumps every frame to a pcap. The checks:
 2. `netd` answers HTTP after it, and the guest is alive.
 3. No server is called wedged, and none restarted, during the flood, the
    `SETTLE_S` seconds after, or the HTTP check.
-4. No fault line in QEMU's trace.
-5. **The flood reached the guest:** the pcap holds at least `MIN_FLOOD`
+4. **And the other half:** the guest's shell pings 192.0.2.252, on which
+   `netd`'s restart-rig build (its serve loop the shipped one) loops on
+   `NET_WAIT` and reads nothing. Once the supervisor's ping is queued every
+   wait returns at once and takes no frame, so the supervisor must call it
+   wedged and restart it, and the fresh `netd` answer HTTP. Before the
+   review of the fix every `NET_WAIT` was progress, and this spin was never
+   caught.
+5. No fault line in QEMU's trace.
+6. **The flood reached the guest:** the pcap holds at least `MIN_FLOOD`
    datagrams to port 9. Without it the checks above pass on a flood that
    never arrived.
 
@@ -40,8 +47,10 @@ the firmware never started.
 """
 import importlib.util
 import os
+import shutil
 import socket
 import struct
+import subprocess
 import sys
 import time
 import urllib.request
@@ -53,6 +62,13 @@ drive_qemu = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(drive_qemu)
 
 IMAGE = os.path.join(ROOT, "build", "esp.img")
+COPY = os.path.join(ROOT, "build", "net-flood.img")
+# netd's restart-rig build, named by the Makefile, which rebuilds it first:
+# its serve loop is the shipped one, and a ping of EMPTY_SPIN loops on
+# NET_WAIT without taking anything.
+RIG_NETD = os.environ.get("NETD_RESTART_BIN")
+RIG_LINE = "of 192.0.2.252 spins it at NET_WAIT"
+EMPTY_SPIN = "192.0.2.252"
 PCAP = os.path.join(ROOT, "build", "net-flood.pcap")
 PORT_UDP, PORT_HTTP = 5665, 5666
 # Six times WEDGE_TICKS (2.56 s): on `main` the first wedge came within it.
@@ -62,6 +78,22 @@ SETTLE_S = 5.0
 # FLOOD_S on 2026-11-17. And no smaller than what wedged `main`: about
 # 65,000 frames into the Pi's flood (boot 42).
 MIN_FLOOD = 50_000
+
+
+def stage():
+    """COPY: esp.img with \\EFI\\ORBS\\NETD.BIN the restart rig's build, as
+    test-server-children stages it."""
+    if not RIG_NETD or not os.path.exists(RIG_NETD):
+        sys.exit("test-net-flood is run by `make test-net-flood`, which builds the rig's netd and names it")
+    shutil.copyfile(IMAGE, COPY)
+    mp = drive_qemu.attach(COPY, readonly=False)
+    try:
+        shutil.copyfile(RIG_NETD, os.path.join(mp, "EFI", "ORBS", "NETD.BIN"))
+        subprocess.run(["find", mp, "-name", "._*", "-delete"], check=True)
+        for d in (".fseventsd", ".Trashes", ".Spotlight-V100"):
+            shutil.rmtree(os.path.join(mp, d), ignore_errors=True)
+    finally:
+        drive_qemu.detach(mp)
 
 
 def http():
@@ -117,7 +149,8 @@ def main():
 
     if os.path.exists(PCAP):
         os.unlink(PCAP)
-    g = drive_qemu.Guest(IMAGE, extra_args=(
+    stage()
+    g = drive_qemu.Guest(COPY, extra_args=(
         "-netdev", f"user,id=net0,hostfwd=udp::{PORT_UDP}-:9,hostfwd=tcp::{PORT_HTTP}-:80",
         "-device", "virtio-net-device,netdev=net0",
         "-object", f"filter-dump,id=f0,netdev=net0,file={PCAP}",
@@ -145,10 +178,24 @@ def main():
             if wedged or restarted:
                 lines = [l for l in during.splitlines() if "slot" in l or l.startswith("netd:")]
                 print("[net-flood] the guest's lines:\n  " + "\n  ".join(lines[-12:]), flush=True)
+            # The other half of the rule: passes that take no frame are no
+            # progress, so netd spinning on NET_WAIT is called wedged.
+            check(RIG_LINE in text, "netd is the restart rig's build, with the NET_WAIT spin")
+            logged_in = g.run([("login:", "root"), ("assword", "root"), ("# ", "")])
+            mark = len(g.transcript())
+            g.type_line(f"ping {EMPTY_SPIN}")
+            spun = logged_in and g.wait_for("server slot 4 restarted", timeout=40)
+            after = g.transcript()[mark:]
+            check(spun and "slot 4 wedged - no progress (runnable)" in after,
+                  "netd spinning on NET_WAIT, taking nothing, is called wedged and restarted")
+            g.wait_for("netd: network server ready", timeout=30)
+            check(http(), "netd answers HTTP after that restart")
         out = g.transcript()
         faults = g.aborts()
     finally:
         g.stop()
+        if os.path.exists(COPY):
+            os.unlink(COPY)
     # Every boot is logged; a stall grades none of its checks.
     if drive_qemu.boot_stalled("test-net-flood", "boot", out, faults):
         return drive_qemu.verdict("test-net-flood", 0, 1)
