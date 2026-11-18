@@ -2117,9 +2117,10 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
             }
         }
         syscall_abi::NET_RECV => {
-            // arg0 = buffer ptr, arg1 = buffer len; a waiting frame is copied
-            // in (truncated to len) and its true length returned, or
-            // NET_NO_FRAME if the receive ring is empty.
+            // arg0 = buffer ptr, arg1 = buffer len; a waiting frame that fits
+            // is copied in and its length returned, one longer than len is
+            // dropped (NET_FRAME_CUT), and NET_NO_FRAME if the ring is empty.
+            // No answer but a sentinel is past len (`Nic::poll_frame`).
             if !net_access_allowed()
                 || arg0 == 0
                 || arg1 == 0
@@ -2135,11 +2136,14 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
             // which Nic::poll_frame's arms rely on.
             let buf = unsafe { core::slice::from_raw_parts_mut(arg0 as *mut u8, arg1 as usize) };
             match unsafe { device.poll_frame(buf) } {
-                Some(len) => {
-                    // A frame taken: the pass it is in ends in progress
-                    // (`supervisor::note_pass`, at `NET_WAIT`).
+                Some(got) => {
+                    // A frame taken, cut or whole: the pass it is in ends in
+                    // progress (`supervisor::note_pass`, at `NET_WAIT`).
                     crate::supervisor::note_input(tasks::current_task());
-                    len as u64
+                    match got {
+                        crate::nic::Received::Whole(len) => len as u64,
+                        crate::nic::Received::Cut => syscall_abi::NET_FRAME_CUT,
+                    }
                 }
                 None => syscall_abi::NET_NO_FRAME,
             }

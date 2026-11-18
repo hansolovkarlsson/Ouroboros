@@ -498,12 +498,15 @@ own. The entries below stand as they were put.
    driver's rings are private to its module. No rig sends a frame or a
    buffer over the bound, so that refusal is still a check nothing fails.
    **Found there, not fixed here (it is `netd`'s, and older than this
-   step):** `NET_RECV` returns the frame's own length, and `netd` indexes
+   step):** `NET_RECV` returned the frame's own length, and `netd` indexed
    its 1600-byte buffer by it (`recv` then `&t.frame[..n]`,
    `programs/servers/netd/src/main.rs`). A frame of 1601 to 2036 bytes
    would panic `netd`. SLIRP sends none; a LAN can. Step 7 owes the clamp
    (a frame longer than the buffer dropped, not cut), before the board
-   receives from a network. The ABI's doc for `NET_RECV` says so now.
+   receives from a network. The ABI's doc for `NET_RECV` said so then.
+   Both are done: the clamp in step 7, and since 2026-11-18 the kernel
+   answers `NET_FRAME_CUT` for such a frame and never a length past the
+   buffer (step 7's left-open items).
    **Check:** every network rig on QEMU passes as before (`make
    test-async-rmount`, `test-run-callback`, `test-run-orphan`,
    `test-run-silent`, `test-cred-client`, `test-held-keys`,
@@ -1538,11 +1541,31 @@ own. The entries below stand as they were put.
      `netd` (none measured near that; the second review, declined).
      Declined too: the registry looked up for every frame taken (four
      entries, under the lock `NET_RECV` already holds).
-   - *`NET_RECV` still returns a length longer than the buffer it
-     filled*, and the clamp is in `netd`'s one `recv`. A second caller
-     would meet the trap again; the kernel returning the copied length,
-     or a sentinel for a cut frame, would make it unspellable. It is a
-     change to the ABI.
+   - *`NET_RECV` returned a length longer than the buffer it filled*,
+     and the clamp was in `netd`'s one `recv`, so a second caller would
+     meet the trap again. **Fixed 2026-11-18:** a frame longer than the
+     buffer is taken and dropped and answered `NET_FRAME_CUT`
+     (`syscall_abi`, `u64::MAX - 2`), so every answer but a sentinel is
+     at most the buffer's length. One place for both drivers,
+     `Nic::poll_frame`, which turns a driver's length past the buffer
+     into `Received::Cut`; `netd`'s `recv_one` reads the sentinel, and
+     keeps a length past its buffer as a dropped frame, never an index.
+     Chosen over the copied length (a cut frame handed on as whole) and
+     over leaving the frame on the ring (a caller that never retries
+     spins on it). **Checked:** `make test-net-flood` pings 192.0.2.249,
+     on which the rig's `netd` reads the first frame after an ARP request
+     into 16 bytes; the answer must be `NET_FRAME_CUT`, and `netd`'s own
+     reading of it (`got`, the half of `recv_one` after the syscall) a
+     frame too long. Controlled: with `Nic::poll_frame` answering every
+     frame whole it answered 64, and with `got` reading the sentinel as
+     nothing the check failed too. The review (`/code-review high`) had
+     the probe log on one line and beat, the sentinels asserted apart and
+     above `NET_MAX_FRAME`, and `got` checked by the rig, which until
+     then ran only on a frame over 1600 bytes, never sent by SLIRP.
+     Declined: the bound in each driver before its copy, which would
+     spare a copy of a frame dropped anyway but put the bound in two
+     places again; and one loop shared by the probe and `arp_resolve`,
+     the probe being the rig's build alone.
 
    **The board, 2026-11-15, by Hans: three boots, one cable to the Mac's
    adapter, `en9` set to `10.0.2.2` by hand.** The wire of each is in

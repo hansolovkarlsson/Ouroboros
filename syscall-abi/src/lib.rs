@@ -802,13 +802,15 @@ pub const NET_MAX_FRAME: u64 = 2036;
 /// that owns the protocol stack, exactly like `BLOCK_*` -> [`FSD_TASK`].
 pub const NET_SEND: u64 = 42;
 
-/// `(buf ptr, buf len)` -> the received frame's length (its bytes copied
-/// into `buf`, truncated to `buf len`), `NET_NO_FRAME` if none is waiting,
-/// or an error sentinel. Non-blocking poll of the network driver's receive
-/// side. **The length returned is the frame's own, which can be more than
-/// `buf len`:** the caller must not index its buffer by it unclamped
-/// (`netd`'s `recv` drops such a frame whole). A `buf len` over
-/// [`NET_MAX_FRAME`] is refused.
+/// `(buf ptr, buf len)` -> the received frame's length, its bytes copied
+/// into `buf`; [`NET_FRAME_CUT`] for a frame longer than `buf len`, taken
+/// and dropped; [`NET_NO_FRAME`] if none is waiting; or [`NET_ERROR`].
+/// Non-blocking poll of the network driver's receive side. **Every answer
+/// that is not one of the three sentinels is at most `buf len`**, so a
+/// caller may index its buffer by it: until 2026-11-18 a frame longer than
+/// the buffer was answered with its own length, and only `netd`'s clamp
+/// stood between that and a read past its buffer. A frame is never handed
+/// over cut. A `buf len` over [`NET_MAX_FRAME`] is refused.
 /// Gated to [`NET_TASK`] like [`NET_SEND`].
 pub const NET_RECV: u64 = 43;
 
@@ -1404,6 +1406,21 @@ pub const POWER_BAD_MODE: u64 = u64::MAX;
 /// found the receive ring empty) - distinct from a real length (`u64::MAX`
 /// is out of any frame's range) and from the error sentinel.
 pub const NET_NO_FRAME: u64 = u64::MAX;
+
+/// [`NET_RECV`] returned for a frame longer than the caller's buffer: the
+/// frame is taken off the receive ring and dropped, and what `buf` holds
+/// after is unspecified. Distinct from a length (none reaches it), from
+/// [`NET_NO_FRAME`] (a frame was taken, so the caller may ask for the next)
+/// and from [`NET_ERROR`].
+pub const NET_FRAME_CUT: u64 = u64::MAX - 2;
+
+// NET_RECV's three sentinels differ, and none is a length it may answer.
+const _: () = assert!(
+    NET_NO_FRAME != NET_ERROR && NET_NO_FRAME != NET_FRAME_CUT && NET_ERROR != NET_FRAME_CUT
+);
+const _: () = assert!(
+    NET_NO_FRAME > NET_MAX_FRAME && NET_ERROR > NET_MAX_FRAME && NET_FRAME_CUT > NET_MAX_FRAME
+);
 
 /// [`NET_SEND`]/[`NET_RECV`] error sentinel: no NIC installed this boot, the
 /// caller isn't [`NET_TASK`], or a bad buffer. Distinct from [`NET_NO_FRAME`].

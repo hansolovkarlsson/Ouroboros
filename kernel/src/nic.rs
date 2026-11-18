@@ -171,18 +171,31 @@ impl Nic {
         }
     }
 
-    /// Takes one received frame if there is one: copies it into `out`, cut
-    /// to `out`'s length, and returns the frame's own length, which can be
-    /// more than `out`'s (`NET_RECV` passes it on as it is).
+    /// Takes one received frame if there is one: [`Received::Whole`] with
+    /// its length when it fits `out` and is copied in whole, and
+    /// [`Received::Cut`] when it is longer, taken and dropped (`out` then
+    /// holds part of it, which no caller may use). The one place both
+    /// drivers' answers pass through, so the bound holds whichever is
+    /// installed: each driver returns the frame's own length.
     ///
     /// # Safety
     /// As [`Self::send_frame`], and `out` is no longer than
     /// `syscall_abi::NET_MAX_FRAME`: virtio-net indexes its own receive
     /// buffer by `out`'s length.
-    pub unsafe fn poll_frame(&mut self, out: &mut [u8]) -> Option<usize> {
-        match self {
+    pub unsafe fn poll_frame(&mut self, out: &mut [u8]) -> Option<Received> {
+        let len = match self {
             Nic::Virtio(d) => unsafe { d.poll_frame(out) },
             Nic::Genet(d) => d.poll_frame(out),
-        }
+        }?;
+        Some(if len <= out.len() { Received::Whole(len) } else { Received::Cut })
     }
+}
+
+/// One frame taken by [`Nic::poll_frame`].
+pub enum Received {
+    /// A frame of this length, at most the buffer's, whole in it.
+    Whole(usize),
+    /// A frame longer than the buffer, dropped: `NET_RECV` answers
+    /// `syscall_abi::NET_FRAME_CUT`, never a length past the buffer.
+    Cut,
 }

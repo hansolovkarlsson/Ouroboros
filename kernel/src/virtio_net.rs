@@ -434,7 +434,9 @@ impl Device {
     /// Non-blocking receive: if the device has delivered a frame since the
     /// last call, copies its payload (past the 12-byte header) into `out`,
     /// re-posts the receive buffer, and returns the frame length; otherwise
-    /// returns `None`. Truncates into `out` if the frame is larger than it.
+    /// returns `None`. Truncates into `out` if the frame is larger than it,
+    /// and still returns the frame's own length (`Nic::poll_frame` makes
+    /// that a dropped frame).
     ///
     /// # Safety
     /// Must be called after [`init`](Self::init).
