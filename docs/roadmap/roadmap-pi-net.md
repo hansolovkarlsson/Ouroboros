@@ -1486,6 +1486,31 @@ own. The entries below stand as they were put.
      Frames arriving faster than they are handled for 2.56 s would have
      the supervisor call `netd` wedged. SLIRP never did that; a wire
      can.
+     **It did, and it is fixed on 2026-11-17** (`netd/drain-bound`; Hans
+     chose a bound with progress at `NET_WAIT` over a heartbeat in
+     `netd`'s loop and over a heartbeat alone). A pass of `serve`'s loop
+     takes at most `DRAIN_BUDGET` frames (64, Linux's NAPI weight) before
+     it serves its mailbox and timers, `recv` skips at most as many frames
+     too long for its buffer, and the kernel's `NET_WAIT` notes progress
+     for the supervisor as `MSG_RECV` does: under a flood it returns at
+     once and `netd` is never seen blocked. A wedge inside a pass is still
+     caught, since that pass never reaches the wait. **Seen on the board
+     first, as the control** (`main`, `5f43c89044e3`, boot 42): `curl`
+     answered 200, then `scratch/udp_flood.py` sent small UDP datagrams
+     from the Mac for 15 s. About 65,000 frames in, `server slot 4 wedged
+     - no progress (runnable) - restarting`, three restarts, each wedged
+     again by the flood, then `failed more than 3 times this boot - giving
+     up`; `curl` after hung, the board without a network server for the
+     rest of the boot. **QEMU shows it too**, so a rig guards it: `make
+     test-net-flood` floods a forwarded UDP port for 15 s and checks that
+     no server is called wedged, that `netd` answers HTTP after, and that
+     the pcap holds at least 50,000 of the datagrams (it held 1.7 to 2.0
+     million). Controlled: `main` failed it with 4 wedges and 3 restarts
+     and no HTTP after, and so did the fix with either half taken out,
+     the drain unbounded or the note at `NET_WAIT` removed. **Still
+     open:** the fix on the board; and under a flood `netd` serves its
+     clients between passes but drops what the full ring drops, its own
+     connections' frames among them.
    - *`NET_RECV` still returns a length longer than the buffer it
      filled*, and the clamp is in `netd`'s one `recv`. A second caller
      would meet the trap again; the kernel returning the copied length,

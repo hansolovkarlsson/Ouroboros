@@ -27,8 +27,8 @@ dumps every frame to a pcap. The checks:
 
 Controlled 2026-11-17: `main` before the fix (`5f43c890`) had netd called
 wedged four times and given up on in the same flood, and HTTP timed out
-after; on the fix with either half removed (the drain unbounded, or the
-note at `NET_WAIT` taken out) it failed check 3 as well.
+after, and the fix with either half removed (the drain unbounded, or the
+note at `NET_WAIT` taken out) failed checks 3 and 4 the same way.
 
 Usage:  python3 scripts/test-net-flood.py      (make test-net-flood builds the image)
 Exit status: 0, 1 for a failed check, drive-qemu's INCONCLUSIVE for a boot
