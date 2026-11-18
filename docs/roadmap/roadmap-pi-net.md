@@ -1444,6 +1444,19 @@ own. The entries below stand as they were put.
      warning; `curl` 200 and the ARP entry `d8:3a:dd:85:24:22`. The
      control above stands for both. **Still open:** a link that drops and
      returns is not read again once the MAC is on.
+     **Built on 2026-11-18** (`genet/link-reread`; Hans chose refusing
+     sends while the link is down over a line alone): the wait goes on
+     asking once a second with the MAC on. `genet::linkask::change`
+     (host-tested) says what a read means against the link held: up
+     where none was, or at another speed or duplex, starts the MAC at it
+     (`Genet::start` again, which rewrites the speed and keeps the
+     enables), with the link-up and pause lines; anything not up where
+     one was is `link down at a wait (...)`, and every send is refused
+     (`TxError::NoLink`, `NET_ERROR` to `netd`) and asks the link itself
+     until it is up again. The receiver stays on. Up, the asking costs
+     three MDIO reads a second under the kernel lock. **Not yet on the
+     board:** the check is a cable pulled and put back with `netd`
+     serving, and if a switch at 100 Mb/s is at hand, a cable moved to it.
    - *The receiver is never turned off.* With nobody draining it
      (before `netd` first runs, after `netd` is past its restart cap,
      after the kernel halts) the ring fills and the DMA sits at its

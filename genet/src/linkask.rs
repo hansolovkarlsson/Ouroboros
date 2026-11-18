@@ -1,5 +1,5 @@
-//! When the reader's wait asks the PHY for the link, while a boot that found
-//! none left the MAC off: the rule the kernel's `Device::link_at_wait`
+//! When the reader's wait asks the PHY for the link, and what an answer
+//! means ([`change`]): the rule the kernel's `Device::link_at_wait`
 //! follows, here so it runs on the host against a clock the tests step.
 //! The kernel lends the time and does the ask; this says when to ask, how
 //! long the wait may block before the next one, and when to stop.
@@ -18,10 +18,18 @@
 //!   leave the board deaf to a late cable again. An ask that read, up or
 //!   down, starts the count again. A send still asks; this is the wait's.
 //!
+//! - **Asked for as long as the device lives**, the MAC on or off, since
+//!   2026-11-18: a link that drops and returns is read again ([`change`]
+//!   says what an answer means). Before, the asking ended at the start,
+//!   and a cable pulled and put back, or moved to a switch at another
+//!   speed, left the MAC at the old one with nothing passing.
+//!
 //! Linux's driver falls back to polling the PHY on GENET v5, whose link
 //! interrupt is unreliable (`bcmmii.c`, "On GENETv5 there is a hardware
 //! issue that prevents the signaling of link UP interrupts"). The interval
 //! here is this driver's choice.
+
+use crate::phy::{Link, Speed};
 
 /// How often the wait asks the link: once a second.
 pub const ASK_INTERVAL_US: u64 = 1_000_000;
@@ -90,6 +98,35 @@ impl LinkAsk {
         }
         self.failed += 1;
         self.failed == FAILED_ASKS_MAX
+    }
+}
+
+/// What a link read means for a device whose link, as last read, is
+/// `held`: the speed and duplex the MAC was last started on while the
+/// link is up, `None` while it is not (or never was).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Change {
+    /// Nothing to do: the link is as held.
+    Same,
+    /// Up, where it was not, or up at another speed or duplex: start the
+    /// MAC at this one (`Genet::start` again rewrites the speed and keeps
+    /// the enables).
+    Up { speed: Speed, full: bool },
+    /// Was up and is not: refuse sends until it is up again.
+    Down,
+}
+
+/// The rule, for every ask (the wait's and a send's). A link that is
+/// negotiating, or up at a speed the PHY does not name, is not one the
+/// MAC can run on, so it counts as down. A change of speed seen with no
+/// down between (a cable moved inside one interval) is an [`Change::Up`]
+/// at the new speed: the MAC is never left at a speed the link is not.
+pub fn change(held: Option<(Speed, bool)>, now: Link) -> Change {
+    match (held, now) {
+        (Some(h), Link::Up { speed, full }) if h == (speed, full) => Change::Same,
+        (_, Link::Up { speed, full }) => Change::Up { speed, full },
+        (Some(_), _) => Change::Down,
+        (None, _) => Change::Same,
     }
 }
 
@@ -196,5 +233,24 @@ mod tests {
             now += S;
         }
         assert_eq!(a.at_wait(now), Ask::Now);
+    }
+
+    #[test]
+    fn a_link_read_against_the_link_held() {
+        let g = Some((Speed::S1000, true));
+        let up = |speed, full| Link::Up { speed, full };
+        // Not held: up starts it, anything else is no news.
+        assert_eq!(change(None, up(Speed::S1000, true)), Change::Up { speed: Speed::S1000, full: true });
+        for l in [Link::Down, Link::Negotiating, Link::Unresolved] {
+            assert_eq!(change(None, l), Change::Same, "{l:?}");
+        }
+        // Held: the same link is no news, any not-up is down.
+        assert_eq!(change(g, up(Speed::S1000, true)), Change::Same);
+        for l in [Link::Down, Link::Negotiating, Link::Unresolved] {
+            assert_eq!(change(g, l), Change::Down, "{l:?}");
+        }
+        // Held, and up at another speed or duplex: started again at it.
+        assert_eq!(change(g, up(Speed::S100, true)), Change::Up { speed: Speed::S100, full: true });
+        assert_eq!(change(g, up(Speed::S1000, false)), Change::Up { speed: Speed::S1000, full: false });
     }
 }

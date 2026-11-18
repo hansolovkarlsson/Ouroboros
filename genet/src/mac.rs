@@ -289,6 +289,10 @@ impl Stopped {
 pub enum TxError {
     /// [`Genet::start`] has not run: the MAC's transmitter is off.
     NotStarted,
+    /// The caller's, never this crate's: the link as last read is not up,
+    /// so the send is refused before anything is written (the kernel's
+    /// `genetnic.rs`, a link not found at the boot or since dropped).
+    NoLink,
     /// Shorter than [`TX_MIN_FRAME`] or longer than [`TX_MAX_FRAME`].
     BadLength(usize),
     /// An earlier frame is still with the device. Nothing was written.
