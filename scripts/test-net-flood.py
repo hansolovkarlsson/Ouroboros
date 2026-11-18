@@ -32,7 +32,9 @@ dumps every frame to a pcap. The checks:
 5. **`NET_RECV` never answers a length past the buffer:** the guest's
    shell pings 192.0.2.249, on which the rig's build asks `NET_RECV` for
    a frame with a 16-byte buffer, shorter than any frame, after an ARP
-   request that brings one. The answer must be `NET_FRAME_CUT`, and never
+   request that brings one (the first frame of any kind is judged). The
+   answer must be `NET_FRAME_CUT`, and `netd`'s own reading of it (`got`,
+   which `recv_one` uses) a frame too long; and never
    the frame's own length, which before 2026-11-18 it was, and which only
    `netd`'s clamp kept from being read past its buffer (Pi net step 7's
    left-open item). Done before the spin, on the first `netd`.
@@ -202,8 +204,8 @@ def main():
             said = logged_in and g.wait_for("netd: rig: NET_RECV into 16 bytes", timeout=20)
             g.wait_for("# ", timeout=10)
             line = next((l.strip() for l in g.transcript()[mark:].splitlines() if "netd: rig: NET_RECV" in l), "none")
-            check(said and "answered NET_FRAME_CUT" in line,
-                  f"NET_RECV into a buffer shorter than the frame answers NET_FRAME_CUT, not a length ({line!r})")
+            check(said and "answered NET_FRAME_CUT, read as a frame too long" in line,
+                  f"NET_RECV into a buffer shorter than the frame answers NET_FRAME_CUT, not a length, and netd reads it as a frame too long ({line!r})")
             mark = len(g.transcript())
             g.type_line(f"ping {EMPTY_SPIN}")
             spun = logged_in and g.wait_for("server slot 4 restarted", timeout=40)

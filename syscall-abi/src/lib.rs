@@ -1414,6 +1414,14 @@ pub const NET_NO_FRAME: u64 = u64::MAX;
 /// and from [`NET_ERROR`].
 pub const NET_FRAME_CUT: u64 = u64::MAX - 2;
 
+// NET_RECV's three sentinels differ, and none is a length it may answer.
+const _: () = assert!(
+    NET_NO_FRAME != NET_ERROR && NET_NO_FRAME != NET_FRAME_CUT && NET_ERROR != NET_FRAME_CUT
+);
+const _: () = assert!(
+    NET_NO_FRAME > NET_MAX_FRAME && NET_ERROR > NET_MAX_FRAME && NET_FRAME_CUT > NET_MAX_FRAME
+);
+
 /// [`NET_SEND`]/[`NET_RECV`] error sentinel: no NIC installed this boot, the
 /// caller isn't [`NET_TASK`], or a bad buffer. Distinct from [`NET_NO_FRAME`].
 pub const NET_ERROR: u64 = u64::MAX - 1;

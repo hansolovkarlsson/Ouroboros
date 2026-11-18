@@ -1554,10 +1554,11 @@ fn handle_ping(packed_mac: u64, target_packed: u64) -> u64 {
 
 /// The restart rig's build alone: `NET_RECV` asked with a buffer shorter
 /// than any frame, which must answer `NET_FRAME_CUT` and never the frame's
-/// own length (`make test-net-flood`). An ARP request for the gateway
-/// brings a reply of 42 bytes or more; the first answer that is not
-/// `NET_NO_FRAME` within ~500 ms is logged as it came, and the ping says
-/// whether it was the sentinel.
+/// own length, and [`got`], `netd`'s reading of an answer, must take that
+/// for a frame too long (`make test-net-flood`). An ARP request for the
+/// gateway brings a frame of 42 bytes or more; the first frame of any kind
+/// within ~500 ms is judged, and logged on one line, as it came and as
+/// [`got`] read it. The ping says whether both were right.
 fn cut_probe(mac: &[u8; 6]) -> u64 {
     let Some(hop) = next_hop(&[10, 0, 2, 2]) else {
         return syscall_abi::NET_PING_NO_ARP;
@@ -1566,23 +1567,63 @@ fn cut_probe(mac: &[u8; 6]) -> u64 {
         return syscall_abi::NET_PING_NO_ARP;
     }
     let mut small = [0u8; 16];
-    let deadline = now() + 25; // ~500ms
+    let mut beat = now();
+    let deadline = beat + 25; // ~500ms
     while now() <= deadline {
+        beat = beat_if_new_tick(now(), beat);
         let r = syscall4(syscall_abi::NET_RECV, small.as_mut_ptr() as u64, small.len() as u64, 0, 0);
         if r == syscall_abi::NET_NO_FRAME {
             continue;
         }
-        log(b"netd: rig: NET_RECV into 16 bytes answered ");
+        // One log call, so no other console line can split it.
+        let mut line = [0u8; 128];
+        let mut n = put(&mut line, 0, b"netd: rig: NET_RECV into 16 bytes answered ");
         if r == syscall_abi::NET_FRAME_CUT {
-            log(b"NET_FRAME_CUT\r\n");
-            return syscall_abi::NET_PING_OK;
+            n = put(&mut line, n, b"NET_FRAME_CUT");
+        } else {
+            n = put_dec(&mut line, n, r);
         }
-        log_dec(r);
-        log(b"\r\n");
-        return syscall_abi::NET_PING_TIMEOUT;
+        let read = got(r, small.len());
+        n = put(
+            &mut line,
+            n,
+            match read {
+                Got::TooLong => b", read as a frame too long\r\n",
+                Got::Frame(_) => b", read as a frame\r\n",
+                Got::Nothing => b", read as nothing\r\n",
+            },
+        );
+        log(&line[..n]);
+        return if r == syscall_abi::NET_FRAME_CUT && matches!(read, Got::TooLong) {
+            syscall_abi::NET_PING_OK
+        } else {
+            syscall_abi::NET_PING_TIMEOUT
+        };
     }
     log(b"netd: rig: NET_RECV into 16 bytes: no frame came\r\n");
     syscall_abi::NET_PING_TIMEOUT
+}
+
+/// `bytes` written into `line` at `at`, as many as fit; the end.
+fn put(line: &mut [u8], at: usize, bytes: &[u8]) -> usize {
+    let n = bytes.len().min(line.len().saturating_sub(at));
+    line[at..at + n].copy_from_slice(&bytes[..n]);
+    at + n
+}
+
+/// `v` in decimal written into `line` at `at`, as [`put`].
+fn put_dec(line: &mut [u8], at: usize, mut v: u64) -> usize {
+    let mut digits = [0u8; 20];
+    let mut i = digits.len();
+    loop {
+        i -= 1;
+        digits[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    put(line, at, &digits[i..])
 }
 
 /// An ARP request for `target`, broadcast, from `mac` at our address.
@@ -8990,11 +9031,18 @@ enum Got {
 /// for a caller that wants the next frame that fits.
 fn recv_one(buf: &mut [u8]) -> Got {
     let r = syscall4(syscall_abi::NET_RECV, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0);
+    got(r, buf.len())
+}
+
+/// What `NET_RECV`'s answer `r`, into a buffer of `len` bytes, hands over:
+/// [`recv_one`]'s reading, apart so the restart rig's probe reads its own
+/// answer the same way ([`cut_probe`]).
+fn got(r: u64, len: usize) -> Got {
     if r == syscall_abi::NET_NO_FRAME || r == syscall_abi::NET_ERROR {
         Got::Nothing
     } else if r == syscall_abi::NET_FRAME_CUT {
         Got::TooLong
-    } else if r <= buf.len() as u64 {
+    } else if r <= len as u64 {
         Got::Frame(r as usize)
     } else {
         // Past the buffer, which the kernel never answers since
