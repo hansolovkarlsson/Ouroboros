@@ -344,6 +344,23 @@ const RTO_MIN_TICKS: u64 = 10; // 200ms, == RTO_POLL_MS
 const RTO_MAX_TICKS: u64 = 100; // 2s
 const RTO_MAX_RETRIES: u8 = 5;
 const RTO_POLL_MS: u64 = 200;
+
+/// The most frames one pass of `serve`'s loop takes off the NIC (each
+/// `NET_RECV` that hands one over, a frame too long for the buffer
+/// included) before it serves its mailbox and timers and goes back to
+/// `NET_WAIT`. Linux's NAPI budget (`NAPI_POLL_WEIGHT`, 64). Unbounded, the
+/// drain never ended while frames kept coming: on the Pi, a 15 s UDP flood
+/// from the Mac had the supervisor call `netd` wedged four times and give
+/// up on it for the boot (boot 42, 2026-11-17, `main`), since a pass that
+/// never ends never reaches the wait that tells the supervisor `netd` is
+/// alive (`supervisor::note_pass`).
+const DRAIN_BUDGET: usize = 64;
+
+/// The most frames too long for its buffer [`recv`] drops before it says
+/// `None`, so a wait loop asking for one frame is not held in it by a run
+/// of them. Its own bound, not [`DRAIN_BUDGET`]: `serve`'s drain counts
+/// every frame against its budget itself ([`recv_one`]).
+const RECV_SKIP_MAX: usize = 64;
 /// A tick in microseconds (`MONOTONIC_US`'s unit), for converting an
 /// estimated RTO in µs to `now()` ticks.
 const TICK_US: u64 = 20_000;
@@ -360,7 +377,7 @@ pub extern "C" fn _start() -> ! {
 
 fn main() -> ! {
     if cfg!(feature = "restart-rig") {
-        log(b"netd: the restart rig's build: a ping of 192.0.2.250 faults it, of 192.0.2.251 spins it\r\n");
+        log(b"netd: the restart rig's build: a ping of 192.0.2.250 faults it, of 192.0.2.251 spins it, of 192.0.2.252 spins it at NET_WAIT\r\n");
     }
     log(b"netd: network server ready\r\n");
     let packed_mac = syscall(syscall_abi::NET_MAC, 0);
@@ -852,7 +869,9 @@ fn load_auth() -> Auth {
 }
 
 /// The event loop: block in `NET_WAIT` until either a client message or an
-/// incoming frame, then drain both. Client requests (`ping`/`resolve`/
+/// incoming frame, then take both: every message waiting, and at most
+/// [`DRAIN_BUDGET`] frames, the rest left for the next pass, which
+/// `NET_WAIT` then starts at once. Client requests (`ping`/`resolve`/
 /// `fetch`) are handled synchronously; incoming frames feed the ARP responder
 /// and the TCP HTTP server. This is the async-receive model - `netd` no
 /// longer busy-polls one source while starving the other, and it can now
@@ -860,8 +879,12 @@ fn load_auth() -> Auth {
 ///
 /// Replying to every client message is also what acks the supervisor's
 /// health-ping (its reply, addressed to the kernel's sentinel, is intercepted
-/// as the ack) - and staying `Blocked` in `NET_WAIT` between bursts is what
-/// keeps the passive heartbeat seeing a healthy server.
+/// as the ack). The passive heartbeat sees a healthy server `Blocked` in
+/// `NET_WAIT` between bursts; under a flood it is never blocked, and what
+/// says it is alive then is coming back to `NET_WAIT` from a pass that took
+/// a frame or a message (`supervisor::note_pass` in the kernel). A pass
+/// that never ends
+/// never comes back, which is why the drain is bounded.
 fn serve(packed_mac: u64) -> ! {
     let mac = if packed_mac == syscall_abi::NET_ERROR {
         [0u8; 6]
@@ -912,9 +935,16 @@ fn serve(packed_mac: u64) -> ! {
 
         // 2. Incoming frames: ARP replies, parked remote mounts, dial-out
         // connections, and the TCP server.
+        // At most `DRAIN_BUDGET` frames a pass, one too long for the buffer
+        // counted like any other: what is left waits for the next pass,
+        // which `NET_WAIT` starts at once.
         if packed_mac != syscall_abi::NET_ERROR {
-            while let Some(n) = recv(&mut t.frame) {
-                on_frame(&mac, &t.frame[..n], &mut t.conns, &mut t.dials, &mut t.remotes, &mut t.sessions, &t.auth, &t.held);
+            for _ in 0..DRAIN_BUDGET {
+                match recv_one(&mut t.frame) {
+                    Got::Frame(n) => on_frame(&mac, &t.frame[..n], &mut t.conns, &mut t.dials, &mut t.remotes, &mut t.sessions, &t.auth, &t.held),
+                    Got::TooLong => {}
+                    Got::Nothing => break,
+                }
             }
             // Answer every parked remote mount and session verb whose reply is
             // complete (or whose peer is gone), then drive the client
@@ -1490,6 +1520,16 @@ fn handle_ping(packed_mac: u64, target_packed: u64) -> u64 {
         if target == [192, 0, 2, 251] {
             loop {
                 core::hint::spin_loop();
+            }
+        }
+        // Passes that take nothing: `NET_WAIT` and back, the mailbox never
+        // read. Once the supervisor's ping is queued every wait returns at
+        // once, and no frame is taken, so none of them is progress
+        // (`supervisor::note_pass`): the supervisor must call this wedged
+        // (`make test-net-flood`).
+        if target == [192, 0, 2, 252] {
+            loop {
+                syscall(syscall_abi::NET_WAIT, 0);
             }
         }
     }
@@ -8882,17 +8922,40 @@ fn send(frame: &[u8]) -> Result<(), ()> {
 /// buffer it was cut to (up to `NET_MAX_FRAME`, 2036, against the 1600
 /// bytes every caller here passes). A frame that long is none this stack
 /// sends or expects: it is dropped whole, not handed on cut, and the next
-/// one is asked for. The kernel has taken each frame it answers for, so
-/// the loop ends when none waits.
+/// one is asked for, [`RECV_SKIP_MAX`] of them at most: past that this says
+/// `None`, and the frames still waiting are the caller's next ask.
 fn recv(buf: &mut [u8]) -> Option<usize> {
-    loop {
-        let r = syscall4(syscall_abi::NET_RECV, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0);
-        if r == syscall_abi::NET_NO_FRAME || r == syscall_abi::NET_ERROR {
-            return None;
+    for _ in 0..RECV_SKIP_MAX {
+        match recv_one(buf) {
+            Got::Frame(n) => return Some(n),
+            Got::TooLong => {}
+            Got::Nothing => return None,
         }
-        if r <= buf.len() as u64 {
-            return Some(r as usize);
-        }
+    }
+    None
+}
+
+/// What one `NET_RECV` handed over.
+enum Got {
+    /// A frame of this length, whole in the buffer.
+    Frame(usize),
+    /// A frame longer than the buffer, taken and dropped.
+    TooLong,
+    /// No frame waiting (or no NIC).
+    Nothing,
+}
+
+/// One `NET_RECV` into `buf`, for a caller that counts each frame taken,
+/// as `serve`'s drain does against [`DRAIN_BUDGET`]; [`recv`] is the one
+/// for a caller that wants the next frame that fits.
+fn recv_one(buf: &mut [u8]) -> Got {
+    let r = syscall4(syscall_abi::NET_RECV, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0);
+    if r == syscall_abi::NET_NO_FRAME || r == syscall_abi::NET_ERROR {
+        Got::Nothing
+    } else if r <= buf.len() as u64 {
+        Got::Frame(r as usize)
+    } else {
+        Got::TooLong
     }
 }
 

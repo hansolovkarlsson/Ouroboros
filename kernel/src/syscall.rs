@@ -1885,8 +1885,16 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
             // Not progress for the wedge heartbeat, even with a message:
             // `netd` drains its mailbox with this from inside its own long
             // loops, so a message taken here says nothing about whether the
-            // loop is still advancing (the review of #211).
-            tasks::try_recv_message(tasks::current_task(), arg0, arg1).unwrap_or(syscall_abi::NO_MSG)
+            // loop is still advancing (the review of #211). It marks the
+            // pass, which is progress only when the pass gets back to
+            // `NET_WAIT` (`supervisor::note_input`, `note_pass`).
+            match tasks::try_recv_message(tasks::current_task(), arg0, arg1) {
+                Some(packed) => {
+                    crate::supervisor::note_input(tasks::current_task());
+                    packed
+                }
+                None => syscall_abi::NO_MSG,
+            }
         }
         syscall_abi::MSG_CALL => {
             let dest = arg0 as usize;
@@ -2127,7 +2135,12 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
             // which Nic::poll_frame's arms rely on.
             let buf = unsafe { core::slice::from_raw_parts_mut(arg0 as *mut u8, arg1 as usize) };
             match unsafe { device.poll_frame(buf) } {
-                Some(len) => len as u64,
+                Some(len) => {
+                    // A frame taken: the pass it is in ends in progress
+                    // (`supervisor::note_pass`, at `NET_WAIT`).
+                    crate::supervisor::note_input(tasks::current_task());
+                    len as u64
+                }
                 None => syscall_abi::NET_NO_FRAME,
             }
         }
@@ -2135,6 +2148,11 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
             if !net_access_allowed() {
                 return syscall_abi::NET_ERROR;
             }
+            // The network server back at its loop's wait: progress for the
+            // wedge heartbeat when the pass that ended here took a frame
+            // (`supervisor::note_pass` says why, and why only then). A
+            // no-op for a task the supervisor does not manage.
+            crate::supervisor::note_pass(tasks::current_task());
             // arg0 = timeout in milliseconds (0 = block indefinitely). A
             // nonzero timeout also wakes the caller once it elapses with no
             // input - the timer the network server's TCP retransmit timeout

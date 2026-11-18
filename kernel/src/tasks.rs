@@ -3320,10 +3320,12 @@ pub unsafe fn on_tick(frame: *mut Context) {
     // it never returns to a Blocked state and never faults, so the crash
     // path can't see it. A healthy server is observed Blocked (idle in
     // recv, or in a sub-call) or comes back to its `MSG_RECV`, which clears
-    // the count (`supervisor::note_progress`): a busy one may never be SEEN
-    // blocked, since a tick fired during its syscall lands as it returns to
-    // EL0. A wedged one stays Runnable and never reaches its receive. On a
-    // wedge, restart it on the exact teardown path the fault handler uses.
+    // the count (`supervisor::note_progress`), or, for netd, to `NET_WAIT`
+    // after a pass that took a frame or a message
+    // (`supervisor::note_pass`): a busy one may never be SEEN blocked,
+    // since a tick fired during its syscall lands as it returns to EL0. A
+    // wedged one stays Runnable and never reaches its receive. On a wedge,
+    // restart it on the exact teardown path the fault handler uses.
     for server in TaskIndex::all() {
         let slot = server.index();
         if !crate::supervisor::is_supervised(slot) {

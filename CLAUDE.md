@@ -230,6 +230,7 @@ make test-accountd-restart    # the same for accountd, which must answer `passwd
 make test-cred-client         # the client sends a user credential: served while the user is logged in, refused and its session closed after
 make test-no-identity         # an export with no /etc/cluster/id runs nothing, in either signed format
 make test-net-config          # netd's address from /etc/net: a good file, a refused one and none, each reached where it should be and not elsewhere
+make test-net-flood           # netd lives through a 15 s flood of frames (no server called wedged, HTTP after), and netd spun on NET_WAIT is a wedge
 make test-heap                # the user heap on a booted image
 make test-malloc              # picolibc's malloc on a booted image
 make test-fpsimd              # a task's FP/SIMD registers across the kernel
