@@ -1450,9 +1450,10 @@ own. The entries below stand as they were put.
      **It did, and it is fixed on 2026-11-17** (`genet/receiver-off`; Hans
      chose ignoring pause over turning the receiver off): every
      `Mac::start` sets `CMD_TX_PAUSE_IGNORE` and `CMD_RX_PAUSE_IGNORE`
-     (`UMAC_CMD` bits 28 and 8, cited to Linux's `unimac.h`), which is
-     what Linux writes when no pause was negotiated, and this driver
-     negotiates none. The receiver stays on by design: a full ring now
+     (`UMAC_CMD` bits 28 and 8, cited to Linux's `unimac.h`). Linux sets
+     each bit when its direction was not negotiated
+     (`bcmgenet_mac_config`); this driver reads no pause resolution and
+     sets both. The receiver stays on by design: a full ring now
      drops frames and sends nothing. **Shown on the board with a
      control**, each boot with `netd` left out (`NETD.BIN` renamed),
      the Mac flooding `ping -f` at the Pi with a static ARP entry, and a
@@ -1469,7 +1470,17 @@ own. The entries below stand as they were put.
      see the frames arrive, proved nothing either way and is not
      counted. **Still open:** the frames the full ring drops before
      `netd` runs are lost, which is what a NIC with no reader should do;
-     nothing tells `netd` how many.
+     nothing tells `netd` how many. And whether pause is in fact
+     negotiated has not been read: the PHY keeps its reset-default
+     advertisement (`phy.rs`, `genphy_config_aneg` left out), and neither
+     its `ADVERTISE` nor the partner's `LPA` pause bits (10 and 11) have
+     been logged. If both offer it, the link expects pause honoured and
+     the MAC ignores what the other end sends; a read of the two
+     registers at the link line would settle it (the branch's review,
+     2026-11-17). The firmware's own MAC, on with pause honoured until
+     the kernel quiets it, is left as it is: a window of milliseconds in
+     which the firmware ran the same way before (the review again,
+     declined).
    - *`netd`'s drain loop has no bound and no heartbeat* (`while let
      Some(n) = recv(...)`, and `recv`'s own loop over oversize frames).
      Frames arriving faster than they are handled for 2.56 s would have

@@ -832,9 +832,13 @@ fn start_tells_the_mac_the_speed_then_turns_it_on() {
         d.ops.clear();
         g.start(&mut d, speed, Receiver::On);
         // bcmgenet_adjust_link: OOB_DISABLE (0x20) off, RGMII_LINK and
-        // RGMII_MODE_EN on, then ID_MODE_DIS; the speed, with pause ignored
-        // both ways (CMD_PAUSE_IGNORE, Linux's with no pause negotiated); receive done
-        // cleared and unmasked (bcmgenet_rx_ring16_int_enable); the enables.
+        // RGMII_MODE_EN on, then ID_MODE_DIS; the speed, with pause
+        // ignored both ways (CMD_PAUSE_IGNORE: without it a ring nobody
+        // drained had the MAC send pause frames for good, read on the
+        // board on 2026-11-17); receive done cleared and unmasked
+        // (bcmgenet_rx_ring16_int_enable); the enables. Every write to
+        // UMAC_CMD here carries PAUSE, at every speed, and the test below
+        // pins the same with the receiver off.
         assert_eq!(
             d.ops,
             [W(0x8c, 0x50), W(0x8c, 0x0001_0050), W(0x808, word), W(IRQ_CLEAR, RX_DONE), W(IRQ_MASK_CLEAR, RX_DONE), W(0x808, word | 3)]
@@ -902,29 +906,6 @@ fn a_second_start_changes_the_speed_and_leaves_the_mac_on() {
     // The MAC was never off on the way: every write to it had both enables.
     let cmds: Vec<u32> = d.writes().iter().filter(|w| w.0 == UMAC_CMD).map(|w| w.1).collect();
     assert_eq!(cmds, [0x7 | PAUSE, 0x7 | PAUSE]);
-}
-
-/// The board's finding of 2026-11-17: with pause not ignored, a ring
-/// nobody drained had the MAC send pause frames for good. Every start
-/// ignores it both ways, whatever the speed or the receiver, and the
-/// first start too.
-#[test]
-fn every_start_ignores_pause_both_ways() {
-    for (speed, receiver) in [
-        (Speed::S1000, Receiver::On),
-        (Speed::S100, Receiver::Off),
-        (Speed::S10, Receiver::On),
-    ] {
-        let mut d = board();
-        let mut g = Genet::init(&mut d, RX_BASE).unwrap();
-        let before = d.writes().len();
-        g.start(&mut d, speed, receiver);
-        assert_eq!(d.reg(UMAC_CMD) & PAUSE, PAUSE, "{speed:?} {receiver:?}");
-        // And from the start's first write to the register, the one with
-        // the speed: the MAC is never on without them.
-        let cmds: Vec<u32> = d.writes()[before..].iter().filter(|w| w.0 == UMAC_CMD).map(|w| w.1).collect();
-        assert!(!cmds.is_empty() && cmds.iter().all(|c| c & PAUSE == PAUSE), "{cmds:x?}");
-    }
 }
 
 // ---- the receive interrupt (the plan's step 9) ----

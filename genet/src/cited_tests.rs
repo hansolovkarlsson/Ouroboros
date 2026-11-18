@@ -6,10 +6,12 @@
 //! `drivers/net/ethernet/broadcom/genet/bcmgenet.h` (L) and
 //! `include/uapi/linux/mii.h` (M), U-Boot `v2024.10`
 //! `drivers/net/phy/broadcom.c` (B), and Linux `v6.6`
-//! `drivers/net/ethernet/broadcom/unimac.h` (N, since 2026-11-17). The line numbers were checked against
-//! those files by a script on 2026-11-13, and again with step 9's rows on
-//! 2026-11-16 (each line holds a `#define` of the name); the files are not
-//! in this tree, so the test below checks the values and not the lines.
+//! `drivers/net/ethernet/broadcom/unimac.h` (N, since 2026-11-17). The
+//! line numbers were checked against those files by a script on
+//! 2026-11-13, again with step 9's rows on 2026-11-16, and the two N rows
+//! on 2026-11-17 (each line holds a `#define` of the name); the files are
+//! not in this tree, so the test below checks the values and not the
+//! lines.
 
 use crate::mac::*;
 use crate::phy::*;

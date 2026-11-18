@@ -69,6 +69,10 @@
 //!   transmit DMA until after the MAC's reset.
 //! - A received frame shorter than an Ethernet header, or longer than the
 //!   maximum the device was told, is dropped, whatever the device says.
+//! - Every start ignores pause both ways ([`CMD_PAUSE_IGNORE`], from
+//!   Linux's `unimac.h`). U-Boot writes neither bit, and with nobody
+//!   draining the ring the MAC then sent pause frames for good (read on
+//!   the board, 2026-11-17).
 //!
 //! **What this does not do:** it writes nothing to the PHY (that is
 //! `phy::setup`, the plan's step 4b), and it does not tell the MAC the
@@ -125,9 +129,14 @@ pub const CMD_LCL_LOOP_EN: u32 = 1 << 15;
 /// `CMD_RX_PAUSE_IGNORE` and `CMD_TX_PAUSE_IGNORE`, `UMAC_CMD` bits 8 and
 /// 28 (Linux `v6.6`, `drivers/net/ethernet/broadcom/unimac.h`): the MAC
 /// takes no notice of pause frames received, and sends none. Linux sets
-/// both whenever pause was not negotiated (`bcmmii.c`,
-/// `bcmgenet_mii_setup`); this driver negotiates none, and U-Boot writes
-/// neither, so the MAC was left free to send them, and did: with nobody
+/// each direction's bit when that direction was not negotiated
+/// (`bcmmii.c`, `bcmgenet_mac_config`, from `phy_get_pause` and the
+/// ethtool overrides), and both at half duplex. This driver reads no
+/// pause resolution and sets both. Whether the PHY's reset-default
+/// advertisement offers pause has not been read, so pause may in fact be
+/// negotiated, and then the MAC ignores what the other end sends
+/// (`roadmap-pi-net.md`, step 7, still open). U-Boot writes neither bit,
+/// so the MAC was left free to send pause frames, and did: with nobody
 /// draining the ring it sent about 30 a second for as long as the board
 /// was up (2026-11-17, 10365 in six minutes, the MAC's own count).
 pub const CMD_RX_PAUSE_IGNORE: u32 = 1 << 8;
@@ -645,7 +654,7 @@ impl Genet {
     /// the interrupt as it is.
     ///
     /// **Pause is ignored both ways ([`CMD_PAUSE_IGNORE`]), as Linux sets
-    /// it with pause not negotiated:** a ring nobody drains (before `netd`
+    /// it for a direction not negotiated:** a ring nobody drains (before `netd`
     /// runs, past its restart cap, after a halt) then drops what arrives
     /// and asks nothing of the link's other end. Without it the MAC sent
     /// pause frames for as long as the ring stayed full. Written with the

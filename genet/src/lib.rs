@@ -18,8 +18,10 @@
 //!
 //! **Where each number comes from.** Every register offset and bit here was
 //! read in U-Boot's `drivers/net/bcmgenet.c` (the driver for this board's
-//! GENET) or in Linux's `drivers/net/ethernet/broadcom/genet/bcmgenet.h`
-//! and `bcmgenet.c`, and each constant's doc names which. The files read
+//! GENET), in Linux's `drivers/net/ethernet/broadcom/genet/bcmgenet.h`
+//! and `bcmgenet.c`, or, for the two pause bits, in Linux's
+//! `drivers/net/ethernet/broadcom/unimac.h`, and each constant's doc
+//! names which. The files read
 //! were U-Boot's at tag `v2024.10` and Linux's at `v6.6`, and
 //! `cited_tests.rs` carries the line of each constant in them. The absolute
 //! offsets are those files' block offset plus register offset, added here.
