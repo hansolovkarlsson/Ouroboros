@@ -344,6 +344,17 @@ const RTO_MIN_TICKS: u64 = 10; // 200ms, == RTO_POLL_MS
 const RTO_MAX_TICKS: u64 = 100; // 2s
 const RTO_MAX_RETRIES: u8 = 5;
 const RTO_POLL_MS: u64 = 200;
+
+/// The most frames one pass of `serve`'s loop takes off the NIC before it
+/// serves its mailbox and timers and goes back to `NET_WAIT`. Linux's NAPI
+/// budget (`NAPI_POLL_WEIGHT`, 64). Unbounded, the drain never ended while
+/// frames kept coming: on the Pi, a 15 s UDP flood from the Mac had the
+/// supervisor call `netd` wedged four times and give up on it for the boot
+/// (boot 42, 2026-11-17), since a pass that never ends never reaches the
+/// wait that tells the supervisor `netd` is alive (`NET_WAIT` notes
+/// progress, as `MSG_RECV` does). `recv` skips at most as many frames too
+/// long for its buffer, for the same reason.
+const DRAIN_BUDGET: usize = 64;
 /// A tick in microseconds (`MONOTONIC_US`'s unit), for converting an
 /// estimated RTO in µs to `now()` ticks.
 const TICK_US: u64 = 20_000;
@@ -912,8 +923,11 @@ fn serve(packed_mac: u64) -> ! {
 
         // 2. Incoming frames: ARP replies, parked remote mounts, dial-out
         // connections, and the TCP server.
+        // At most `DRAIN_BUDGET` a pass: what is left waits for the next,
+        // which `NET_WAIT` starts at once.
         if packed_mac != syscall_abi::NET_ERROR {
-            while let Some(n) = recv(&mut t.frame) {
+            for _ in 0..DRAIN_BUDGET {
+                let Some(n) = recv(&mut t.frame) else { break };
                 on_frame(&mac, &t.frame[..n], &mut t.conns, &mut t.dials, &mut t.remotes, &mut t.sessions, &t.auth, &t.held);
             }
             // Answer every parked remote mount and session verb whose reply is
@@ -8882,10 +8896,10 @@ fn send(frame: &[u8]) -> Result<(), ()> {
 /// buffer it was cut to (up to `NET_MAX_FRAME`, 2036, against the 1600
 /// bytes every caller here passes). A frame that long is none this stack
 /// sends or expects: it is dropped whole, not handed on cut, and the next
-/// one is asked for. The kernel has taken each frame it answers for, so
-/// the loop ends when none waits.
+/// one is asked for, [`DRAIN_BUDGET`] of them at most: past that this says
+/// `None`, and the frames still waiting are the next pass's.
 fn recv(buf: &mut [u8]) -> Option<usize> {
-    loop {
+    for _ in 0..DRAIN_BUDGET {
         let r = syscall4(syscall_abi::NET_RECV, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0);
         if r == syscall_abi::NET_NO_FRAME || r == syscall_abi::NET_ERROR {
             return None;
@@ -8894,6 +8908,7 @@ fn recv(buf: &mut [u8]) -> Option<usize> {
             return Some(r as usize);
         }
     }
+    None
 }
 
 /// Reply to a client `MSG_CALL` (or ack the supervisor ping) with `data`;

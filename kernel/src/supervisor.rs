@@ -106,7 +106,8 @@ const MAX_RESTARTS: u32 = 3;
 /// `Blocked(recv)` in far less than one tick), while still recovering a
 /// genuine wedge promptly. Tunable. A busy server may never be SEEN
 /// blocked, though (the tick lands when it returns to EL0), so reaching
-/// `msg_recv` also resets the count: [`note_progress`].
+/// `msg_recv` also resets the count, and so does `netd` reaching
+/// `NET_WAIT`, its loop's one wait: [`note_progress`].
 const WEDGE_TICKS: u32 = 128;
 
 /// How often (in ticks) the active ping pokes a server that's been sitting
@@ -408,10 +409,11 @@ pub fn note_ack(slot: usize) {
 }
 
 /// Record that `slot` is back at its receive: the `MSG_RECV` arm calls
-/// this on entry, before it takes or waits for a message. Clears the
-/// passive counter only: a server that calls its blocking receive has
-/// finished its last request, and a server wedged in a loop never gets
-/// there. `MSG_TRY_RECV` does not call it, since `netd` polls that from
+/// this on entry, before it takes or waits for a message, and the
+/// `NET_WAIT` arm likewise, the receive at the top of `netd`'s loop.
+/// Clears the passive counter only: a server that calls its blocking
+/// receive has finished its last request, and a server wedged in a loop
+/// never gets there. `MSG_TRY_RECV` does not call it, since `netd` polls that from
 /// inside its own long loops, where taking a message says nothing about
 /// the loop.
 ///

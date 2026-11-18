@@ -2135,6 +2135,14 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
             if !net_access_allowed() {
                 return syscall_abi::NET_ERROR;
             }
+            // The network server back at its loop's wait has finished a
+            // pass: progress, for the wedge heartbeat, as at `MSG_RECV`.
+            // Under a flood this returns at once and `netd` is never seen
+            // blocked; without the note a server that kept up, pass after
+            // bounded pass, was called wedged at 2.56 s (the Pi, boot 42,
+            // 2026-11-17: `netd`'s `DRAIN_BUDGET`). A no-op for a task the
+            // supervisor does not manage.
+            crate::supervisor::note_progress(tasks::current_task());
             // arg0 = timeout in milliseconds (0 = block indefinitely). A
             // nonzero timeout also wakes the caller once it elapses with no
             // input - the timer the network server's TCP retransmit timeout
