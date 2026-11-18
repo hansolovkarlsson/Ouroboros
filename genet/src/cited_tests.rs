@@ -9,7 +9,7 @@
 //! `drivers/net/ethernet/broadcom/unimac.h` (N, since 2026-11-17). The
 //! line numbers were checked against those files by a script on
 //! 2026-11-13, again with step 9's rows on 2026-11-16, and the two N rows
-//! on 2026-11-17, and the four pause rows on 2026-11-18 (each line holds a
+//! on 2026-11-17, and the five pause rows on 2026-11-18 (each line holds a
 //! `#define` of the name); the files are
 //! not in this tree, so the test below checks the values and not the
 //! lines.
@@ -153,6 +153,7 @@ const CITED: &[(&str, u64, u64, Src, u32)] = &[
     ("ADVERTISE_PAUSE_ASYM", PAUSE_ASYM as u64, 0x0800, M, 84),
     ("LPA_PAUSE_CAP", PAUSE_CAP as u64, 0x0400, M, 106),
     ("LPA_PAUSE_ASYM", PAUSE_ASYM as u64, 0x0800, M, 107),
+    ("LPA_LPACK", LPA_LPACK as u64, 0x4000, M, 110),
     ("MIIM_BCM54xx_AUXCNTL", BCM_AUXCNTL as u64, 0x18, B, 12),
     ("MIIM_BCM54xx_AUXSTATUS", BCM_AUXSTATUS as u64, 0x19, B, 14),
     ("MIIM_BCM54xx_AUXSTATUS_LINKMODE_MASK", BCM_AUXSTATUS_LINKMODE_MASK as u64, 0x0700, B, 15),

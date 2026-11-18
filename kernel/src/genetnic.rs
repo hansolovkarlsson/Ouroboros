@@ -31,7 +31,8 @@
 //! rule in `genet::linkask`), so a cable put in later is heard within
 //! about a second whether or not the board sends. That asking is up to
 //! three MDIO reads under the kernel lock, and each read may poll for
-//! 20 ms on a bus that does not answer. The wait stops asking after three
+//! 20 ms on a bus that does not answer; the ask that finds the link up
+//! makes two more once the MAC is on, for the pause line. The wait stops asking after three
 //! asks running fail to read; a send does not remember that the last one
 //! failed (open in the plan's step 6).
 //!
@@ -522,7 +523,7 @@ pub(crate) unsafe fn init(quieted: Quieted, dma_noncoherent: bool) -> Option<Dev
     );
     // The MDIO scan's version gate reads the version alone.
     match device.bring_up_phy(&genet::Registers { sys_rev, ..genet::Registers::default() }) {
-        Some(speed) => device.start(speed),
+        Some((speed, full)) => device.start(speed, full),
         None => console::println!(
             "Ouroboros kernel: genet: no link read as up at a speed, so the MAC is left off: a send asks the link again{}",
             if device.phy.is_some() { "" } else { " (it cannot: no PHY was set up, so nothing will be sent)" }
@@ -540,23 +541,33 @@ impl Device {
     /// both ways: `0x1000010b` at 1000 Mb/s on the board) and `UMAC_MDF_CTRL` (the
     /// destination filters the firmware left on; this driver sets none,
     /// as U-Boot sets none).
-    fn start(&mut self, speed: Speed) {
+    ///
+    /// Then, with the MAC on, the pause line ([`Device::say_pause`]): what
+    /// the link agreed against what `UMAC_CMD` does. `full` is the link's
+    /// duplex, which pause turns on.
+    fn start(&mut self, speed: Speed, full: bool) {
         self.genet.start(&mut self.bus, speed, Receiver::On);
+        let cmd = genet::Bus::read(&mut self.bus, genet::reg::UMAC_CMD);
         console::println!(
             "Ouroboros kernel: genet: the MAC's transmitter and receiver are on at {} Mb/s (UMAC_CMD {:#010x}, UMAC_MDF_CTRL {:#010x}): frames are sent, and received on the receive interrupt and the tick's poll",
             speed.mbps(),
-            genet::Bus::read(&mut self.bus, genet::reg::UMAC_CMD),
+            cmd,
             genet::Bus::read(&mut self.bus, genet::reg::UMAC_MDF_CTRL)
         );
+        self.say_pause(cmd, full);
     }
 
     /// Says what each end of the link advertises of pause, what that
-    /// agrees, and that the MAC ignores it anyway: two MDIO reads, nothing
-    /// written, once a link comes up. The answer to #480's review, which
-    /// found that the MAC's pause bits were set without this ever having
-    /// been read (`genet::phy::pause`). A read that fails says so and
-    /// changes nothing: the MAC starts either way.
-    fn say_pause(&mut self, addr: u8, full: bool) {
+    /// agrees, and what the MAC does, read off `cmd` (`UMAC_CMD` as read
+    /// after the start, `genet::mac::pause_in_cmd`), not assumed: two MDIO
+    /// reads, nothing written, once, after the MAC is on, from whichever
+    /// path started it (the boot, a wait or a send). The answer to #480's
+    /// review, which found the MAC's pause bits set without either end's
+    /// advertisement ever read (`genet::phy::pause`). Both registers are
+    /// printed whole. A partner whose page was not received (`LPA_LPACK`
+    /// clear) is said to be unheard, not to offer no pause. A read that
+    /// fails says so and changes nothing.
+    fn say_pause(&mut self, cmd: u32, full: bool) {
         fn offered(bits: u16) -> &'static str {
             match (bits & phy::PAUSE_CAP != 0, bits & phy::PAUSE_ASYM != 0) {
                 (false, false) => "no pause",
@@ -565,25 +576,39 @@ impl Device {
                 (true, true) => "symmetric and asymmetric pause",
             }
         }
-        match phy::pause(&mut self.bus, addr) {
-            Ok(p) => {
-                let a = p.agreed(full);
-                console::println!(
-                    "Ouroboros kernel: genet: pause: this end advertises {}, the partner {} (ADVERTISE {:#06x}, LPA {:#06x}, bits 10 and 11); the link agrees {}; the MAC ignores pause both ways, {}",
-                    offered(p.ours),
-                    offered(p.theirs),
-                    p.ours,
-                    p.theirs,
-                    match (a.send, a.honour) {
-                        (true, true) => "to pause both ways",
-                        (true, false) => "that this end sends pause and does not honour it",
-                        (false, true) => "that this end honours pause and does not send it",
-                        (false, false) => "to no pause",
-                    },
-                    if a.send || a.honour { "NOT as the link agreed" } else { "as the link agreed" }
-                );
+        fn what(a: phy::Agreed) -> &'static str {
+            match (a.send, a.honour) {
+                (true, true) => "pause both ways",
+                (true, false) => "sending pause and not honouring it",
+                (false, true) => "honouring pause and not sending it",
+                (false, false) => "no pause",
             }
-            Err(e) => console::println!("Ouroboros kernel: genet: pause: the advertisements did not read ({e:?})"),
+        }
+        let Some((addr, _)) = self.phy else {
+            return;
+        };
+        let does = genet::mac::pause_in_cmd(cmd);
+        match phy::pause(&mut self.bus, addr) {
+            Ok(p) => match p.agreed(full) {
+                Some(agreed) => console::println!(
+                    "Ouroboros kernel: genet: pause: this end advertises {}, the partner {} (ADVERTISE {:#06x}, LPA {:#06x}); the link agrees {}, the MAC does {}: {}",
+                    offered(p.ours()),
+                    offered(p.theirs()),
+                    p.advertise,
+                    p.lpa,
+                    what(agreed),
+                    what(does),
+                    if agreed == does { "as agreed" } else { "NOT as agreed" }
+                ),
+                None => console::println!(
+                    "Ouroboros kernel: genet: pause: this end advertises {}, the partner's page was not received (ADVERTISE {:#06x}, LPA {:#06x}, bit 14 clear): nothing agreed; the MAC does {}",
+                    offered(p.ours()),
+                    p.advertise,
+                    p.lpa,
+                    what(does)
+                ),
+            },
+            Err(e) => console::println!("Ouroboros kernel: genet: pause: the advertisements did not read ({e:?}); the MAC does {}", what(does)),
         }
     }
 
@@ -591,7 +616,7 @@ impl Device {
     /// the link: the speed of a link that is up, `None` for anything
     /// else. Whatever happens, the device stays installed: without a
     /// link nothing is started, and the address still answers.
-    fn bring_up_phy(&mut self, registers: &genet::Registers) -> Option<Speed> {
+    fn bring_up_phy(&mut self, registers: &genet::Registers) -> Option<(Speed, bool)> {
         let Some(scan) = genet::phys(&mut self.bus, registers) else {
             console::println!("Ouroboros kernel: genet: the MDIO scan refused the version: no PHY, link unknown");
             return None;
@@ -679,8 +704,7 @@ impl Device {
                     speed.mbps(),
                     if full { "full" } else { "half" }
                 );
-                self.say_pause(addr, full);
-                return Some(speed);
+                return Some((speed, full));
             }
             Ok(Link::Down) => console::println!("Ouroboros kernel: genet: link down (waited {LINK_WAIT_MS} ms)"),
             Ok(Link::Negotiating) => console::println!("Ouroboros kernel: genet: link still negotiating (waited {LINK_WAIT_MS} ms)"),
@@ -720,7 +744,8 @@ impl Device {
     /// 2. A MAC not started is a boot that found no link. The link is
     ///    asked for once in this send, with no wait for it to come up (up
     ///    to three MDIO reads, each of which may poll for 20 ms on a bus
-    ///    that does not answer), and the MAC started if it is up
+    ///    that does not answer, and two more after the start when it is
+    ///    up), and the MAC started if it is up
     ///    (decision D3); otherwise the send is refused, and a link that
     ///    did not read at all has a line, once. Every send asks again
     ///    while the MAC is not started.
@@ -863,7 +888,8 @@ impl Device {
 
     /// Asks the PHY for the link once, with no wait for it to come up (up
     /// to three MDIO reads, each of which may poll for 20 ms on a bus that
-    /// does not answer), and starts the MAC if it is up, with a line
+    /// does not answer), and starts the MAC if it is up (and then two
+    /// reads more, once, for [`Device::say_pause`]), with a line
     /// naming `who` asked. `Ok(true)` when the MAC is started, by this ask
     /// or before it; `Ok(false)` for a link not up, or no PHY to ask. The
     /// one rule for asking after the boot's wait (decision D3), for a send
@@ -882,8 +908,7 @@ impl Device {
                     speed.mbps(),
                     if full { "full" } else { "half" }
                 );
-                self.say_pause(addr, full);
-                self.start(speed);
+                self.start(speed, full);
                 Ok(true)
             }
             _ => Ok(false),
@@ -905,8 +930,9 @@ impl Device {
     /// The wait is where `netd` comes back to, as step 9's rearm is.
     ///
     /// **Asks that fail stop it**, three running (`linkask`'s rule), with a
-    /// line: a stuck bus costs 20 ms a read, up to three reads an ask,
-    /// under the kernel lock. A send still asks as before.
+    /// line: a stuck bus costs 20 ms a read, up to three reads an ask
+    /// that fails, under the kernel lock (five on the one ask that finds
+    /// the link up). A send still asks as before.
     pub(crate) fn link_at_wait(&mut self) -> Option<u64> {
         // `ask_link` asks these too; here they decide whether the wait is
         // limited at all, since with no PHY there is nothing to come back for.

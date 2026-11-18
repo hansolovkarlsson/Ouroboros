@@ -72,14 +72,15 @@
 //! - Every start ignores pause both ways ([`CMD_PAUSE_IGNORE`], from
 //!   Linux's `unimac.h`). U-Boot writes neither bit, and with nobody
 //!   draining the ring the MAC then sent pause frames for good (read on
-//!   the board, 2026-11-17).
+//!   the board, 2026-11-17). What the link agreed is read
+//!   (`phy::pause`) and compared ([`pause_in_cmd`]), not obeyed.
 //!
 //! **What this does not do:** it writes nothing to the PHY (that is
 //! `phy::setup`, the plan's step 4b), and it does not tell the MAC the
 //! duplex (U-Boot does not either: a half-duplex link runs with the MAC at
 //! full).
 
-use crate::phy::Speed;
+use crate::phy::{Agreed, Speed};
 use crate::{mac, mac_usable, reg, version, Bus, CMD_RX_EN, CMD_TX_EN, DMA_EN, MAJOR_V5};
 
 /// Descriptors in each direction, `TOTAL_DESCS` (U-Boot), all given to
@@ -131,11 +132,11 @@ pub const CMD_LCL_LOOP_EN: u32 = 1 << 15;
 /// takes no notice of pause frames received, and sends none. Linux sets
 /// each direction's bit when that direction was not negotiated
 /// (`bcmmii.c`, `bcmgenet_mac_config`, from `phy_get_pause` and the
-/// ethtool overrides), and both at half duplex. This driver reads no
-/// pause resolution and sets both. Whether the PHY's reset-default
-/// advertisement offers pause has not been read, so pause may in fact be
-/// negotiated, and then the MAC ignores what the other end sends
-/// (`roadmap-pi-net.md`, step 7, still open). U-Boot writes neither bit,
+/// ethtool overrides), and both at half duplex. This driver sets both
+/// whatever was negotiated. What the link agreed is read since
+/// 2026-11-18 (`phy::pause`) and logged by the kernel against this
+/// register as it reads after the start ([`pause_in_cmd`]); it does not
+/// change what is written (`roadmap-pi-net.md`, step 7). U-Boot writes neither bit,
 /// so the MAC was left free to send pause frames, and did: with nobody
 /// draining the ring it sent about 30 a second for as long as the board
 /// was up (2026-11-17, 10365 in six minutes, the MAC's own count).
@@ -143,6 +144,14 @@ pub const CMD_RX_PAUSE_IGNORE: u32 = 1 << 8;
 pub const CMD_TX_PAUSE_IGNORE: u32 = 1 << 28;
 /// Both, as [`Genet::start`] writes them.
 pub const CMD_PAUSE_IGNORE: u32 = CMD_RX_PAUSE_IGNORE | CMD_TX_PAUSE_IGNORE;
+/// What a `UMAC_CMD` value does with pause, read off its two ignore bits:
+/// a clear [`CMD_TX_PAUSE_IGNORE`] sends pause, a clear
+/// [`CMD_RX_PAUSE_IGNORE`] honours it. For comparing with what the link
+/// agreed (`phy::Pause::agreed`) from the register as it is, not from
+/// what [`Genet::start`] is believed to write.
+pub fn pause_in_cmd(cmd: u32) -> Agreed {
+    Agreed { send: cmd & CMD_TX_PAUSE_IGNORE == 0, honour: cmd & CMD_RX_PAUSE_IGNORE == 0 }
+}
 /// `CMD_SPEED_SHIFT` (U-Boot): where `UMAC_CMD` takes a [`Speed`].
 pub const CMD_SPEED_SHIFT: u32 = 2;
 /// `MIB_RESET_RX`, `_RUNT`, `_TX` (U-Boot), together.
