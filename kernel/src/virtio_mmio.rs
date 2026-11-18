@@ -193,7 +193,7 @@ impl<const LEN: usize> Config<LEN> {
     /// # Safety
     /// The kernel's identity map installed, as for [`find_device`].
     pub(crate) unsafe fn read<const OFF: usize>(&self) -> u32 {
-        const { assert!(OFF % 4 == 0 && OFF + 4 <= LEN, "a config read past the length find_device checked") };
+        const { assert!(OFF.is_multiple_of(4) && OFF + 4 <= LEN, "a config read past the length find_device checked") };
         unsafe { read_volatile((self.base as usize + REG_CONFIG + OFF) as *const u32) }
     }
 }
@@ -204,7 +204,7 @@ impl<const LEN: usize> Config<LEN> {
 /// # Safety
 /// `base` must be a mapped virtio-mmio transport.
 pub(crate) unsafe fn read_reg<const OFF: usize>(base: u64) -> u32 {
-    const { assert!(OFF % 4 == 0 && OFF < REG_CONFIG, "a register, not config space") };
+    const { assert!(OFF.is_multiple_of(4) && OFF < REG_CONFIG, "a register, not config space") };
     unsafe { read_volatile((base as usize + OFF) as *const u32) }
 }
 
@@ -213,6 +213,6 @@ pub(crate) unsafe fn read_reg<const OFF: usize>(base: u64) -> u32 {
 /// # Safety
 /// `base` must be a mapped virtio-mmio transport.
 pub(crate) unsafe fn write_reg<const OFF: usize>(base: u64, value: u32) {
-    const { assert!(OFF % 4 == 0 && OFF < REG_CONFIG, "a register, not config space") };
+    const { assert!(OFF.is_multiple_of(4) && OFF < REG_CONFIG, "a register, not config space") };
     unsafe { write_volatile((base as usize + OFF) as *mut u32, value) }
 }
