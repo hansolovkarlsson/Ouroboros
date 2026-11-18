@@ -1491,8 +1491,18 @@ own. The entries below stand as they were put.
      whichever path started it (the boot, a wait or a send), with both
      registers whole and the verdict "as agreed" or "NOT as agreed"
      taken from `UMAC_CMD` as read, not from what the start is believed
-     to write (the branch's review). **The board's answer is not read
-     yet:** the line has not booted on the Pi. The firmware's own MAC, on with pause honoured until
+     to write (the branch's review). **The board's answer, 2026-11-18**
+     (`ad5798c7067e`, debug, boot 45, the Mac's USB adapter at the other
+     end): `this end advertises no pause, the partner symmetric and
+     asymmetric pause (ADVERTISE 0x01e1, LPA 0xdde1); the link agrees no
+     pause, the MAC does no pause: as agreed`. The PHY's reset-default
+     advertisement offers no pause, so ignoring it both ways is what the
+     link agreed, and the question is closed. It stays closed only while
+     the advertisement does: a set-up that made the PHY offer pause
+     would turn the line to "NOT as agreed" on its first boot. The same
+     boot was #482's first on the board: no exception, fault or restart,
+     `netd` up from `/etc/net`, frames received; no frame past 1600
+     bytes was sent, so `NET_FRAME_CUT` itself is still unseen there. The firmware's own MAC, on with pause honoured until
      the kernel quiets it, is left as it is: a window of milliseconds in
      which the firmware ran the same way before (the review again,
      declined).
