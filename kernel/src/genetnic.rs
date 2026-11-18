@@ -910,7 +910,8 @@ impl Device {
     /// Takes one received frame if a usable one waits: copies it into
     /// `out`, cut to `out`'s length, gives its buffer back to the device,
     /// and returns the frame's own length (14 to
-    /// `genet::mac::RX_MAX_FRAME`). Under the kernel lock, with no wait.
+    /// `genet::mac::RX_MAX_FRAME`), which can be more than `out`'s
+    /// (`Nic::poll_frame` makes that a dropped frame). Under the kernel lock, with no wait.
     ///
     /// A frame the crate refuses (not whole, flagged by the device, too
     /// short or too long) is released by the crate and the next one

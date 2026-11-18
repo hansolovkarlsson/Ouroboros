@@ -29,8 +29,15 @@ dumps every frame to a pcap. The checks:
    wedged and restart it, and the fresh `netd` answer HTTP. Before the
    review of the fix every `NET_WAIT` was progress, and this spin was never
    caught.
-5. No fault line in QEMU's trace.
-6. **The flood was offered to the guest:** the pcap holds at least
+5. **`NET_RECV` never answers a length past the buffer:** the guest's
+   shell pings 192.0.2.249, on which the rig's build asks `NET_RECV` for
+   a frame with a 16-byte buffer, shorter than any frame, after an ARP
+   request that brings one. The answer must be `NET_FRAME_CUT`, and never
+   the frame's own length, which before 2026-11-18 it was, and which only
+   `netd`'s clamp kept from being read past its buffer (Pi net step 7's
+   left-open item). Done before the spin, on the first `netd`.
+6. No fault line in QEMU's trace.
+7. **The flood was offered to the guest:** the pcap holds at least
    `MIN_FLOOD` datagrams to port 9. QEMU's filter-dump writes a frame as
    the network hands it to the guest's NIC, before the NIC's receive queue,
    so this counts frames offered, not taken; it shows the flood was there,
@@ -74,6 +81,7 @@ COPY = os.path.join(ROOT, "build", "net-flood.img")
 RIG_NETD = os.environ.get("NETD_RESTART_BIN")
 RIG_LINE = "of 192.0.2.252 spins it at NET_WAIT"
 EMPTY_SPIN = "192.0.2.252"
+CUT_PROBE = "192.0.2.249"
 PCAP = os.path.join(ROOT, "build", "net-flood.pcap")
 PORT_UDP, PORT_HTTP = 5665, 5666
 # Six times WEDGE_TICKS (2.56 s): on `main` the first wedge came within it.
@@ -188,6 +196,14 @@ def main():
             # progress, so netd spinning on NET_WAIT is called wedged.
             check(RIG_LINE in text, "netd is the restart rig's build, with the NET_WAIT spin")
             logged_in = g.run([("login:", "root"), ("assword", "root"), ("# ", "")])
+            # A frame longer than the buffer is answered NET_FRAME_CUT.
+            mark = len(g.transcript())
+            g.type_line(f"ping {CUT_PROBE}")
+            said = logged_in and g.wait_for("netd: rig: NET_RECV into 16 bytes", timeout=20)
+            g.wait_for("# ", timeout=10)
+            line = next((l.strip() for l in g.transcript()[mark:].splitlines() if "netd: rig: NET_RECV" in l), "none")
+            check(said and "answered NET_FRAME_CUT" in line,
+                  f"NET_RECV into a buffer shorter than the frame answers NET_FRAME_CUT, not a length ({line!r})")
             mark = len(g.transcript())
             g.type_line(f"ping {EMPTY_SPIN}")
             spun = logged_in and g.wait_for("server slot 4 restarted", timeout=40)
