@@ -1885,8 +1885,16 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
             // Not progress for the wedge heartbeat, even with a message:
             // `netd` drains its mailbox with this from inside its own long
             // loops, so a message taken here says nothing about whether the
-            // loop is still advancing (the review of #211).
-            tasks::try_recv_message(tasks::current_task(), arg0, arg1).unwrap_or(syscall_abi::NO_MSG)
+            // loop is still advancing (the review of #211). It marks the
+            // pass, which is progress only when the pass gets back to
+            // `NET_WAIT` (`supervisor::note_input`, `note_pass`).
+            match tasks::try_recv_message(tasks::current_task(), arg0, arg1) {
+                Some(packed) => {
+                    crate::supervisor::note_input(tasks::current_task());
+                    packed
+                }
+                None => syscall_abi::NO_MSG,
+            }
         }
         syscall_abi::MSG_CALL => {
             let dest = arg0 as usize;
@@ -2130,7 +2138,7 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
                 Some(len) => {
                     // A frame taken: the pass it is in ends in progress
                     // (`supervisor::note_pass`, at `NET_WAIT`).
-                    crate::supervisor::note_frame(tasks::current_task());
+                    crate::supervisor::note_input(tasks::current_task());
                     len as u64
                 }
                 None => syscall_abi::NET_NO_FRAME,

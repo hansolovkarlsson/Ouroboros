@@ -8,9 +8,10 @@ came back to `NET_WAIT`, and the supervisor, which saw it `Runnable` for
 `WEDGE_TICKS` with no progress, called it wedged. On the Pi a 15 s UDP flood
 from the Mac had it restarted three times and given up on for the boot
 (boot 42, 2026-11-17). The fix is two halves, each needed: a pass takes at
-most `DRAIN_BUDGET` frames, and `NET_WAIT` notes progress for the supervisor
-as `MSG_RECV` does (under a flood it returns at once, so `netd` is never
-seen blocked).
+most `DRAIN_BUDGET` frames, and `NET_WAIT` is progress for the supervisor
+when the pass that ended there took a frame or a message
+(`supervisor::note_pass`; under a flood it returns at once, so `netd` is
+never seen blocked).
 
 One boot of the FAT32 image. The host floods the guest's port 9 with small
 UDP datagrams through a forwarded port for `FLOOD_S` seconds, the cheapest
@@ -24,14 +25,18 @@ dumps every frame to a pcap. The checks:
 4. **And the other half:** the guest's shell pings 192.0.2.252, on which
    `netd`'s restart-rig build (its serve loop the shipped one) loops on
    `NET_WAIT` and reads nothing. Once the supervisor's ping is queued every
-   wait returns at once and takes no frame, so the supervisor must call it
+   wait returns at once and takes nothing, so the supervisor must call it
    wedged and restart it, and the fresh `netd` answer HTTP. Before the
    review of the fix every `NET_WAIT` was progress, and this spin was never
    caught.
 5. No fault line in QEMU's trace.
-6. **The flood reached the guest:** the pcap holds at least `MIN_FLOOD`
-   datagrams to port 9. Without it the checks above pass on a flood that
-   never arrived.
+6. **The flood was offered to the guest:** the pcap holds at least
+   `MIN_FLOOD` datagrams to port 9. QEMU's filter-dump writes a frame as
+   the network hands it to the guest's NIC, before the NIC's receive queue,
+   so this counts frames offered, not taken; it shows the flood was there,
+   without which the checks above pass on one that never arrived. That the
+   load reached `netd` is what the controls show: the same flood wedges it
+   on `main`.
 
 A boot the firmware never started is graded as the other rigs grade one
 (`drive_qemu.boot_stalled`): INCONCLUSIVE, and FAIL once it is every run's.
@@ -122,7 +127,8 @@ def flood(secs):
 
 
 def port9_datagrams(path):
-    """The pcap's IPv4 UDP frames to port 9: what reached the guest's NIC.
+    """The pcap's IPv4 UDP frames to port 9: what was offered to the guest's
+    NIC (filter-dump writes before its receive queue).
     QEMU's filter-dump writes the classic format, little-endian, Ethernet."""
     data = open(path, "rb").read()
     if len(data) < 24 or struct.unpack_from("<I", data, 0)[0] != 0xA1B2C3D4:
@@ -204,7 +210,7 @@ def main():
     check(faults == 0, f"no fault lines in QEMU's trace ({faults})")
     if booted:
         reached = port9_datagrams(PCAP)
-        check(reached >= MIN_FLOOD, f"the flood reached the guest: {reached} datagrams to port 9 in the pcap, at least {MIN_FLOOD}")
+        check(reached >= MIN_FLOOD, f"the flood was offered to the guest: {reached} datagrams to port 9 in the pcap, at least {MIN_FLOOD}")
     return drive_qemu.verdict("test-net-flood", sum(1 for ok, _ in checks if not ok), 0)
 
 

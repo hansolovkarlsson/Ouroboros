@@ -108,7 +108,7 @@ const MAX_RESTARTS: u32 = 3;
 /// blocked, though (the tick lands when it returns to EL0), so reaching
 /// `msg_recv` also resets the count ([`note_progress`]), and so does
 /// `netd` reaching `NET_WAIT`, its loop's one wait, after a pass that
-/// took a frame ([`note_pass`]).
+/// took a frame or a message ([`note_pass`]).
 const WEDGE_TICKS: u32 = 128;
 
 /// How often (in ticks) the active ping pokes a server that's been sitting
@@ -158,10 +158,10 @@ struct Entry {
     /// Ticks the server has sat `Blocked` with no ping outstanding; vs
     /// [`PING_INTERVAL`], the poke cadence.
     idle_ticks: u32,
-    /// A frame taken off the NIC since the server's last `NET_WAIT`
-    /// ([`note_frame`]): what makes that wait a pass's end, for
-    /// [`note_pass`].
-    took_frame: bool,
+    /// Input taken since the server's last `NET_WAIT`, a frame off the
+    /// NIC or a message out of its mailbox ([`note_input`]): what makes
+    /// that wait the end of a pass that did something, for [`note_pass`].
+    took_input: bool,
 }
 
 impl Entry {
@@ -175,7 +175,7 @@ impl Entry {
             ping_outstanding: false,
             ping_wait: 0,
             idle_ticks: 0,
-            took_frame: false,
+            took_input: false,
         }
     }
 
@@ -186,7 +186,7 @@ impl Entry {
         self.ping_outstanding = false;
         self.ping_wait = 0;
         self.idle_ticks = 0;
-        self.took_frame = false;
+        self.took_input = false;
     }
 }
 
@@ -442,25 +442,31 @@ pub fn note_progress(slot: usize) {
     }
 }
 
-/// Record that `slot` took a frame off the NIC: the `NET_RECV` arm calls
-/// this for every frame it hands over. Changes no count; it marks the
-/// pass, so the server's next `NET_WAIT` is progress ([`note_pass`]). A
-/// no-op for an unregistered slot.
-pub fn note_frame(slot: usize) {
+/// Record that `slot` took input: the `NET_RECV` arm calls this for every
+/// frame it hands over, and the `MSG_TRY_RECV` arm for every message.
+/// Changes no count; it marks the pass, so the server's next `NET_WAIT` is
+/// progress ([`note_pass`]). A message counts as a frame does: a stream of
+/// them with no frame (a `cpu` command's output, say) keeps `NET_WAIT`
+/// returning at once just as a flood does (the branch's second review).
+/// Marking is not progress, so a long loop that takes messages from inside
+/// a pass (`netd`'s waits) gains nothing until the pass ends. A no-op for
+/// an unregistered slot.
+pub fn note_input(slot: usize) {
     let reg = unsafe { &mut *REGISTRY.get() };
     if let Some(e) = reg.entries.iter_mut().find(|e| e.slot == Some(slot)) {
-        e.took_frame = true;
+        e.took_input = true;
     }
 }
 
 /// Record that `slot` is back at `NET_WAIT`, the wait at the top of
 /// `netd`'s loop: progress ([`note_progress`]) when the pass that ended
-/// here took a frame ([`note_frame`]), and nothing otherwise. Under a
+/// here took a frame or a message ([`note_input`]), and nothing
+/// otherwise. Under a
 /// flood `NET_WAIT` returns at once and `netd` is never seen `Blocked`,
 /// so without this a server keeping up, pass after bounded pass, was
 /// called wedged at [`WEDGE_TICKS`]: QEMU's `make test-net-flood` with
 /// the note taken out, as `main`'s unbounded drain was on the Pi (boot
-/// 42, 2026-11-17). Only a pass that took a frame counts, so a server
+/// 42, 2026-11-17). Only a pass that took input counts, so a server
 /// spinning through passes that take nothing (a wake that never clears)
 /// is still restarted, as it was before (the branch's review). A no-op
 /// for an unregistered slot.
@@ -469,7 +475,7 @@ pub fn note_pass(slot: usize) {
     let Some(e) = reg.entries.iter_mut().find(|e| e.slot == Some(slot)) else {
         return;
     };
-    if core::mem::take(&mut e.took_frame) {
+    if core::mem::take(&mut e.took_input) {
         e.runnable_ticks = 0;
     }
 }

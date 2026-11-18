@@ -1494,8 +1494,11 @@ own. The entries below stand as they were put.
      too long for its buffer (each `NET_RECV` counted against the pass's
      budget, `recv`'s own skip bounded apart), and the kernel's `NET_WAIT`
      is progress for the supervisor when the pass that ended there took a
-     frame (`supervisor::note_pass`, marked by `NET_RECV`'s
-     `note_frame`): under a flood it returns at once and `netd` is never
+     frame or a message (`supervisor::note_pass`, marked by `NET_RECV` and
+     `MSG_TRY_RECV` through `note_input`; messages since the second
+     review, which found a stream of them with no frame, a `cpu`
+     command's output say, wedged `netd` just as a flood did, on `main`
+     as well): under a flood it returns at once and `netd` is never
      seen blocked. A wedge inside a pass is still caught, since that pass
      never reaches the wait; and so is a spin through passes that take
      nothing, which the first version, noting progress at every
@@ -1518,12 +1521,18 @@ own. The entries below stand as they were put.
      call it wedged and restart it. Controlled: `main` failed it with 4
      wedges and 3 restarts and no HTTP after, and so did the fix with
      either half taken out, the drain unbounded or the note at `NET_WAIT`
-     removed, and with `note_frame` never marking a pass; with every
+     removed, and with `note_input` never marking a pass; with every
      `NET_WAIT` progress, the first version's rule, the flood passed and
      the spin was never restarted. **Still
-     open:** the fix on the board; and under a flood `netd` serves its
+     open:** the fix on the board; under a flood `netd` serves its
      clients between passes but drops what the full ring drops, its own
-     connections' frames among them.
+     connections' frames among them; the message half of `note_input` is
+     checked by reading and by the `cpu` rigs still passing, since no rig
+     drives 2.56 s of messages with no frame; and the budget counts
+     frames, not time, so 64 frames each costing 40 ms would still wedge
+     `netd` (none measured near that; the second review, declined).
+     Declined too: the registry looked up for every frame taken (four
+     entries, under the lock `NET_RECV` already holds).
    - *`NET_RECV` still returns a length longer than the buffer it
      filled*, and the clamp is in `netd`'s one `recv`. A second caller
      would meet the trap again; the kernel returning the copied length,

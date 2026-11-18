@@ -882,7 +882,8 @@ fn load_auth() -> Auth {
 /// as the ack). The passive heartbeat sees a healthy server `Blocked` in
 /// `NET_WAIT` between bursts; under a flood it is never blocked, and what
 /// says it is alive then is coming back to `NET_WAIT` from a pass that took
-/// a frame (`supervisor::note_pass` in the kernel). A pass that never ends
+/// a frame or a message (`supervisor::note_pass` in the kernel). A pass
+/// that never ends
 /// never comes back, which is why the drain is bounded.
 fn serve(packed_mac: u64) -> ! {
     let mac = if packed_mac == syscall_abi::NET_ERROR {

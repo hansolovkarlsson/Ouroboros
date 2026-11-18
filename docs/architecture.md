@@ -315,9 +315,9 @@ filesystem:
   through a large `cp` that way. One request longer than the wedge time
   is still a wedge. Since 2026-11-17 `netd` reaching `NET_WAIT`, the wait
   at the top of its loop, clears it too, when the pass that ended there
-  took a frame (`supervisor::note_pass`): under a flood `NET_WAIT`
-  returns at once and `netd`, keeping up a bounded pass at a time, is
-  never seen blocked. A pass that took nothing does not count, so a
+  took a frame or a message (`supervisor::note_pass`): under a flood
+  `NET_WAIT` returns at once and `netd`, keeping up a bounded pass at a
+  time, is never seen blocked. A pass that took nothing does not count, so a
   `netd` spinning on a wake that never clears is still a wedge.
 
 The client whose call the server died under gets a cleanly failed call
