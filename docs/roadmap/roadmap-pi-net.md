@@ -1491,10 +1491,17 @@ own. The entries below stand as they were put.
      `netd`'s loop and over a heartbeat alone). A pass of `serve`'s loop
      takes at most `DRAIN_BUDGET` frames (64, Linux's NAPI weight) before
      it serves its mailbox and timers, `recv` skips at most as many frames
-     too long for its buffer, and the kernel's `NET_WAIT` notes progress
-     for the supervisor as `MSG_RECV` does: under a flood it returns at
-     once and `netd` is never seen blocked. A wedge inside a pass is still
-     caught, since that pass never reaches the wait. **Seen on the board
+     too long for its buffer (each `NET_RECV` counted against the pass's
+     budget, `recv`'s own skip bounded apart), and the kernel's `NET_WAIT`
+     is progress for the supervisor when the pass that ended there took a
+     frame (`supervisor::note_pass`, marked by `NET_RECV`'s
+     `note_frame`): under a flood it returns at once and `netd` is never
+     seen blocked. A wedge inside a pass is still caught, since that pass
+     never reaches the wait; and so is a spin through passes that take
+     nothing, which the first version, noting progress at every
+     `NET_WAIT`, would never have restarted (the branch's review; under
+     it the supervisor's ping never fires either, since `netd` is never
+     `Blocked`). **Seen on the board
      first, as the control** (`main`, `5f43c89044e3`, boot 42): `curl`
      answered 200, then `scratch/udp_flood.py` sent small UDP datagrams
      from the Mac for 15 s. About 65,000 frames in, `server slot 4 wedged
@@ -1505,9 +1512,15 @@ own. The entries below stand as they were put.
      test-net-flood` floods a forwarded UDP port for 15 s and checks that
      no server is called wedged, that `netd` answers HTTP after, and that
      the pcap holds at least 50,000 of the datagrams (it held 1.7 to 2.0
-     million). Controlled: `main` failed it with 4 wedges and 3 restarts
-     and no HTTP after, and so did the fix with either half taken out,
-     the drain unbounded or the note at `NET_WAIT` removed. **Still
+     million). It boots `netd`'s restart-rig build, whose serve loop is
+     the shipped one, and then pings 192.0.2.252 from the guest, on which
+     that build loops on `NET_WAIT` reading nothing: the supervisor must
+     call it wedged and restart it. Controlled: `main` failed it with 4
+     wedges and 3 restarts and no HTTP after, and so did the fix with
+     either half taken out, the drain unbounded or the note at `NET_WAIT`
+     removed, and with `note_frame` never marking a pass; with every
+     `NET_WAIT` progress, the first version's rule, the flood passed and
+     the spin was never restarted. **Still
      open:** the fix on the board; and under a flood `netd` serves its
      clients between passes but drops what the full ring drops, its own
      connections' frames among them.
