@@ -1889,3 +1889,65 @@ fn for_another_phy_the_resolved_link_is_the_advertised_one() {
     assert_eq!(link_resolved(&mut d, 1, 0x0022_1622), Ok(Link::Up { speed: Speed::S1000, full: true }));
     assert!(!d.mdio_log.contains(&(false, 0x19, 0)));
 }
+
+#[test]
+fn pause_is_read_from_both_advertisements_and_writes_nothing() {
+    // The model's defaults: neither end offers pause (bits 10 and 11
+    // clear), the partner's other bits set.
+    let mut d = bcm();
+    assert_eq!(pause(&mut d, 1), Ok(Pause { ours: 0, theirs: 0 }));
+    assert_eq!(d.mdio_log, [(false, 4, 0), (false, 5, 0)]);
+    // Each register's own two bits, and only those.
+    let mut d = bcm();
+    d.phy_regs[4] |= PAUSE_CAP;
+    d.phy_regs[5] |= PAUSE_CAP | PAUSE_ASYM;
+    assert_eq!(pause(&mut d, 1), Ok(Pause { ours: PAUSE_CAP, theirs: PAUSE_CAP | PAUSE_ASYM }));
+    let mut d = bcm();
+    d.phy_regs[4] = PAUSE_ASYM;
+    d.phy_regs[5] = 0;
+    assert_eq!(pause(&mut d, 1), Ok(Pause { ours: PAUSE_ASYM, theirs: 0 }));
+    for (offset, value) in d.writes() {
+        assert!(scan_write_allowed(offset, value));
+    }
+}
+
+#[test]
+fn a_pause_register_of_all_ones_is_no_answer() {
+    for r in [4, 5] {
+        let mut d = bcm();
+        d.phy_regs[r] = 0xffff;
+        assert_eq!(pause(&mut d, 1), Err(MdioError::NoAnswer), "register {r}");
+    }
+    let mut d = bcm();
+    d.mdio_ones = true;
+    assert_eq!(pause(&mut d, 2), Err(MdioError::NoAnswer));
+}
+
+#[test]
+fn pause_agreed_is_ieee_table_28b_3() {
+    // IEEE 802.3 Table 28B-3, written as the table and not as Linux's
+    // `if` chain: (our PAUSE, our ASM_DIR, their PAUSE, their ASM_DIR)
+    // to (this end sends, this end honours). Every row of the sixteen.
+    let table = |lp: bool, la: bool, rp: bool, ra: bool| match (lp, la, rp, ra) {
+        (true, _, true, _) => (true, true),
+        (false, true, true, true) => (true, false),
+        (true, true, false, true) => (false, true),
+        _ => (false, false),
+    };
+    let bits = |p: bool, a: bool| if p { PAUSE_CAP } else { 0 } | if a { PAUSE_ASYM } else { 0 };
+    let mut rows = 0;
+    for n in 0..16u8 {
+        let [lp, la, rp, ra] = [n & 8 != 0, n & 4 != 0, n & 2 != 0, n & 1 != 0];
+        let p = Pause { ours: bits(lp, la), theirs: bits(rp, ra) };
+        let (send, honour) = table(lp, la, rp, ra);
+        assert_eq!(p.agreed(true), Agreed { send, honour }, "{p:?}");
+        // Half duplex has no pause, whatever both ends offer.
+        assert_eq!(p.agreed(false), Agreed { send: false, honour: false }, "{p:?}");
+        rows += 1;
+    }
+    assert_eq!(rows, 16);
+    // The three outcomes that are not "none" each happen.
+    assert_eq!(Pause { ours: PAUSE_CAP, theirs: PAUSE_CAP }.agreed(true), Agreed { send: true, honour: true });
+    assert_eq!(Pause { ours: PAUSE_ASYM, theirs: PAUSE_CAP | PAUSE_ASYM }.agreed(true), Agreed { send: true, honour: false });
+    assert_eq!(Pause { ours: PAUSE_CAP | PAUSE_ASYM, theirs: PAUSE_ASYM }.agreed(true), Agreed { send: false, honour: true });
+}

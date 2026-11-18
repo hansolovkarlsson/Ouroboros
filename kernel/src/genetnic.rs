@@ -550,6 +550,43 @@ impl Device {
         );
     }
 
+    /// Says what each end of the link advertises of pause, what that
+    /// agrees, and that the MAC ignores it anyway: two MDIO reads, nothing
+    /// written, once a link comes up. The answer to #480's review, which
+    /// found that the MAC's pause bits were set without this ever having
+    /// been read (`genet::phy::pause`). A read that fails says so and
+    /// changes nothing: the MAC starts either way.
+    fn say_pause(&mut self, addr: u8, full: bool) {
+        fn offered(bits: u16) -> &'static str {
+            match (bits & phy::PAUSE_CAP != 0, bits & phy::PAUSE_ASYM != 0) {
+                (false, false) => "no pause",
+                (true, false) => "symmetric pause",
+                (false, true) => "asymmetric pause",
+                (true, true) => "symmetric and asymmetric pause",
+            }
+        }
+        match phy::pause(&mut self.bus, addr) {
+            Ok(p) => {
+                let a = p.agreed(full);
+                console::println!(
+                    "Ouroboros kernel: genet: pause: this end advertises {}, the partner {} (ADVERTISE {:#06x}, LPA {:#06x}, bits 10 and 11); the link agrees {}; the MAC ignores pause both ways, {}",
+                    offered(p.ours),
+                    offered(p.theirs),
+                    p.ours,
+                    p.theirs,
+                    match (a.send, a.honour) {
+                        (true, true) => "to pause both ways",
+                        (true, false) => "that this end sends pause and does not honour it",
+                        (false, true) => "that this end honours pause and does not send it",
+                        (false, false) => "to no pause",
+                    },
+                    if a.send || a.honour { "NOT as the link agreed" } else { "as the link agreed" }
+                );
+            }
+            Err(e) => console::println!("Ouroboros kernel: genet: pause: the advertisements did not read ({e:?})"),
+        }
+    }
+
     /// Finds the PHY, sets it up when it is one the crate knows, and logs
     /// the link: the speed of a link that is up, `None` for anything
     /// else. Whatever happens, the device stays installed: without a
@@ -642,6 +679,7 @@ impl Device {
                     speed.mbps(),
                     if full { "full" } else { "half" }
                 );
+                self.say_pause(addr, full);
                 return Some(speed);
             }
             Ok(Link::Down) => console::println!("Ouroboros kernel: genet: link down (waited {LINK_WAIT_MS} ms)"),
@@ -844,6 +882,7 @@ impl Device {
                     speed.mbps(),
                     if full { "full" } else { "half" }
                 );
+                self.say_pause(addr, full);
                 self.start(speed);
                 Ok(true)
             }

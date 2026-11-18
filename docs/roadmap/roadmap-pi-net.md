@@ -1480,7 +1480,15 @@ own. The entries below stand as they were put.
      been logged. If both offer it, the link expects pause honoured and
      the MAC ignores what the other end sends; a read of the two
      registers at the link line would settle it (the branch's review,
-     2026-11-17). The firmware's own MAC, on with pause honoured until
+     2026-11-17). **The read is in on 2026-11-18** (`genet/pause-bits`):
+     `genet::phy::pause` reads both registers' bits 10 and 11 (two MDIO
+     reads, nothing written), `Pause::agreed` resolves them by Linux's
+     `mii_resolve_flowctrl_fdx` (host-tested against IEEE 802.3 Table
+     28B-3, all sixteen rows, each half of it mutated), and the kernel
+     logs `genet: pause: ...` after each `link up` line, at boot and at a
+     wait, ending "NOT as the link agreed" when the link agreed to any
+     pause. **The board's answer is not read yet:** the line has not
+     booted on the Pi. The firmware's own MAC, on with pause honoured until
      the kernel quiets it, is left as it is: a window of milliseconds in
      which the firmware ran the same way before (the review again,
      declined).
