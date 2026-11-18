@@ -1889,3 +1889,87 @@ fn for_another_phy_the_resolved_link_is_the_advertised_one() {
     assert_eq!(link_resolved(&mut d, 1, 0x0022_1622), Ok(Link::Up { speed: Speed::S1000, full: true }));
     assert!(!d.mdio_log.contains(&(false, 0x19, 0)));
 }
+
+#[test]
+fn pause_is_both_registers_whole_and_writes_nothing() {
+    // The model's defaults: neither end offers pause (bits 10 and 11
+    // clear), the partner's page acknowledged (bit 14).
+    for (adv, lpa) in [(0x01e1, 0xc1e1), (0x01e1 | PAUSE_CAP, 0xc1e1 | PAUSE_CAP | PAUSE_ASYM), (PAUSE_ASYM, 0)] {
+        let mut d = bcm();
+        d.phy_regs[4] = adv;
+        d.phy_regs[5] = lpa;
+        let p = pause(&mut d, 1).unwrap();
+        assert_eq!(p, Pause { advertise: adv, lpa });
+        assert_eq!(p.ours(), adv & (PAUSE_CAP | PAUSE_ASYM));
+        assert_eq!(p.theirs(), lpa & (PAUSE_CAP | PAUSE_ASYM));
+        assert_eq!(d.mdio_log, [(false, 4, 0), (false, 5, 0)]);
+        for (offset, value) in d.writes() {
+            assert!(scan_write_allowed(offset, value), "{adv:#06x} {lpa:#06x}");
+        }
+    }
+}
+
+#[test]
+fn a_pause_register_of_all_ones_is_no_answer() {
+    for r in [4, 5] {
+        let mut d = bcm();
+        d.phy_regs[r] = 0xffff;
+        assert_eq!(pause(&mut d, 1), Err(MdioError::NoAnswer), "register {r}");
+    }
+    let mut d = bcm();
+    d.mdio_ones = true;
+    assert_eq!(pause(&mut d, 2), Err(MdioError::NoAnswer));
+}
+
+#[test]
+fn pause_agreed_is_ieee_table_28b_3() {
+    // IEEE 802.3 Table 28B-3, written as the table and not as Linux's
+    // `if` chain: (our PAUSE, our ASM_DIR, their PAUSE, their ASM_DIR)
+    // to (this end sends, this end honours). Every row of the sixteen.
+    let table = |lp: bool, la: bool, rp: bool, ra: bool| match (lp, la, rp, ra) {
+        (true, _, true, _) => (true, true),
+        (false, true, true, true) => (true, false),
+        (true, true, false, true) => (false, true),
+        _ => (false, false),
+    };
+    let bits = |p: bool, a: bool| if p { PAUSE_CAP } else { 0 } | if a { PAUSE_ASYM } else { 0 };
+    for n in 0..16u8 {
+        let [lp, la, rp, ra] = [n & 8 != 0, n & 4 != 0, n & 2 != 0, n & 1 != 0];
+        // Other bits set in both registers, the partner's page heard.
+        let p = Pause { advertise: 0x01e1 | bits(lp, la), lpa: 0xc1e1 | bits(rp, ra) };
+        let (send, honour) = table(lp, la, rp, ra);
+        assert_eq!(p.agreed(true), Some(Agreed { send, honour }), "{p:?}");
+        // Half duplex has no pause, whatever both ends offer.
+        assert_eq!(p.agreed(false), Some(Agreed { send: false, honour: false }), "{p:?}");
+    }
+}
+
+#[test]
+fn with_no_partner_page_nothing_is_agreed() {
+    // LPA_LPACK clear: a link up by parallel detection, or a partner that
+    // does not negotiate. Its zeros are not "no pause".
+    for lpa in [0, PAUSE_CAP | PAUSE_ASYM, 0x81e1 | PAUSE_CAP] {
+        let p = Pause { advertise: 0x01e1 | PAUSE_CAP | PAUSE_ASYM, lpa };
+        assert!(!p.heard());
+        assert_eq!(p.agreed(true), None, "{lpa:#06x}");
+        assert_eq!(p.agreed(false), None, "{lpa:#06x}");
+    }
+    assert!(Pause { advertise: 0, lpa: LPA_LPACK }.heard());
+}
+
+#[test]
+fn umac_cmd_says_what_the_mac_does_with_pause() {
+    // Each ignore bit alone, both, neither: the value every start writes
+    // is "none either way".
+    assert_eq!(pause_in_cmd(0x0000_000b), Agreed { send: true, honour: true });
+    assert_eq!(pause_in_cmd(0x1000_000b), Agreed { send: false, honour: true });
+    assert_eq!(pause_in_cmd(0x0000_010b), Agreed { send: true, honour: false });
+    assert_eq!(pause_in_cmd(0x1000_010b), Agreed { send: false, honour: false });
+    // And what start leaves, through the model, at each speed.
+    for speed in [Speed::S10, Speed::S100, Speed::S1000] {
+        let mut d = board();
+        let mut g = Genet::init(&mut d, RX_BASE).unwrap();
+        g.start(&mut d, speed, Receiver::On);
+        assert_eq!(pause_in_cmd(d.reg(UMAC_CMD)), Agreed { send: false, honour: false });
+    }
+}

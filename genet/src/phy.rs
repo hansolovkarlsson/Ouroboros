@@ -82,6 +82,15 @@ pub const LPA_100FULL: u16 = 0x0100;
 pub const LPA_100HALF: u16 = 0x0080;
 pub const LPA_10FULL: u16 = 0x0040;
 pub const LPA_10HALF: u16 = 0x0020;
+/// `ADVERTISE_PAUSE_CAP` and `LPA_PAUSE_CAP`: symmetric pause, the same
+/// bit (10) in `MII_ADVERTISE` and `MII_LPA`.
+pub const PAUSE_CAP: u16 = 0x0400;
+/// `ADVERTISE_PAUSE_ASYM` and `LPA_PAUSE_ASYM`: asymmetric pause, bit 11
+/// of both.
+pub const PAUSE_ASYM: u16 = 0x0800;
+/// `LPA_LPACK`: `MII_LPA` bit 14, the partner acknowledged this end's
+/// page, so the register holds the partner's.
+pub const LPA_LPACK: u16 = 0x4000;
 
 /// A link's speed. The value is the one `UMAC_CMD`'s speed field takes
 /// (U-Boot's `UMAC_SPEED_10`, `_100`, `_1000`).
@@ -422,4 +431,88 @@ pub fn link_resolved<B: Bus>(bus: &mut B, phy: u8, id: u32) -> Result<Link, Mdio
         7 => Link::Up { speed: Speed::S1000, full: true },
         _ => Link::Unresolved,
     })
+}
+
+/// Both ends' advertisements, as read: `MII_ADVERTISE` (`advertise`) and
+/// `MII_LPA` (`lpa`), whole, so the log shows every bit. Their pause
+/// bits are 10 and 11 ([`PAUSE_CAP`], [`PAUSE_ASYM`]) and `lpa`'s bit 14
+/// ([`LPA_LPACK`]) says the partner's page was received at all.
+///
+/// **Why it is read** (#480's review, 2026-11-17): every `Mac::start`
+/// ignores pause both ways, whatever the link agreed. The PHY keeps its
+/// reset-default advertisement (`genphy_config_aneg` is left out, the
+/// module doc), so whether this end offers pause, and whether the
+/// partner does, was never known; the kernel says so after the MAC starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pause {
+    pub advertise: u16,
+    pub lpa: u16,
+}
+
+/// What a link's pause bits agree, for this end; also what `UMAC_CMD`
+/// does (`mac::pause_in_cmd`), so the two compare.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Agreed {
+    /// This end may send pause frames (Linux's `FLOW_CTRL_TX`).
+    pub send: bool,
+    /// This end is to honour the pause frames it receives (`FLOW_CTRL_RX`).
+    pub honour: bool,
+}
+
+impl Pause {
+    /// This end's pause bits alone.
+    pub fn ours(self) -> u16 {
+        self.advertise & (PAUSE_CAP | PAUSE_ASYM)
+    }
+
+    /// The partner's pause bits alone.
+    pub fn theirs(self) -> u16 {
+        self.lpa & (PAUSE_CAP | PAUSE_ASYM)
+    }
+
+    /// Whether `MII_LPA` holds a partner's page ([`LPA_LPACK`]). A link up
+    /// by parallel detection, or a partner that does not autonegotiate,
+    /// leaves `lpa` without one, and its zeros are not "no pause".
+    pub fn heard(self) -> bool {
+        self.lpa & LPA_LPACK != 0
+    }
+
+    /// The resolution, by Linux's `mii_resolve_flowctrl_fdx`
+    /// (`include/linux/mii.h`, `v6.6`, lines 532 to 546), which is IEEE
+    /// 802.3's Table 28B-3. Pause is a full-duplex mechanism: a half-duplex
+    /// link agrees to none (Linux resolves pause only for full duplex).
+    /// `None` when the partner's page was not [`heard`](Self::heard):
+    /// then nothing was agreed either way, and none is made up.
+    pub fn agreed(self, full: bool) -> Option<Agreed> {
+        if !self.heard() {
+            return None;
+        }
+        let (ours, theirs) = (self.ours(), self.theirs());
+        let none = Agreed { send: false, honour: false };
+        Some(if !full {
+            none
+        } else if ours & theirs & PAUSE_CAP != 0 {
+            Agreed { send: true, honour: true }
+        } else if ours & theirs & PAUSE_ASYM != 0 {
+            if ours & PAUSE_CAP != 0 {
+                Agreed { send: false, honour: true }
+            } else if theirs & PAUSE_CAP != 0 {
+                Agreed { send: true, honour: false }
+            } else {
+                none
+            }
+        } else {
+            none
+        })
+    }
+}
+
+/// Reads [`Pause`] from the PHY at `phy`: `MII_ADVERTISE`, then `MII_LPA`,
+/// two reads and nothing written. Either reading all ones is no PHY's
+/// answer ([`MdioError::NoAnswer`]). Meaningful for a link that is up and
+/// negotiated; the caller asks it then.
+pub fn pause<B: Bus>(bus: &mut B, phy: u8) -> Result<Pause, MdioError> {
+    let advertise = mdio_read_driven(bus, phy, PHY_ADVERTISE)?;
+    let lpa = mdio_read_driven(bus, phy, PHY_LPA)?;
+    Ok(Pause { advertise, lpa })
 }
