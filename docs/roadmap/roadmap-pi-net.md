@@ -1523,8 +1523,13 @@ own. The entries below stand as they were put.
      either half taken out, the drain unbounded or the note at `NET_WAIT`
      removed, and with `note_input` never marking a pass; with every
      `NET_WAIT` progress, the first version's rule, the flood passed and
-     the spin was never restarted. **Still
-     open:** the fix on the board; under a flood `netd` serves its
+     the spin was never restarted. **And the fix on the board**
+     (`netd/drain-bound`, `fb7a12cdbeb1`, boot 43, 2026-11-18, by Hans):
+     the same flood, the same 15 s, `curl` answered 200 before and
+     after, and the serial log has no `wedged` and no `restarted` line.
+     The driver's own count passed 720,896 frames received, none dropped
+     by it, where `main` wedged about 65,000 in; the Mac's `en9` counted
+     1.6 million packets out. **Still open:** under a flood `netd` serves its
      clients between passes but drops what the full ring drops, its own
      connections' frames among them; the message half of `note_input` is
      checked by reading and by the `cpu` rigs still passing, since no rig
