@@ -124,6 +124,19 @@ pub enum Link {
     Unresolved,
 }
 
+impl Link {
+    /// The link in a few words, for a log line: the one wording of each
+    /// state, so two lines that name it say the same.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Link::Down => "no link",
+            Link::Negotiating => "negotiating",
+            Link::Up { .. } => "up",
+            Link::Unresolved => "up at a speed the PHY does not name",
+        }
+    }
+}
+
 /// What the status register says before any speed is asked for.
 enum Status {
     /// Not a negotiated link: this is the answer.

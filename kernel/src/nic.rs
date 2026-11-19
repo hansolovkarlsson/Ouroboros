@@ -53,7 +53,7 @@ use crate::virtio_net;
 #[derive(Debug)]
 pub enum Error {
     Virtio(virtio_net::Error),
-    Genet(genet::mac::TxError),
+    Genet(genetnic::SendError),
 }
 
 impl core::fmt::Display for Error {
@@ -115,9 +115,10 @@ impl Nic {
     }
 
     /// Before the reader waits for a frame, and before the rearm: for a
-    /// device whose MAC a boot with no link left off, asks the link and
-    /// starts it if it is up, and says how long the wait may block (in
-    /// ms) so the reader comes back to ask again. `None` for no limit.
+    /// device with a link to ask, asks it once a second and acts on a
+    /// change (up starts the MAC at its speed, down refuses sends until
+    /// it is up again), and says how long the wait may block (in ms) so
+    /// the reader comes back to ask again. `None` for no limit.
     /// virtio-net has no link to ask.
     ///
     /// # Safety

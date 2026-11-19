@@ -2164,10 +2164,10 @@ fn dispatch_locked(number: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, fram
             // message is queued, or the deadline passes; when one is already
             // true it returns at once (asked below, before blocking). Same
             // frame-overwrite blocking contract as READ_CHAR.
-            // A NIC whose link the boot did not find is asked again here
+            // A NIC with a link is asked it here, once a second
             // (`Nic::link_at_wait`), and limits the wait so the reader
-            // comes back to ask: a cable put in later is then heard
-            // whether or not anything is sent.
+            // comes back to ask: a cable put in later, or pulled and put
+            // back, is then heard whether or not anything is sent.
             // SAFETY: under the kernel lock; a device in the cell is one
             // `main.rs` initialized before installing it.
             let cap = match unsafe { &mut *NET.get() } {

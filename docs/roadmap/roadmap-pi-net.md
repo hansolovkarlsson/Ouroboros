@@ -1444,6 +1444,89 @@ own. The entries below stand as they were put.
      warning; `curl` 200 and the ARP entry `d8:3a:dd:85:24:22`. The
      control above stands for both. **Still open:** a link that drops and
      returns is not read again once the MAC is on.
+     **Built on 2026-11-18** (`genet/link-reread`; Hans chose refusing
+     sends while the link is down over a line alone): the wait goes on
+     asking once a second with the MAC on. `genet::linkask::change`
+     (host-tested) says what a read means against the link held: up
+     where none was, or at another speed, sets the MAC at it
+     (`Genet::start` again, which rewrites the speed and keeps the
+     enables), with the link-up and pause lines; up at the same speed
+     and another duplex starts nothing (the MAC is not told the duplex)
+     and says the pause line again; anything not up where one was is
+     `link down at a wait (...)`, and every send is refused (the
+     kernel's `SendError::NoLink`, `NET_ERROR` to `netd`) and asks the
+     link itself until it is up again. The MAC and its receiver stay on
+     through a drop. **The review of the branch** changed the asking's
+     stop: three failed asks running now slow it to once a minute, and
+     a read brings the second back (Hans's choice over letting the link
+     go or keeping the stop), since a stop with the MAC on left a later
+     cable pull unseen for good. Up, the asking costs three MDIO reads a
+     second under the kernel lock, and wakes `netd` once a second for
+     good. **Not seen, by design:** a drop shorter than a second that
+     returns at the same speed and duplex (the link bit's latch is read
+     past, as U-Boot and Linux read it); nothing in the MAC needs
+     changing then. **Not yet on the board.** The check: a cable pulled
+     for several seconds and put back with `netd` serving, then `curl`;
+     a send during the pull, to see whether a frame the device held at
+     the drop leaves the transmitter busy after it (the review asked;
+     on RGMII the MAC drives its own transmit clock, so it is expected
+     to drain, and only the board can say); and if a switch at 100 Mb/s
+     is at hand, a cable moved to it.
+     **Run on the board 2026-11-19, passed** (`289a4baf7afa`, debug,
+     boot 46, by Hans): link up at 1000 Mb/s full duplex at boot, the
+     pause line as boot 45's; the cable pulled, and at the next ask
+     `link down at a wait (no link): sends are refused until it is up
+     again; the MAC stays on`. A `ping 192.168.77.1` during the pull
+     answered `unreachable (no ARP reply)`, the send refused with no
+     busy or timeout line. The cable back: `link up at a wait, 1000 Mb/s,
+     full duplex`, `the MAC, on since before the link dropped, is set
+     again at 1000 Mb/s (UMAC_CMD 0x1000010b ...)` and the pause line;
+     the same ping then had its reply, and the boot's first frame sent
+     (42 bytes, the ARP request) was taken by the device. No `wedged`
+     or `restarted` line. **Not shown by this run:** a frame in the
+     transmitter at the drop, since nothing had been sent before the
+     pull (the first frame sent was after it), so the review's question
+     of a transmitter left busy stays open; the speed change, with no
+     100 Mb/s switch in the run; and `curl` (the ping stands for the
+     path through `netd`).
+     **Its second review, 2026-11-19** (seven findings; five fixed, one
+     left open, one declined): a send's asks did not count toward the
+     back-off, so a send that read the link up left the wait asking once
+     a minute, and after a drop a stuck bus was read on every send. Every
+     ask now tells `linkask` whether it read, and a send does not ask
+     while the asking is backed off (`LinkAsk::backed_off`, host-tested;
+     three mutations of it each failed the tests). That closes step 6's
+     item that nothing remembered a failed read. The restart line said
+     the MAC was "on since before the link dropped" for a speed changed
+     with no drop read between, and says "on at the speed before" there
+     now. The line for a link that did not read at a send was said once
+     a boot, and is once a link. Three docs still said a single run of
+     `say_pause`, or that `Change::Up` covered a change of duplex.
+     **Left open:** a link renegotiated to half duplex runs with the MAC
+     at full duplex, since nothing sets `CMD_HD_EN` (Linux's
+     `bcmgenet_mac_config` does; U-Boot does not). The boot's own start
+     is the same, so it is older than this branch, and only a half-duplex
+     partner on the board can show it. **Declined:** reading the status
+     register once while a link is held, in place of three reads a
+     second. The latched read would see every short drop as down and
+     restart the MAC for it, the thing `phy::status` reads past on
+     purpose. The kernel's half of the fixes is checked by reading and
+     clippy, and its common path on the board (below).
+     **Run on the board again 2026-11-19, passed** (`2cf07036941f`,
+     debug, boot 47, by Hans, the branch's head after its second
+     review): this time a ping before the pull, so the boot's first
+     frame was sent and taken before the link dropped. Two pulls, each
+     the same: `link down at a wait`, a ping during it `unreachable (no
+     ARP reply)`, the cable back, `link up at a wait, 1000 Mb/s, full
+     duplex`, `the MAC, on since before the link dropped, is set again`
+     and the pause line, then a ping with its reply; and `curl` from the
+     Mac returned the page after each. No line of a send refused as busy
+     or of a link that did not read, and no `wedged` or `restarted`.
+     **That answers the review's question:** with a frame sent before the
+     drop, the transmitter was free after it, and the first send after
+     each return was taken. Still not shown: the speed change and its
+     line, and the back-off on a stuck bus, neither of which the board
+     can be made to do with a cable alone.
    - *The receiver is never turned off.* With nobody draining it
      (before `netd` first runs, after `netd` is past its restart cap,
      after the kernel halts) the ring fills and the DMA sits at its
