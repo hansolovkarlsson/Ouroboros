@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+# The one dotted-address parser and formatter (`mount -r`, `cpu`, the mount listing).
+netaddr = { path = "../../netaddr" }
 syscall-abi = { path = "../../syscall-abi" }
 ninep-abi = { path = "../../ninep-abi" }
 accounts = { path = "../../accounts" }

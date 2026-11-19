@@ -788,6 +788,19 @@ fn hex_val(c: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
 
+    /// `netd` reads a `/net/tcp` port and connection number with this
+    /// (since the second review of #490): its own copy wrapped, so a port
+    /// of 18446744073709551696 was 80.
+    #[test]
+    fn parse_dec_refuses_past_u64_and_never_wraps() {
+        assert_eq!(super::parse_dec(b"18446744073709551615"), Some(u64::MAX));
+        assert_eq!(super::parse_dec(b"18446744073709551616"), None);
+        assert_eq!(super::parse_dec(b"18446744073709551696"), None);
+        for bad in [&b""[..], b" 80", b"+80", b"-1", b"8x0"] {
+            assert_eq!(super::parse_dec(bad), None);
+        }
+    }
+
     #[test]
     fn changed_span_finds_the_one_line_a_password_change_touches() {
         // The realistic shape: two accounts, the second one's hash replaced.

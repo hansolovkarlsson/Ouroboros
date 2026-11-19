@@ -6276,52 +6276,6 @@ const DIAL_SYN_TRIES: u8 = 6;
 const DIAL_DATA_TRIES: u8 = 8;
 const DIAL_RETX_WAIT: u64 = 12; // ticks per (re)try
 
-/// Parse a decimal byte string into a `u64` (no sign, no overflow guard beyond
-/// u64). `None` on empty or a non-digit.
-fn parse_dec(b: &[u8]) -> Option<u64> {
-    if b.is_empty() {
-        return None;
-    }
-    let mut v = 0u64;
-    for &d in b {
-        if !d.is_ascii_digit() {
-            return None;
-        }
-        v = v.wrapping_mul(10).wrapping_add((d - b'0') as u64);
-    }
-    Some(v)
-}
-
-/// Parse a dotted-quad IPv4 from bytes (byte-scanning, PIE-safe - no str
-/// range-indexing).
-fn parse_ip4(b: &[u8]) -> Option<[u8; 4]> {
-    let mut octets = [0u8; 4];
-    let mut n = 0usize;
-    let mut start = 0usize;
-    let mut i = 0usize;
-    loop {
-        let at_end = i == b.len();
-        if at_end || b[i] == b'.' {
-            let v = parse_dec(&b[start..i])?;
-            if v > 255 || n >= 4 {
-                return None;
-            }
-            octets[n] = v as u8;
-            n += 1;
-            start = i + 1;
-            if at_end {
-                break;
-            }
-        }
-        i += 1;
-    }
-    if n == 4 {
-        Some(octets)
-    } else {
-        None
-    }
-}
-
 /// Parse a `connect <a.b.c.d>!<port>` ctl command into an endpoint.
 fn parse_connect(data: &[u8]) -> Option<([u8; 4], u16)> {
     const PFX: &[u8] = b"connect ";
@@ -6334,8 +6288,8 @@ fn parse_connect(data: &[u8]) -> Option<([u8; 4], u16)> {
         rest = &rest[..rest.len() - 1];
     }
     let bang = rest.iter().position(|&b| b == b'!')?;
-    let ip = parse_ip4(&rest[..bang])?;
-    let port = parse_dec(&rest[bang + 1..])?;
+    let ip = netaddr::parse_ip(&rest[..bang])?;
+    let port = accounts::parse_dec(&rest[bang + 1..])?;
     if port > u16::MAX as u64 {
         return None;
     }
@@ -6350,7 +6304,7 @@ fn dial_path(sub: &[u8]) -> Option<(usize, &[u8])> {
     }
     let rest = &sub[1..]; // "<N>/<leaf>"
     let slash = rest.iter().position(|&b| b == b'/')?;
-    let n = parse_dec(&rest[..slash])? as usize;
+    let n = accounts::parse_dec(&rest[..slash])? as usize;
     Some((n, &rest[slash + 1..]))
 }
 
@@ -6440,7 +6394,7 @@ fn dial_file_op(
             while !rest.is_empty() && matches!(rest[rest.len() - 1], b'\n' | b'\r' | b' ' | b'\t') {
                 rest = &rest[..rest.len() - 1];
             }
-            let Some(port) = parse_dec(rest).filter(|p| *p <= u16::MAX as u64) else {
+            let Some(port) = accounts::parse_dec(rest).filter(|p| *p <= u16::MAX as u64) else {
                 return (syscall_abi::FS_ERR_INVALID_NAME, 0);
             };
             let c = dials[n].as_mut().unwrap();
@@ -6943,15 +6897,9 @@ fn net_op(verb: u64, fspath: &[u8], offset: u64, want: usize, data_in: &[u8], ou
 /// colon-hex MAC. `None` if `fspath` isn't a `/net` file.
 fn net_content(fspath: &[u8], buf: &mut [u8]) -> Option<usize> {
     if fspath == b"/ip" {
-        let ip = our_ip();
-        let mut n = 0;
-        for (i, octet) in ip.iter().enumerate() {
-            if i > 0 {
-                buf[n] = b'.';
-                n += 1;
-            }
-            n += u64_decimal(*octet as u64, &mut buf[n..]);
-        }
+        let mut text = [0u8; netaddr::IP_TEXT_MAX];
+        let n = netaddr::format_ip(&our_ip(), &mut text);
+        buf[..n].copy_from_slice(&text[..n]);
         buf[n] = b'\n';
         Some(n + 1)
     } else if fspath == b"/mac" {

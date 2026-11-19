@@ -94,37 +94,8 @@ fn unicast(ip: Ip) -> bool {
     ip != [0; 4] && ip[0] != 0 && ip[0] != 127 && ip[0] < 224
 }
 
-/// Four decimal numbers of 0 to 255 with single dots between, and nothing
-/// else: no sign, no space, no empty part, at most three digits a part.
-pub fn parse_ip(word: &[u8]) -> Option<Ip> {
-    let mut ip = [0u8; 4];
-    let mut part = 0;
-    let mut digits = 0;
-    let mut value = 0u32;
-    for &b in word {
-        match b {
-            b'0'..=b'9' => {
-                digits += 1;
-                value = value * 10 + u32::from(b - b'0');
-                if digits > 3 || value > 255 {
-                    return None;
-                }
-            }
-            b'.' if digits > 0 && part < 3 => {
-                ip[part] = value as u8;
-                part += 1;
-                digits = 0;
-                value = 0;
-            }
-            _ => return None,
-        }
-    }
-    if part != 3 || digits == 0 {
-        return None;
-    }
-    ip[3] = value as u8;
-    Some(ip)
-}
+// A dotted address by `netaddr`'s rules, the one parser (its doc).
+use netaddr::parse_ip;
 
 fn blank(b: u8) -> bool {
     b == b' ' || b == b'\t' || b == b'\r'

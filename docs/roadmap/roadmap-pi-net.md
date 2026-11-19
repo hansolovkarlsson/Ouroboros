@@ -1937,7 +1937,31 @@ own. The entries below stand as they were put.
      leaves the defaults, and nothing reads either file again.
    - *Three parsers of a dotted address serve `netd`:* `netconf`'s,
      `clusterkeys::parse_ip` with the same rules, and `netd`'s own
-     `parse_ip4`. One crate holding one is the change.
+     `parse_ip4`. One crate holding one is the change. **Done
+     2026-11-19** (`netd/one-ip-parser`, #490): a crate of its own,
+     `netaddr`, holds the one parser (`parse_ip`) and its formatter
+     (`format_ip`); `netconf`, `clusterkeys` and the `clusterkey`
+     tool, `netd`, the shell and `ping` call it. There were five parsers
+     with four sets of rules, not three: `netd`'s took any digits a part
+     and wrapped (`18446744073709551617.0.0.1` was `1.0.0.1`, and a
+     `connect` port of 18446744073709551696 was 80), and the shell's and
+     `ping`'s any leading zeros, which `mount -r`, `cpu` and `ping` now
+     refuse past three digits (`shell-commands.md`). **Its review** found
+     the first version's tests could not fail (`netconf`'s parser had
+     always refused the wrapping input; the wrap was `netd`'s, and
+     untested), and that it put the one parser in `/etc/net`'s crate, tying
+     the cluster's identity files, the shell and `ping` to it; `netaddr`
+     is below them all, with no re-export. `netd`'s decimals are read by
+     `accounts::parse_dec`, the checked reader it already linked (a second
+     review found the first fix had copied it into `netaddr`), whose new
+     test of the wrap fails with wrapping arithmetic put back, as
+     `netaddr`'s fails without the three-digit limit. `netd`'s `/net/ip` and the shell's
+     mount listing format through `format_ip`. The shell's and `ulib`'s
+     `parse_u64` stay theirs: on `&str`, already checked, and for every
+     number a command takes. `test-net-config` (`ping`),
+     `test-mount-points` (`mount -r`), `test-run-silent` (`cpu`) and
+     `test-no-identity` (`/etc/cluster/authorized`) passed. No rig sends
+     a `/net/tcp` `connect`.
    - *The ext2 root's place in the image* is written out in three rigs
      now (`test-no-identity.py`, `test-net-config.py` and
      `mkext2.py`, which decides it).

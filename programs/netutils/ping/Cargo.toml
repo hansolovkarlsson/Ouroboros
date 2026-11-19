@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+# The one dotted-address parser.
+netaddr = { path = "../../../netaddr" }
 syscall-abi = { path = "../../../syscall-abi" }
 ulib = { path = "../../../ulib" }
 

@@ -318,7 +318,7 @@ add llvm-tools` for `llvm-objcopy` (the Makefile's `OBJCOPY` comment says why).
 
 The kernel and userland programs have no unit test suite; the **pure crates**
 (`accounts`, `regex`, `ed25519`, `clusterkeys`, `ninep-abi`, `keyseq`,
-`parttable`, `amlscan`, `heldkeys`, `genet`, `netconf`) do, and `make test` runs them with the host-side checks. Such a
+`parttable`, `amlscan`, `heldkeys`, `genet`, `netconf`, `netaddr`) do, and `make test` runs them with the host-side checks. Such a
 crate is a workspace member but not a default-member, so until something
 depends on it `cargo build`, `make build` and `make esp` stay green while it
 is broken: run `make test` before pushing anything that touches one.
@@ -509,6 +509,8 @@ genet/               the Pi 4's Ethernet, Broadcom GENET v5: the logic that need
 netconf/             netd's network configuration: the /etc/net file (address, mask, gateway, dns; a file with a line not
                      understood is refused whole), the values with no file (QEMU user networking's, as netd always held), and
                      the next hop for a target. netd is the one caller; host-tested in make test
+netaddr/             an IPv4 address as text: THE ONE dotted-address parser (parse_ip) and formatter (format_ip). netconf,
+                     clusterkeys and the clusterkey tool, netd, the shell and ping call it; no dependencies; host-tested in make test
 heldkeys/            netd's held user keys: the table, whose key signs for a parked request, and when a run sent under one ends; liveness
                      is passed in, so the rules that turn on a login dead and not yet reaped run on the host. netd is the one caller
 keyseq/              tells a key's escape sequence (ESC [ A) from ordinary input: the ONE filter every keyboard reader uses
@@ -527,8 +529,8 @@ scripts/             test-parallels.sh (real-hardware smoke test), drive-qemu.py
                      FOREIGN OBSERVER for both directions of the export)
 ```
 
-Eighty-one-crate workspace (`cargo metadata`'s count, 2026-11-15). `kernel` and the shared libs (`ulib`,
-`syscall-abi`, `ninep-abi`, `accounts`, `regex`, `ed25519`, `clusterkeys`, `heldkeys`, `keyseq`, `parttable`, `amlscan`, `genet`, `netconf`, `nsresolve`) sit at the repo root; **every userland
+Eighty-two-crate workspace (`cargo metadata`'s count, 2026-11-19). `kernel` and the shared libs (`ulib`,
+`syscall-abi`, `ninep-abi`, `accounts`, `regex`, `ed25519`, `clusterkeys`, `heldkeys`, `keyseq`, `parttable`, `amlscan`, `genet`, `netconf`, `netaddr`, `nsresolve`) sit at the repo root; **every userland
 program lives under `programs/`, grouped by role** (`programs/shell`,
 `programs/servers/{fsd,cond,netd,accountd}`, `programs/demos/{hello,pong}`,
 `programs/fileutils/*`, `programs/textutils/*`, `programs/netutils/*`,

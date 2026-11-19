@@ -10,39 +10,6 @@
 #![no_std]
 #![no_main]
 
-/// Parse a dotted-quad IPv4 (`10.0.2.2`) into its four octets. Hand-rolled
-/// byte-by-byte (no `str::split`) - relocation-safe, from the shell's original.
-fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
-    let mut out = [0u8; 4];
-    let mut idx = 0;
-    let mut val: u32 = 0;
-    let mut digits = 0;
-    for &c in s.as_bytes() {
-        if c == b'.' {
-            if digits == 0 || idx >= 3 {
-                return None;
-            }
-            out[idx] = val as u8;
-            idx += 1;
-            val = 0;
-            digits = 0;
-        } else if c.is_ascii_digit() {
-            val = val * 10 + (c - b'0') as u32;
-            if val > 255 {
-                return None;
-            }
-            digits += 1;
-        } else {
-            return None;
-        }
-    }
-    if digits == 0 || idx != 3 {
-        return None;
-    }
-    out[3] = val as u8;
-    Some(out)
-}
-
 /// Print an error to the console (stderr), close the stdout stream (a no-op for
 /// the console, an empty end-of-stream for a capture), and exit non-zero.
 fn fail(msg: &[u8], target: u64) -> ! {
@@ -58,11 +25,14 @@ pub extern "C" fn _start() -> ! {
     let target = ulib::stdout_target();
 
     let mut argbuf = [0u8; 32];
-    let ip = match ulib::arg(1, &mut argbuf) {
-        Some(len) if len > 0 => core::str::from_utf8(&argbuf[..len]).unwrap_or(""),
+    let len = match ulib::arg(1, &mut argbuf) {
+        Some(len) if len > 0 => len,
         _ => fail(b"ping: usage: ping <a.b.c.d>\r\n", target),
     };
-    let Some(target_ip) = parse_ipv4(ip) else {
+    // The address as typed, for the reply lines; parse_ip has refused
+    // anything but digits and dots.
+    let ip = &argbuf[..len];
+    let Some(target_ip) = netaddr::parse_ip(ip) else {
         fail(b"ping: usage: ping <a.b.c.d>\r\n", target);
     };
 
@@ -89,18 +59,18 @@ pub extern "C" fn _start() -> ! {
     match status {
         syscall_abi::NET_PING_OK => {
             ulib::write_out(target, b"reply from ");
-            ulib::write_out(target, ip.as_bytes());
+            ulib::write_out(target, ip);
             ulib::write_out(target, b"\r\n");
             ulib::end_of_stream(target);
             ulib::exit(0);
         }
         syscall_abi::NET_PING_TIMEOUT => {
             ulib::con_write(b"no reply from ");
-            ulib::con_write(ip.as_bytes());
+            ulib::con_write(ip);
             fail(b" (timeout)\r\n", target);
         }
         syscall_abi::NET_PING_NO_ARP => {
-            ulib::con_write(ip.as_bytes());
+            ulib::con_write(ip);
             fail(b" is unreachable (no ARP reply)\r\n", target);
         }
         syscall_abi::NET_PING_NO_NIC => fail(b"ping: no network interface this boot\r\n", target),
