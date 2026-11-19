@@ -30,6 +30,16 @@ pub const TICK_INTERVAL_MS: u64 = 20;
 // Enabled (bit0=1), not masked (bit1=0 - IMASK omitted, not written).
 const CTL_ENABLE: u64 = 1 << 0;
 
+/// The lowest counter frequency the kernel keeps time with. A millisecond
+/// deadline is `frequency_hz() / 1000 * ms` (`arm`'s tick, `xhci.rs`'s
+/// polls, `smp.rs`'s wait, `syscall.rs`'s), so below 1 kHz a millisecond is
+/// 0 ticks, every poll times out at once and the tick fires without end;
+/// at 0, [`monotonic_us`] divides by zero. `main.rs` reads the frequency
+/// once at the top of the boot and stops with a line below this, before
+/// anything keeps time: the kernel does not guess a frequency, as it does
+/// not guess a UART's address. The boot logs the frequency it read.
+pub(crate) const MIN_FREQUENCY_HZ: u64 = 1_000;
+
 pub(crate) fn frequency_hz() -> u64 {
     let freq: u64;
     unsafe {
@@ -82,7 +92,8 @@ pub(crate) fn delay_us(us: u64) {
 /// overflow-safe (a naive `now_ticks() * 1_000_000` overflows a u64 in a few
 /// days at 62.5 MHz): whole seconds plus the sub-second remainder. The one
 /// spelling of the clock `MONOTONIC_US` answers and `KEY_WAIT_UNTIL`'s
-/// deadline is in.
+/// deadline is in. Its division is unchecked because the boot's check
+/// ([`MIN_FREQUENCY_HZ`]) has already stopped a boot whose frequency reads 0.
 pub(crate) fn monotonic_us() -> u64 {
     let freq = frequency_hz();
     let ticks = now_ticks();
@@ -92,9 +103,10 @@ pub(crate) fn monotonic_us() -> u64 {
 /// Microseconds from `began`, an earlier [`now_ticks`] reading, to now.
 /// `None` where the counter's frequency reads 0, so a caller that only
 /// wants to print a duration can say it does not know one: the division
-/// is checked here, where [`monotonic_us`]'s is not, for a caller that
-/// must not be able to end the boot by asking (`genetnic::quiet`, around
-/// the stop of a device that may be writing memory).
+/// is checked here as well as by the boot's check ([`MIN_FREQUENCY_HZ`]),
+/// for a caller that must not be able to end the boot by asking
+/// (`genetnic::quiet`, around the stop of a device that may be writing
+/// memory).
 pub(crate) fn us_since(began: u64) -> Option<u64> {
     now_ticks().saturating_sub(began).saturating_mul(1_000_000).checked_div(frequency_hz())
 }

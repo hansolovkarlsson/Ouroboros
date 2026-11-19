@@ -206,6 +206,18 @@ extern "C" fn kernel_main() -> ! {
         "Ouroboros kernel: UEFI stage alive, build {BUILD}, on {} (sp {sp:#x}, the kernel's stack {stack_base:#x}..{stack_end:#x}, the entry's sp on the firmware's was {entry_sp:#x})",
         if (stack_base..stack_end).contains(&sp) { "its own stack" } else { "the FIRMWARE'S stack, which the switch should have left" }
     );
+    // The counter's frequency, before anything keeps time: below
+    // timer::MIN_FREQUENCY_HZ every deadline is now and monotonic_us
+    // divides by zero (its doc). Stopped here, while the firmware's console
+    // still prints, rather than at the first caller after the exit.
+    let hz = timer::frequency_hz();
+    if hz < timer::MIN_FREQUENCY_HZ {
+        panic!(
+            "Ouroboros kernel: the generic timer's counter frequency (CNTFRQ_EL0) reads {hz} Hz, below the {} Hz the kernel keeps time with: the firmware did not set it, and the kernel does not guess one",
+            timer::MIN_FREQUENCY_HZ
+        );
+    }
+    log::info!("Ouroboros kernel: the generic timer's counter runs at {hz} Hz");
     // Where firmware loaded this image, so an address in the firmware's own
     // exception report ("Synchronous Exception at 0x...", which on a board
     // without a serial cable is all HDMI shows) can be placed inside this
