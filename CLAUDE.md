@@ -153,6 +153,13 @@ current when the code changes**; the history is a record and is not.
 - **The tick is the generic timer's EL1 physical timer (PPI 14, INTID 30);
   GIC version and addresses come from the ACPI MADT** (`madt.rs`, then the
   `gicv2.rs`/`gicv3.rs` backends behind `gic.rs`), not from a devicetree dump.
+- **The counter's frequency is read once, checked, and never guessed.**
+  `timer::init` reads the boot core's `CNTFRQ_EL0` at the top of
+  `kernel_main`, before anything keeps time, and every core uses that value
+  (`timer::frequency_hz`), never its own register. Below 1 MHz the boot
+  parks with a line before the exit: millisecond deadlines divide by 1000
+  first. Not a `panic!`: uefi's handler stalls on the firmware's timer and
+  then shuts the machine down.
 - **"It compiles" proves nothing here.** The verification that has worked:
   a temporary deliberate fault at an address known unmapped, run under QEMU
   with `-d int -D <log>`, expecting exactly one exception and our handler's

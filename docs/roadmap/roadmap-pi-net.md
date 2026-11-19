@@ -1317,21 +1317,29 @@ own. The entries below stand as they were put.
      here; and `timer::monotonic_us` divides by the counter's frequency
      unchecked, so a firmware that left it 0 ends the boot at the first
      caller. Neither is reachable on the Pi 4 as it runs.
-     **The second fixed 2026-11-18** (`timer/zero-frequency`): the boot
-     reads the frequency once, at the top of `kernel_main`, logs it, and
-     stops with a line while the firmware's console still prints when it
-     is below `timer::MIN_FREQUENCY_HZ`, 1 kHz. The floor is the kernel's
-     own: every millisecond deadline is `frequency_hz() / 1000 * ms`, so
-     below it a millisecond is 0 ticks and the tick fires without end.
-     Checked on QEMU at EL2 (`make run-el2`'s machine), with a temporary
-     write of `CNTFRQ_EL0` before the check: 0 and 999 stopped with the
-     line, 1000 booted to the shell, and the unmodified build logged
-     62500000 Hz and booted. The control, 0 with the check removed, did
-     not reach the kernel's division: edk2's debug firmware ended the
-     boot first, before the exit, with `ASSERT [MetronomeDxe]
-     ArmArchTimerLib.c(44): TimerFreq != 0` in a delay of its own. The
-     Pi's frequency is in the log of its next boot. `publish_cycle_word`
-     stays open.
+     **The second fixed 2026-11-18** (`timer/zero-frequency`, #488):
+     `timer::init` reads the boot core's frequency once, at the top of
+     `kernel_main`, logs it, and keeps it as the one value every core
+     uses (`timer::FREQUENCY_HZ`); below `timer::MIN_FREQUENCY_HZ`, 1 MHz,
+     the boot parks with a line while the firmware's console still
+     prints, its watchdog off. The floor is the kernel's own: every
+     millisecond deadline is `frequency_hz() / 1000 * ms`, truncated
+     first. **The review of #488** changed three things in the first
+     version: the stop was a `panic!`, and uefi's handler stalls on the
+     firmware's timer and then shuts the machine down, so the first
+     run's "stopped" at 0 was the line and then edk2's `ASSERT
+     [MetronomeDxe] ArmArchTimerLib.c(44): TimerFreq != 0` inside that
+     stall; the check read the boot core's register while every call
+     read its own core's, and `CNTFRQ_EL0` is per core; and the floor was
+     1 kHz, where a truncated millisecond can be half one. Checked on
+     QEMU at EL2 (`make run-el2`'s machine), with a temporary write of
+     `CNTFRQ_EL0` before `timer::init`: 0 and 999999 parked with the
+     line as the console's last, 1000000 booted to the shell, and the
+     unmodified build logged 62500000 Hz and booted. The control, 0 with
+     no check, did not reach the kernel's division: edk2's debug firmware
+     ended the boot first with the same `ASSERT`, in a delay of its own.
+     The Pi's frequency is in the log of its next boot.
+     `publish_cycle_word` stays open.
    - *The send-time lines are said through the console that goes quiet
      once `cond` owns a framebuffer* (the review's reading, not checked
      here), so on a board with no serial console the first-frame line
