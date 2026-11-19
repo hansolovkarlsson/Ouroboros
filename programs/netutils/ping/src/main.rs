@@ -29,7 +29,10 @@ pub extern "C" fn _start() -> ! {
         Some(len) if len > 0 => len,
         _ => fail(b"ping: usage: ping <a.b.c.d>\r\n", target),
     };
-    let Some(target_ip) = netaddr::parse_ip(&argbuf[..len]) else {
+    // The address as typed, for the reply lines; parse_ip has refused
+    // anything but digits and dots.
+    let ip = &argbuf[..len];
+    let Some(target_ip) = netaddr::parse_ip(ip) else {
         fail(b"ping: usage: ping <a.b.c.d>\r\n", target);
     };
 
@@ -56,18 +59,18 @@ pub extern "C" fn _start() -> ! {
     match status {
         syscall_abi::NET_PING_OK => {
             ulib::write_out(target, b"reply from ");
-            ulib::write_out(target, ip.as_bytes());
+            ulib::write_out(target, ip);
             ulib::write_out(target, b"\r\n");
             ulib::end_of_stream(target);
             ulib::exit(0);
         }
         syscall_abi::NET_PING_TIMEOUT => {
             ulib::con_write(b"no reply from ");
-            ulib::con_write(ip.as_bytes());
+            ulib::con_write(ip);
             fail(b" (timeout)\r\n", target);
         }
         syscall_abi::NET_PING_NO_ARP => {
-            ulib::con_write(ip.as_bytes());
+            ulib::con_write(ip);
             fail(b" is unreachable (no ARP reply)\r\n", target);
         }
         syscall_abi::NET_PING_NO_NIC => fail(b"ping: no network interface this boot\r\n", target),
