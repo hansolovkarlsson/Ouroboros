@@ -12,6 +12,7 @@
 //! include/clocksource/arm_arch_timer.h.
 
 use core::arch::asm;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 pub const INTID: u32 = 30;
 
@@ -32,20 +33,51 @@ const CTL_ENABLE: u64 = 1 << 0;
 
 /// The lowest counter frequency the kernel keeps time with. A millisecond
 /// deadline is `frequency_hz() / 1000 * ms` (`arm`'s tick, `xhci.rs`'s
-/// polls, `smp.rs`'s wait, `syscall.rs`'s), so below 1 kHz a millisecond is
-/// 0 ticks, every poll times out at once and the tick fires without end;
-/// at 0, [`monotonic_us`] divides by zero. `main.rs` reads the frequency
-/// once at the top of the boot and stops with a line below this, before
-/// anything keeps time: the kernel does not guess a frequency, as it does
-/// not guess a UART's address. The boot logs the frequency it read.
-pub(crate) const MIN_FREQUENCY_HZ: u64 = 1_000;
+/// polls, `smp.rs`'s wait, `syscall.rs`'s), and the division truncates
+/// first: at 0, [`monotonic_us`] divides by zero; below 1 kHz a
+/// millisecond is 0 ticks, every poll times out at once and the tick
+/// fires without end; at 1999 Hz every deadline is about half what it
+/// asks. At 1 MHz the truncation is at most a thousandth (the review of
+/// #488 found 1 kHz let it be a half). The kernel does not guess a
+/// frequency, as it does not guess a UART's address: [`init`] refuses one
+/// below this, and the boot stops with a line.
+pub(crate) const MIN_FREQUENCY_HZ: u64 = 1_000_000;
 
-pub(crate) fn frequency_hz() -> u64 {
+/// The counter's frequency, read and checked once by [`init`] on the boot
+/// core before anything keeps time, and the one value every core uses
+/// after. `CNTFRQ_EL0` is a register of each core, written by firmware
+/// and not by the counter, which all the cores share; a secondary whose
+/// firmware left its own at 0 still keeps time by the checked value (the
+/// review of #488). 0 until [`init`].
+static FREQUENCY_HZ: AtomicU64 = AtomicU64::new(0);
+
+/// This core's `CNTFRQ_EL0`, as the firmware left it.
+fn read_cntfrq() -> u64 {
     let freq: u64;
     unsafe {
         asm!("mrs {0}, cntfrq_el0", out(reg) freq, options(nomem, nostack, preserves_flags));
     }
     freq
+}
+
+/// Reads the boot core's `CNTFRQ_EL0` and keeps it as the kernel's
+/// frequency, or refuses it below [`MIN_FREQUENCY_HZ`]: `Err` carries the
+/// frequency read, and nothing is kept. The first act of `kernel_main`
+/// after the logger, so no caller of [`frequency_hz`] comes before it.
+pub(crate) fn init() -> Result<u64, u64> {
+    let hz = read_cntfrq();
+    if hz < MIN_FREQUENCY_HZ {
+        return Err(hz);
+    }
+    // Release: a secondary started after this reads it with Acquire.
+    FREQUENCY_HZ.store(hz, Ordering::Release);
+    Ok(hz)
+}
+
+/// The counter's frequency as [`init`] checked it: at least
+/// [`MIN_FREQUENCY_HZ`] on every core, from the boot's start on.
+pub(crate) fn frequency_hz() -> u64 {
+    FREQUENCY_HZ.load(Ordering::Acquire)
 }
 
 /// Reads the free-running physical counter (`CNTPCT_EL0`) - a pure
@@ -92,8 +124,8 @@ pub(crate) fn delay_us(us: u64) {
 /// overflow-safe (a naive `now_ticks() * 1_000_000` overflows a u64 in a few
 /// days at 62.5 MHz): whole seconds plus the sub-second remainder. The one
 /// spelling of the clock `MONOTONIC_US` answers and `KEY_WAIT_UNTIL`'s
-/// deadline is in. Its division is unchecked because the boot's check
-/// ([`MIN_FREQUENCY_HZ`]) has already stopped a boot whose frequency reads 0.
+/// deadline is in. Its division is unchecked because [`frequency_hz`] is
+/// the value [`init`] checked, never 0 after it.
 pub(crate) fn monotonic_us() -> u64 {
     let freq = frequency_hz();
     let ticks = now_ticks();
@@ -103,7 +135,7 @@ pub(crate) fn monotonic_us() -> u64 {
 /// Microseconds from `began`, an earlier [`now_ticks`] reading, to now.
 /// `None` where the counter's frequency reads 0, so a caller that only
 /// wants to print a duration can say it does not know one: the division
-/// is checked here as well as by the boot's check ([`MIN_FREQUENCY_HZ`]),
+/// is checked here as well as by [`init`],
 /// for a caller that must not be able to end the boot by asking
 /// (`genetnic::quiet`, around the stop of a device that may be writing
 /// memory).

@@ -206,18 +206,23 @@ extern "C" fn kernel_main() -> ! {
         "Ouroboros kernel: UEFI stage alive, build {BUILD}, on {} (sp {sp:#x}, the kernel's stack {stack_base:#x}..{stack_end:#x}, the entry's sp on the firmware's was {entry_sp:#x})",
         if (stack_base..stack_end).contains(&sp) { "its own stack" } else { "the FIRMWARE'S stack, which the switch should have left" }
     );
-    // The counter's frequency, before anything keeps time: below
-    // timer::MIN_FREQUENCY_HZ every deadline is now and monotonic_us
-    // divides by zero (its doc). Stopped here, while the firmware's console
-    // still prints, rather than at the first caller after the exit.
-    let hz = timer::frequency_hz();
-    if hz < timer::MIN_FREQUENCY_HZ {
-        panic!(
-            "Ouroboros kernel: the generic timer's counter frequency (CNTFRQ_EL0) reads {hz} Hz, below the {} Hz the kernel keeps time with: the firmware left it unset or too low, and the kernel does not guess one",
-            timer::MIN_FREQUENCY_HZ
-        );
+    // The counter's frequency, read and checked once before anything keeps
+    // time (timer::init's doc): below timer::MIN_FREQUENCY_HZ every
+    // deadline is short or now, and monotonic_us divides by zero. Stopped
+    // here, while the firmware's console still prints, and parked rather
+    // than panicked: uefi's panic handler stalls on the firmware's own
+    // timer, the one just refused, and then shuts the machine down, so
+    // the line would not stay on the screen (the review of #488).
+    match timer::init() {
+        Ok(hz) => log::info!("Ouroboros kernel: the generic timer's counter runs at {hz} Hz"),
+        Err(hz) => {
+            log::error!(
+                "Ouroboros kernel: the generic timer's counter frequency (CNTFRQ_EL0) reads {hz} Hz, below the {} Hz the kernel keeps time with: the firmware left it unset or too low, and the kernel does not guess one. Halted here",
+                timer::MIN_FREQUENCY_HZ
+            );
+            park_before_exit()
+        }
     }
-    log::info!("Ouroboros kernel: the generic timer's counter runs at {hz} Hz");
     // Where firmware loaded this image, so an address in the firmware's own
     // exception report ("Synchronous Exception at 0x...", which on a board
     // without a serial cable is all HDMI shows) can be placed inside this
@@ -1819,6 +1824,19 @@ fn init_entropy(declared: &virtio_mmio::Transports) {
             console::println!("Ouroboros kernel: virtio-rng ready, entropy available to userland");
         }
         None => console::println!("Ouroboros kernel: virtio-rng returned no entropy - not installed"),
+    }
+}
+
+/// Parks the boot core for good before the exit, the firmware's line left
+/// on its console: its watchdog, which would restart the machine in five
+/// minutes (UEFI's default for a loaded image), is turned off first, and
+/// nothing after this keeps time. Not [`halt`], whose kernel lock and
+/// cores are not set up yet.
+fn park_before_exit() -> ! {
+    let _ = boot::set_watchdog_timer(0, 0x10000, None);
+    loop {
+        // SAFETY: a wait for an event; nothing is read or written.
+        unsafe { core::arch::asm!("wfe", options(nomem, nostack, preserves_flags)) };
     }
 }
 
