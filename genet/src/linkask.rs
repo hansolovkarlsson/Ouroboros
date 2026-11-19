@@ -17,7 +17,12 @@
 //!   the boot's own wait allows as many stuck reads running
 //!   (`STUCK_READS`), and a single timeout that slowed the asking would
 //!   leave the board slow to hear a late cable. An ask that read, up or
-//!   down, starts the count again and the pace with it. **Never stopped**
+//!   down, starts the count again and the pace with it. **Every ask
+//!   counts, a send's as the wait's** (the review of 2026-11-19): the two
+//!   ask the one bus, so a send's read brings the second back and a
+//!   send's failures count to the back-off; and a send does not ask while
+//!   it is in force ([`LinkAsk::backed_off`]), so a stuck bus is read once
+//!   a minute in all, not once a send. **Never stopped**
 //!   (Hans's choice, the review of 2026-11-18): until then three failures
 //!   stopped the asking for good, and with the MAC on a cable pulled after
 //!   a bus that went quiet for three seconds was never noticed.
@@ -88,7 +93,13 @@ impl LinkAsk {
     /// The time between asks as things stand: a second, or a minute once
     /// [`FAILED_ASKS_MAX`] asks running have failed.
     pub fn interval_us(&self) -> u64 {
-        if self.failed >= FAILED_ASKS_MAX { BACKOFF_INTERVAL_US } else { ASK_INTERVAL_US }
+        if self.backed_off() { BACKOFF_INTERVAL_US } else { ASK_INTERVAL_US }
+    }
+
+    /// Whether [`FAILED_ASKS_MAX`] asks running have failed: the wait asks
+    /// once a minute, and a send does not ask at all, until one reads.
+    pub fn backed_off(&self) -> bool {
+        self.failed >= FAILED_ASKS_MAX
     }
 
     /// What the wait at `now_us` is to do. An [`Ask::Now`] is taken as the
@@ -108,11 +119,11 @@ impl LinkAsk {
         }
     }
 
-    /// After an [`Ask::Now`]: whether the ask's reads answered (a link up
-    /// or down is an answer).
+    /// After any ask, the wait's [`Ask::Now`] or a send's: whether the
+    /// ask's reads answered (a link up or down is an answer).
     pub fn answered(&mut self, read: bool) -> Answered {
         if read {
-            let was_backed_off = self.failed >= FAILED_ASKS_MAX;
+            let was_backed_off = self.backed_off();
             self.failed = 0;
             return if was_backed_off { Answered::Back } else { Answered::Same };
         }
@@ -128,8 +139,8 @@ impl LinkAsk {
 pub enum Change {
     /// Nothing to do: the link is as held.
     Same,
-    /// Up, where it was not, or up at another speed or duplex: start the
-    /// MAC at this one (`Genet::start` again rewrites the speed and keeps
+    /// Up, where it was not, or up at another speed (a duplex alone is
+    /// [`Change::Duplex`]): start the MAC at this one (`Genet::start` again rewrites the speed and keeps
     /// the enables).
     Up { speed: Speed, full: bool },
     /// Was up and is not: refuse sends until it is up again.
@@ -240,6 +251,25 @@ mod tests {
         let mut a = LinkAsk::new();
         assert_eq!(a.at_wait(0), Ask::Now);
         assert_eq!(a.answered(false), Answered::Same);
+        assert!(!a.backed_off());
+        assert_eq!(a.at_wait(S), Ask::Now);
+    }
+
+    /// The review of 2026-11-19: a send's asks are counted with the
+    /// wait's. Failures with no wait between back off as the wait's do,
+    /// and a send's read after the back-off brings the second back.
+    #[test]
+    fn a_sends_asks_count_with_the_waits() {
+        let mut a = LinkAsk::new();
+        assert_eq!(a.at_wait(0), Ask::Now);
+        assert_eq!(a.answered(false), Answered::Same);
+        // Two sends' asks fail, with no wait between.
+        assert_eq!(a.answered(false), Answered::Same);
+        assert_eq!(a.answered(false), Answered::BackedOff);
+        assert!(a.backed_off());
+        assert_eq!(a.at_wait(S), Ask::Later { in_us: BACKOFF_INTERVAL_US - S });
+        // A send's read, between the wait's asks.
+        assert_eq!(a.answered(true), Answered::Back);
         assert_eq!(a.at_wait(S), Ask::Now);
     }
 
@@ -252,6 +282,7 @@ mod tests {
             said += (a.answered(false) == Answered::BackedOff) as u32;
         }
         assert_eq!(said, 1);
+        assert!(a.backed_off());
         assert_eq!(a.interval_us(), BACKOFF_INTERVAL_US);
         // The last ask was at 2 s: nothing until a minute after it.
         let last = (FAILED_ASKS_MAX as u64 - 1) * S;
@@ -272,6 +303,7 @@ mod tests {
         let at = 100 * S;
         assert_eq!(a.at_wait(at), Ask::Now);
         assert_eq!(a.answered(true), Answered::Back);
+        assert!(!a.backed_off());
         assert_eq!(a.interval_us(), S);
         assert_eq!(a.at_wait(at + S / 2), Ask::Later { in_us: S / 2 });
         assert_eq!(a.at_wait(at + S), Ask::Now);
