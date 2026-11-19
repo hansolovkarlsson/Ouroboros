@@ -1343,13 +1343,18 @@ own. The entries below stand as they were put.
      Hz`, the Pi 4's first recorded frequency, 54 times the floor; the
      three secondaries up, the link up at 1000 Mb/s, login, a ping with
      its reply, and `curl` from the Mac returned the page.
-     **The first fixed 2026-11-19** (`xhci/cycle-word-in-reg`):
-     `publish_cycle_word` is private to a `mod ring` in `xhci.rs`, beside
-     `ring_publish`, its one caller, so a second caller outside that
-     module does not compile, as `mod bus` holds `genet_write32`. It is a
-     memory store and not a register's, so it is in a module of its own
-     and not in `mod reg`. A second caller inside `mod ring` would still
-     compile, the same limit `mod bus` has.
+     **The first fixed 2026-11-19** (`xhci/cycle-word-in-reg`, #489):
+     `publish_cycle_word` is private to a `mod ring` in `xhci.rs`, and
+     `ring_publish`, its one caller, and `ring_push` take a `ring::Ring`,
+     a handle only that module builds, from the ring statics with each
+     array's own length, as only `reg::locate` builds `reg`'s. So from
+     outside the module neither the store nor a publish can be pointed at
+     a register, at any other address, or at a ring with another's
+     length. It is memory and not a register, so a module of its own and
+     not `mod reg`. **Its review** found the first version had made the
+     store private and left `ring_publish` taking any pointer: the
+     convention had moved up one layer, not ended. Code added inside
+     `mod ring` is not held, the limit `mod bus` has too.
    - *The send-time lines are said through the console that goes quiet
      once `cond` owns a framebuffer* (the review's reading, not checked
      here), so on a board with no serial console the first-frame line
