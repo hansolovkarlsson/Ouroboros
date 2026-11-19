@@ -1448,15 +1448,30 @@ own. The entries below stand as they were put.
      sends while the link is down over a line alone): the wait goes on
      asking once a second with the MAC on. `genet::linkask::change`
      (host-tested) says what a read means against the link held: up
-     where none was, or at another speed or duplex, starts the MAC at it
+     where none was, or at another speed, sets the MAC at it
      (`Genet::start` again, which rewrites the speed and keeps the
-     enables), with the link-up and pause lines; anything not up where
-     one was is `link down at a wait (...)`, and every send is refused
-     (`TxError::NoLink`, `NET_ERROR` to `netd`) and asks the link itself
-     until it is up again. The receiver stays on. Up, the asking costs
-     three MDIO reads a second under the kernel lock. **Not yet on the
-     board:** the check is a cable pulled and put back with `netd`
-     serving, and if a switch at 100 Mb/s is at hand, a cable moved to it.
+     enables), with the link-up and pause lines; up at the same speed
+     and another duplex starts nothing (the MAC is not told the duplex)
+     and says the pause line again; anything not up where one was is
+     `link down at a wait (...)`, and every send is refused (the
+     kernel's `SendError::NoLink`, `NET_ERROR` to `netd`) and asks the
+     link itself until it is up again. The MAC and its receiver stay on
+     through a drop. **The review of the branch** changed the asking's
+     stop: three failed asks running now slow it to once a minute, and
+     a read brings the second back (Hans's choice over letting the link
+     go or keeping the stop), since a stop with the MAC on left a later
+     cable pull unseen for good. Up, the asking costs three MDIO reads a
+     second under the kernel lock, and wakes `netd` once a second for
+     good. **Not seen, by design:** a drop shorter than a second that
+     returns at the same speed and duplex (the link bit's latch is read
+     past, as U-Boot and Linux read it); nothing in the MAC needs
+     changing then. **Not yet on the board.** The check: a cable pulled
+     for several seconds and put back with `netd` serving, then `curl`;
+     a send during the pull, to see whether a frame the device held at
+     the drop leaves the transmitter busy after it (the review asked;
+     on RGMII the MAC drives its own transmit clock, so it is expected
+     to drain, and only the board can say); and if a switch at 100 Mb/s
+     is at hand, a cable moved to it.
    - *The receiver is never turned off.* With nobody draining it
      (before `netd` first runs, after `netd` is past its restart cap,
      after the kernel halts) the ring fills and the DMA sits at its

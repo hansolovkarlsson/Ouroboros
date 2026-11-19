@@ -35,9 +35,12 @@
 //! speed, starts the MAC again at it. That asking is up to
 //! three MDIO reads under the kernel lock, and each read may poll for
 //! 20 ms on a bus that does not answer; the ask that finds the link up
-//! makes two more once the MAC is on, for the pause line. The wait stops asking after three
-//! asks running fail to read; a send does not remember that the last one
-//! failed (open in the plan's step 6).
+//! makes two more once the MAC is on, for the pause line. After three
+//! asks running fail to read, the wait asks once a minute until one reads
+//! (never stops, since the review of #487); a send does not remember that
+//! the last one failed (open in the plan's step 6). A drop shorter than a
+//! second that returns at the same speed and duplex is not seen, and
+//! needs nothing (`genet::linkask::change`).
 //!
 //! **Found, never assumed** (the plan's design 1): [`discover`] takes the
 //! one GENET the ACPI tables declare present, before the exit, and nothing
@@ -82,7 +85,7 @@
 use core::cell::UnsafeCell;
 
 use genet::mac::{Genet, InitError, Receiver, Rx, RxDrop, TxError, DESCS, RX_AREA_LEN, RX_BUF_LEN, TX_MAX_FRAME, TX_MIN_FRAME};
-use genet::linkask::{Ask, Change, LinkAsk};
+use genet::linkask::{Answered, Ask, Change, LinkAsk};
 use genet::phy::{self, Link, ReadBack, Speed};
 
 use crate::{acpi, console, mmu, timer};
@@ -452,10 +455,21 @@ pub(crate) struct Device {
     link_ask: LinkAsk,
     /// The link as last read, while it is up: the speed and duplex the
     /// MAC was last started on. `None` before the first start and while
-    /// the link is down; a send is refused then ([`TxError::NoLink`]).
+    /// the link is down; a send is refused then ([`SendError::NoLink`]).
     /// Set by [`Device::start`], cleared by an ask that reads it down
     /// (`genet::linkask::change`).
     link: Option<(Speed, bool)>,
+}
+
+/// Why a send did not happen: the crate's reasons, or no link held. The
+/// link is the kernel's to track, not the crate's, so its refusal is
+/// here and not in `genet::mac::TxError` (the review of #487).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SendError {
+    /// The link as last read is not up (a boot that found none, or a link
+    /// read down since): refused before anything is read or written.
+    NoLink,
+    Tx(TxError),
 }
 
 /// Brings a quieted device up: the crate's reset and set-up, the PHY found
@@ -556,11 +570,15 @@ impl Device {
     /// the link agreed against what `UMAC_CMD` does. `full` is the link's
     /// duplex, which pause turns on.
     fn start(&mut self, speed: Speed, full: bool) {
+        // A link that returns finds the MAC still on: a drop turns nothing
+        // off (`ask_link`), so its line says the speed was set again.
+        let again = self.genet.started();
         self.genet.start(&mut self.bus, speed, Receiver::On);
         self.link = Some((speed, full));
         let cmd = genet::Bus::read(&mut self.bus, genet::reg::UMAC_CMD);
         console::println!(
-            "Ouroboros kernel: genet: the MAC's transmitter and receiver are on at {} Mb/s (UMAC_CMD {:#010x}, UMAC_MDF_CTRL {:#010x}): frames are sent, and received on the receive interrupt and the tick's poll",
+            "Ouroboros kernel: genet: {} {} Mb/s (UMAC_CMD {:#010x}, UMAC_MDF_CTRL {:#010x}): frames are sent, and received on the receive interrupt and the tick's poll",
+            if again { "the MAC, on since before the link dropped, is set again at" } else { "the MAC's transmitter and receiver are on at" },
             speed.mbps(),
             cmd,
             genet::Bus::read(&mut self.bus, genet::reg::UMAC_MDF_CTRL)
@@ -773,10 +791,10 @@ impl Device {
     /// Four things are said, once each: the first frame the device
     /// takes, the first send that times out, the first refused as busy,
     /// and the first whose link did not read.
-    pub(crate) fn send_frame(&mut self, frame: &[u8]) -> Result<(), TxError> {
+    pub(crate) fn send_frame(&mut self, frame: &[u8]) -> Result<(), SendError> {
         let len = frame.len();
         if !(TX_MIN_FRAME..=TX_MAX_FRAME).contains(&len) {
-            return Err(TxError::BadLength(len));
+            return Err(SendError::Tx(TxError::BadLength(len)));
         }
         if self.link.is_none() {
             match self.ask_link("a send") {
@@ -784,7 +802,7 @@ impl Device {
                 // Down, negotiating, up at a speed the PHY does not
                 // name, or no PHY: no line, it is the ordinary state of
                 // no cable.
-                Ok(false) => return Err(TxError::NoLink),
+                Ok(false) => return Err(SendError::NoLink),
                 // The PHY did not answer, or the bus is stuck: not the
                 // same thing as a link that is down.
                 Err(e) => {
@@ -794,7 +812,7 @@ impl Device {
                             "Ouroboros kernel: genet: a send asked the link and it did not read ({e:?}): nothing is sent; said once"
                         );
                     }
-                    return Err(TxError::NoLink);
+                    return Err(SendError::NoLink);
                 }
             }
         }
@@ -806,7 +824,7 @@ impl Device {
                     self.sent
                 );
             }
-            return Err(TxError::Busy);
+            return Err(SendError::Tx(TxError::Busy));
         }
         let (buffer, _) = tx_region();
         // SAFETY: `len` is at most `TX_MAX_FRAME`, inside the page; the
@@ -831,7 +849,7 @@ impl Device {
                         self.sent
                     );
                 }
-                Err(e)
+                Err(SendError::Tx(e))
             }
         }
     }
@@ -922,23 +940,29 @@ impl Device {
                     "Ouroboros kernel: genet: link up at {who}, {} Mb/s, {} duplex{}",
                     speed.mbps(),
                     if full { "full" } else { "half" },
-                    match self.link {
-                        Some((was, _)) => if was == speed { ", the duplex changed" } else { ", the speed changed" },
-                        None => "",
-                    }
+                    if self.link.is_some() { ", the speed changed" } else { "" }
                 );
                 self.start(speed, full);
+            }
+            Change::Duplex { full } => {
+                // The MAC is not told the duplex (genet::mac's module doc),
+                // so nothing is started; pause turns on it, so its line is
+                // said again against UMAC_CMD as it stands.
+                if let Some(held) = self.link.as_mut() {
+                    held.1 = full;
+                }
+                console::println!(
+                    "Ouroboros kernel: genet: the link's duplex changed at {who}, now {}: the MAC is not told the duplex, so nothing is started",
+                    if full { "full" } else { "half" }
+                );
+                let cmd = genet::Bus::read(&mut self.bus, genet::reg::UMAC_CMD);
+                self.say_pause(cmd, full);
             }
             Change::Down => {
                 self.link = None;
                 console::println!(
-                    "Ouroboros kernel: genet: link down at {who} ({}): sends are refused until it is up again",
-                    match now {
-                        Link::Down => "no link",
-                        Link::Negotiating => "negotiating",
-                        Link::Unresolved => "up at a speed the PHY does not name",
-                        Link::Up { .. } => "up",
-                    }
+                    "Ouroboros kernel: genet: link down at {who} ({}): sends are refused until it is up again; the MAC stays on",
+                    now.describe()
                 );
             }
         }
@@ -950,7 +974,10 @@ impl Device {
     /// and acts on what changed ([`Device::ask_link`]), and returns how
     /// long the wait may block in ms, the time left until the next ask,
     /// so the reader comes back to ask. `None`, no limit, with no PHY to
-    /// ask, or once the asking has stopped.
+    /// ask. **So `netd` is woken once a second for as long as the device
+    /// lives** (once a minute after the back-off), a pass that finds
+    /// nothing: the price of asking from the wait, since the tick may not
+    /// (`has_frame` may neither write nor wait, and an MDIO read does both).
     ///
     /// **Why the wait asks** (left open by the plan's step 7): until
     /// 2026-11-17 only a send asked the link (D3), and nothing makes
@@ -963,32 +990,34 @@ impl Device {
     /// the speed it was started on for good. Up, it costs the status read
     /// twice and the auxiliary status, three MDIO reads a second.
     ///
-    /// **Asks that fail stop it**, three running (`linkask`'s rule), with a
-    /// line: a stuck bus costs 20 ms a read, up to three reads an ask
-    /// that fails, under the kernel lock (five on the one ask that finds
+    /// **Asks that fail slow it to once a minute**, three running
+    /// (`linkask`'s rule, never a stop since the review of #487), with a
+    /// line each way: a stuck bus costs 20 ms a read, up to three reads an
+    /// ask that fails, under the kernel lock (five on the ask that finds
     /// the link up). A send still asks while the link is not up.
     pub(crate) fn link_at_wait(&mut self) -> Option<u64> {
         // With no PHY there is nothing to come back for.
         self.phy?;
         match self.link_ask.at_wait(timer::monotonic_us()) {
-            Ask::Stopped => None,
             Ask::Later { in_us } => Some(in_us.div_ceil(1000)),
-            Ask::Now => match self.ask_link("a wait") {
-                Ok(_) => {
-                    self.link_ask.answered(true);
-                    Some(genet::linkask::ASK_INTERVAL_US / 1000)
-                }
-                Err(e) => {
-                    if self.link_ask.answered(false) {
-                        console::println!(
-                            "Ouroboros kernel: genet: the wait asked the link {} times running and it did not read (last: {e:?}): a change of link goes unseen from now on, and only a send asks while it is not up",
-                            genet::linkask::FAILED_ASKS_MAX
-                        );
-                        return None;
+            Ask::Now => {
+                match self.ask_link("a wait") {
+                    Ok(_) => {
+                        if self.link_ask.answered(true) == Answered::Back {
+                            console::println!("Ouroboros kernel: genet: the link reads again: the wait asks it once a second again");
+                        }
                     }
-                    Some(genet::linkask::ASK_INTERVAL_US / 1000)
+                    Err(e) => {
+                        if self.link_ask.answered(false) == Answered::BackedOff {
+                            console::println!(
+                                "Ouroboros kernel: genet: the wait asked the link {} times running and it did not read (last: {e:?}): it asks once a minute until it reads",
+                                genet::linkask::FAILED_ASKS_MAX
+                            );
+                        }
+                    }
                 }
-            },
+                Some(self.link_ask.interval_us() / 1000)
+            }
         }
     }
 

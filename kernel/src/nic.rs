@@ -53,7 +53,7 @@ use crate::virtio_net;
 #[derive(Debug)]
 pub enum Error {
     Virtio(virtio_net::Error),
-    Genet(genet::mac::TxError),
+    Genet(genetnic::SendError),
 }
 
 impl core::fmt::Display for Error {
