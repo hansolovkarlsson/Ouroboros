@@ -97,6 +97,7 @@ version = "0.1.0"
 dependencies = [
  "clusterkeys",
  "ed25519",
+ "netaddr",
  "syscall-abi",
  "ulib",
 ]
@@ -106,7 +107,7 @@ name = "clusterkeys"
 version = "0.1.0"
 dependencies = [
  "ed25519",
- "netconf",
+ "netaddr",
  "ninep-abi",
 ]
 
@@ -335,8 +336,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "netaddr"
+version = "0.1.0"
+
+[[package]]
 name = "netconf"
 version = "0.1.0"
+dependencies = [
+ "netaddr",
+]
 
 [[package]]
 name = "netd"
@@ -346,6 +354,7 @@ dependencies = [
  "clusterkeys",
  "ed25519",
  "heldkeys",
+ "netaddr",
  "netconf",
  "ninep-abi",
  "syscall-abi",
@@ -413,7 +422,7 @@ dependencies = [
 name = "ping"
 version = "0.1.0"
 dependencies = [
- "netconf",
+ "netaddr",
  "syscall-abi",
  "ulib",
 ]
@@ -572,7 +581,7 @@ dependencies = [
  "accounts",
  "clusterkeys",
  "keyseq",
- "netconf",
+ "netaddr",
  "ninep-abi",
  "syscall-abi",
 ]

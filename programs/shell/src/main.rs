@@ -4035,7 +4035,7 @@ fn cmd_mount_remote(line: &str, cwd: &[u8; CWD_SIZE], cwd_len: usize, out: &mut 
         }
         None => (hostport, ninep_abi::NP_NET_PORT),
     };
-    let Some(ip) = netconf::parse_ip(host.as_bytes()) else {
+    let Some(ip) = netaddr::parse_ip(host.as_bytes()) else {
         out.put_line("mount: <host> must be a dotted-quad IPv4 (e.g. 10.0.2.2)");
         return;
     };
@@ -4113,7 +4113,7 @@ fn cmd_cpu(line: &str, out: &mut Output) {
         }
         None => (hostport, ninep_abi::NP_NET_PORT),
     };
-    let Some(ip) = netconf::parse_ip(host.as_bytes()) else {
+    let Some(ip) = netaddr::parse_ip(host.as_bytes()) else {
         out.put_line("cpu: <host> must be a dotted-quad IPv4 (e.g. 10.0.2.10)");
         return;
     };
@@ -4318,12 +4318,9 @@ fn mount_info(out: &mut Output) {
             ninep_abi::NS_CON_TREE => out.put_str("the console"),
             ninep_abi::NS_REMOTE_TREE if target.len() >= ninep_abi::NS_ENDPOINT_LEN => {
                 out.put_str("remote ");
-                for (k, &octet) in target[..4].iter().enumerate() {
-                    if k > 0 {
-                        out.put(b'.');
-                    }
-                    out.put_u64_decimal(octet as u64);
-                }
+                let mut text = [0u8; netaddr::IP_TEXT_MAX];
+                let n = netaddr::format_ip(&[target[0], target[1], target[2], target[3]], &mut text);
+                out_bytes(out, &text[..n]);
                 out.put(b':');
                 out.put_u64_decimal(u16::from_le_bytes([target[4], target[5]]) as u64);
                 out_bytes(out, &target[ninep_abi::NS_ENDPOINT_LEN..]);

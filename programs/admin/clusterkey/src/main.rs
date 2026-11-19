@@ -390,7 +390,7 @@ fn peers(target: u64) -> u64 {
                 out(target, p.name);
                 out(target, b"  ");
                 let mut ip = [0u8; 15];
-                let ilen = clusterkeys::format_ip(&p.ip, &mut ip);
+                let ilen = netaddr::format_ip(&p.ip, &mut ip);
                 out(target, &ip[..ilen]);
                 out(target, b"  ");
                 let mut hex = [0u8; KEY_HEX_LEN];
@@ -492,7 +492,7 @@ fn line(target: u64) -> u64 {
         out(target, b"usage: clusterkey line <name> <ip>\r\n");
         return 2;
     }
-    let Some(ip) = clusterkeys::parse_ip(&ip_text[..ilen]) else {
+    let Some(ip) = netaddr::parse_ip(&ip_text[..ilen]) else {
         out(target, b"clusterkey: not an IPv4 address\r\n");
         return 2;
     };

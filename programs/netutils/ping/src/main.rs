@@ -29,7 +29,7 @@ pub extern "C" fn _start() -> ! {
         Some(len) if len > 0 => core::str::from_utf8(&argbuf[..len]).unwrap_or(""),
         _ => fail(b"ping: usage: ping <a.b.c.d>\r\n", target),
     };
-    let Some(target_ip) = netconf::parse_ip(ip.as_bytes()) else {
+    let Some(target_ip) = netaddr::parse_ip(ip.as_bytes()) else {
         fail(b"ping: usage: ping <a.b.c.d>\r\n", target);
     };
 

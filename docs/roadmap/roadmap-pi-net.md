@@ -1938,14 +1938,25 @@ own. The entries below stand as they were put.
    - *Three parsers of a dotted address serve `netd`:* `netconf`'s,
      `clusterkeys::parse_ip` with the same rules, and `netd`'s own
      `parse_ip4`. One crate holding one is the change. **Done
-     2026-11-19** (`netd/one-ip-parser`): `netconf::parse_ip` is the one,
-     `clusterkeys` re-exports it, and `netd`, the shell (`mount -r`,
-     `cpu`) and `ping` call it; there were five, not three, the shell's
-     and `ping`'s not counted here. `netd`'s took any digits a part and
-     wrapped (`18446744073709551617.0.0.1` was `1.0.0.1`) and `ping`'s any
-     leading zeros; `netd`'s `parse_dec` wrapped too, so a `connect` port
-     of 18446744073709551696 was 80, and is checked now. The refusals are
-     host-tested in `netconf`; `test-net-config` (`ping`),
+     2026-11-19** (`netd/one-ip-parser`, #490): a crate of its own,
+     `netaddr`, holds the one parser (`parse_ip`), its formatter
+     (`format_ip`) and the checked decimal reader `netd` takes a port
+     with (`parse_dec`); `netconf`, `clusterkeys` and the `clusterkey`
+     tool, `netd`, the shell and `ping` call it. There were five parsers
+     with four sets of rules, not three: `netd`'s took any digits a part
+     and wrapped (`18446744073709551617.0.0.1` was `1.0.0.1`, and a
+     `connect` port of 18446744073709551696 was 80), and the shell's and
+     `ping`'s any leading zeros, which `mount -r`, `cpu` and `ping` now
+     refuse past three digits (`shell-commands.md`). **Its review** found
+     the first version's tests could not fail (`netconf`'s parser had
+     always refused the wrapping input; the wrap was `netd`'s, and
+     untested), and that it put the one parser in `/etc/net`'s crate, tying
+     the cluster's identity files, the shell and `ping` to it; `netaddr`
+     is below them all, with no re-export, and its tests of the two wraps
+     fail with the checks taken out. `netd`'s `/net/ip` and the shell's
+     mount listing format through `format_ip`. The shell's and `ulib`'s
+     `parse_u64` stay theirs: on `&str`, already checked, and for every
+     number a command takes. `test-net-config` (`ping`),
      `test-mount-points` (`mount -r`) and `test-run-silent` (`cpu`)
      passed. No rig sends a `/net/tcp` `connect`.
    - *The ext2 root's place in the image* is written out in three rigs

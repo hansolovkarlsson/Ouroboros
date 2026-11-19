@@ -42,15 +42,10 @@ fn a_line_not_understood_refuses_the_file_and_names_the_line() {
     assert_eq!(parse(b"address 10.1.2.3 # mine\n"), Err(Error::NotKeyValue { line: 1 }));
 }
 
+/// What an address is, is `netaddr`'s (its tests); a value that is not
+/// one refuses the file.
 #[test]
-fn an_address_is_four_numbers_and_nothing_else() {
-    for ok in [&b"0.0.0.0"[..], b"255.255.255.255", b"10.0.2.15", b"010.000.002.015"] {
-        assert!(parse_ip(ok).is_some(), "{:?}", core::str::from_utf8(ok));
-    }
-    assert_eq!(parse_ip(b"010.000.002.015"), Some([10, 0, 2, 15]));
-    for bad in [&b""[..], b"1.2.3", b"1.2.3.4.5", b"1.2.3.", b".1.2.3", b"1..2.3", b"256.1.1.1", b"1.2.3.4 ", b"1.2.3.-4", b"1.2.3.4x", b"0001.2.3.4", b"1,2,3,4", b"1.2.3.+4", b"18446744073709551617.0.0.1", b"1.2.3.18446744073709551620"] {
-        assert_eq!(parse_ip(bad), None, "{:?}", core::str::from_utf8(bad));
-    }
+fn a_value_that_is_not_an_address_refuses_the_file() {
     assert_eq!(parse(b"address 10.1.2\nmask 255.0.0.0\n"), Err(Error::NotAnAddress { line: 1 }));
 }
 

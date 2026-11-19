@@ -48,6 +48,7 @@
 #![cfg_attr(not(test), no_std)]
 
 mod users;
+use netaddr::{format_ip, parse_ip};
 pub use users::{
     derive_user_seed, derive_user_seed_with, format_user_line, lookup_user, parse_realm, user_line_name_ok, user_registry_line, userkey_salt, UserLine, REALM_PATH, USER_LINE_MAX,
     UserLookup, REALM_FILE_MAX, USERKEY_SALT_MAX, USERS_MAX,
@@ -124,33 +125,6 @@ fn hex_digit(c: u8) -> Option<u8> {
         b'A'..=b'F' => Some(c - b'A' + 10),
         _ => None,
     }
-}
-
-/// Parse a dotted-quad IPv4 address: `netconf`'s, the one parser (its
-/// doc), re-exported so this crate's callers keep their path.
-pub use netconf::parse_ip;
-
-/// Format a dotted-quad address into `out`, returning its length.
-pub fn format_ip(ip: &[u8; 4], out: &mut [u8; 15]) -> usize {
-    let mut n = 0;
-    for (i, octet) in ip.iter().enumerate() {
-        if i > 0 {
-            out[n] = b'.';
-            n += 1;
-        }
-        let v = *octet;
-        if v >= 100 {
-            out[n] = b'0' + v / 100;
-            n += 1;
-        }
-        if v >= 10 {
-            out[n] = b'0' + (v / 10) % 10;
-            n += 1;
-        }
-        out[n] = b'0' + v % 10;
-        n += 1;
-    }
-    n
 }
 
 /// What a line of `authorized` turned out to be.
@@ -704,15 +678,6 @@ mod tests {
         // And a buffer too small must refuse rather than truncate.
         let mut tiny = [0u8; 8];
         assert!(format_line(&mut tiny, b"node-c", &[10, 0, 0, 1], &KEY_A, false).is_none());
-    }
-
-    #[test]
-    fn addresses_round_trip() {
-        for ip in [[0u8, 0, 0, 0], [10, 0, 2, 15], [192, 168, 1, 254], [255, 255, 255, 255]] {
-            let mut buf = [0u8; 15];
-            let n = format_ip(&ip, &mut buf);
-            assert_eq!(parse_ip(&buf[..n]).expect("round trip"), ip, "for {ip:?}");
-        }
     }
 
     #[test]
