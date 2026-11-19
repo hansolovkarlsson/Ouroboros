@@ -508,7 +508,8 @@ genet/               the Pi 4's Ethernet, Broadcom GENET v5: the logic that need
                      phy.rs, the Pi's PHY set up as U-Boot does and its link, step 4b); the kernel's half is step 5. The model is ours: only the board is a foreign observer
 netconf/             netd's network configuration: the /etc/net file (address, mask, gateway, dns; a file with a line not
                      understood is refused whole), the values with no file (QEMU user networking's, as netd always held), and
-                     the next hop for a target. netd is the one caller; host-tested in make test
+                     the next hop for a target; and parse_ip, THE ONE dotted-address parser (clusterkeys re-exports it; netd,
+                     the shell and ping call it). netd is the one caller of the rest; host-tested in make test
 heldkeys/            netd's held user keys: the table, whose key signs for a parked request, and when a run sent under one ends; liveness
                      is passed in, so the rules that turn on a login dead and not yet reaped run on the host. netd is the one caller
 keyseq/              tells a key's escape sequence (ESC [ A) from ordinary input: the ONE filter every keyboard reader uses

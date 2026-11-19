@@ -1937,7 +1937,17 @@ own. The entries below stand as they were put.
      leaves the defaults, and nothing reads either file again.
    - *Three parsers of a dotted address serve `netd`:* `netconf`'s,
      `clusterkeys::parse_ip` with the same rules, and `netd`'s own
-     `parse_ip4`. One crate holding one is the change.
+     `parse_ip4`. One crate holding one is the change. **Done
+     2026-11-19** (`netd/one-ip-parser`): `netconf::parse_ip` is the one,
+     `clusterkeys` re-exports it, and `netd`, the shell (`mount -r`,
+     `cpu`) and `ping` call it; there were five, not three, the shell's
+     and `ping`'s not counted here. `netd`'s took any digits a part and
+     wrapped (`18446744073709551617.0.0.1` was `1.0.0.1`) and `ping`'s any
+     leading zeros; `netd`'s `parse_dec` wrapped too, so a `connect` port
+     of 18446744073709551696 was 80, and is checked now. The refusals are
+     host-tested in `netconf`; `test-net-config` (`ping`),
+     `test-mount-points` (`mount -r`) and `test-run-silent` (`cpu`)
+     passed. No rig sends a `/net/tcp` `connect`.
    - *The ext2 root's place in the image* is written out in three rigs
      now (`test-no-identity.py`, `test-net-config.py` and
      `mkext2.py`, which decides it).
