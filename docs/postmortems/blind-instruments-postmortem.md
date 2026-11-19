@@ -1,6 +1,6 @@
 # Blind instruments
 
-*A process retrospective, 2026-09-02, extended through 2026-11-18. It began
+*A process retrospective, 2026-09-02, extended through 2026-11-19. It began
 with a day of small roadmap items (five PRs, one release, no arc) during which
 five separate tools reported success while proving nothing. Every later day
 that found another instrument of the same kind added a dated section after
@@ -8,7 +8,7 @@ that found another instrument of the same kind added a dated section after
 off a phone photo, the Raspberry Pi's bench tools, and on 2026-10-09 the
 stale-image guard and the four blind spots in the guard that replaced it, and
 on 2026-10-10 the controls a keyboard change blinded and then the multi-core
-rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's, and on 2026-10-20 the volume bounds', and on 2026-10-21 the exFAT sets' and names', and on 2026-10-22 the stall classifier's and sector 0's, and on 2026-10-23 the blank disk's, and on 2026-10-24 the exFAT frees' mutants and plants, and on 2026-10-25 the disk-trace stalls' classifier, fake, arithmetic and a host sleep, and on 2026-10-28 the read-only gate's control, review, run script and wait, and on 2026-10-29 the open probes' and the disk gate rig's silence, sites, truncate check and unspellable control, and on 2026-10-30 the read-only mount's shared tail, unheld order, overwritten transcript and unread pass, and the disk-gate staging's check run once, and that evening the boot start's bug no mount showed, its rig's absent step read as empty and its recomputed signature, and on 2026-10-31 the exFAT free's counts blind to order, the batch model's assertion that skipped the head, a fix no boot could grade, and a count I predicted for an order, and on 2026-11-01 an exit code that flattened two verdicts, a hint a byte wide read a cluster at a time, a model that started where it assumed and two citations that pointed at nothing, and on 2026-11-04 a rig that attached its disks so macOS could not mount them, a test helper whose encoding broke a deep nest before the walk reached it, and a grep that hid where a fault happened, and on 2026-11-05 a probe whose two writes libc joined into one, a control run without its boot flag, and a diagnostic whose only first run was on the Pi, and on 2026-11-07 a self-test case refused by the wrong rule, a rig that graded only runs that succeed, and a mutation caught as a crash, and on 2026-11-08 a filter that read a refused boot as silence, a control placed where the two answers agree, and a glob that read yesterday's logs, and on 2026-11-09 a control the far side's reap graded, a control a new guard answered for, and a review that read a mutant as the code, and on 2026-11-10 to 2026-11-11 a rig whose two rounds could have been one, a mark that covered only the paths driven, a reading that dropped the calls it could not name, a self-test that passed on text its author wrote, and a clause and a premise nothing observed, and on 2026-11-11 to 2026-11-12 an instrument's note taken for a finding, a check that passed for another reason, an observer too patient to see the fault, and a round that passed with its fix taken out, and later on 2026-11-12, from the Pi's Ethernet scan, a test that broke two things at once, a reading taken at the wrong moment, a rig named as the guard of code it never runs, and a list of what must not appear that was already short, and on 2026-11-13, from the Pi's first frame, an observer placed where neither answer could reach it and a pass that prints nothing, and on 2026-11-15, from the Pi's receive path and its address, a model written from the driver it tests, a line said once, a checksum of an error page, a comparison with a copy the device did not hold, and a wait that passed over its own answer, and on 2026-11-16, from the supervisor's restart rigs and the Pi's receive interrupt, a serving check that passed with its server dead, a check that passed in its own control, a count that passed with the fault in it, two tests that checked the parts and not the property, and a write no emulator could make fail, and on 2026-11-17 to 2026-11-18, from `netd`'s waits and its receive loop, a duration the mutation also met, a rig that checked a restart did not happen and never that one did, and a probe that judged the kernel's answer with a reading of its own. The spine below has held for all of them.*
+rigs, and on 2026-10-14 the one-disk stick's and the linker choice's, and on 2026-10-15 the C library's, and on 2026-10-19 the filesystem hardening's, and on 2026-10-20 the volume bounds', and on 2026-10-21 the exFAT sets' and names', and on 2026-10-22 the stall classifier's and sector 0's, and on 2026-10-23 the blank disk's, and on 2026-10-24 the exFAT frees' mutants and plants, and on 2026-10-25 the disk-trace stalls' classifier, fake, arithmetic and a host sleep, and on 2026-10-28 the read-only gate's control, review, run script and wait, and on 2026-10-29 the open probes' and the disk gate rig's silence, sites, truncate check and unspellable control, and on 2026-10-30 the read-only mount's shared tail, unheld order, overwritten transcript and unread pass, and the disk-gate staging's check run once, and that evening the boot start's bug no mount showed, its rig's absent step read as empty and its recomputed signature, and on 2026-10-31 the exFAT free's counts blind to order, the batch model's assertion that skipped the head, a fix no boot could grade, and a count I predicted for an order, and on 2026-11-01 an exit code that flattened two verdicts, a hint a byte wide read a cluster at a time, a model that started where it assumed and two citations that pointed at nothing, and on 2026-11-04 a rig that attached its disks so macOS could not mount them, a test helper whose encoding broke a deep nest before the walk reached it, and a grep that hid where a fault happened, and on 2026-11-05 a probe whose two writes libc joined into one, a control run without its boot flag, and a diagnostic whose only first run was on the Pi, and on 2026-11-07 a self-test case refused by the wrong rule, a rig that graded only runs that succeed, and a mutation caught as a crash, and on 2026-11-08 a filter that read a refused boot as silence, a control placed where the two answers agree, and a glob that read yesterday's logs, and on 2026-11-09 a control the far side's reap graded, a control a new guard answered for, and a review that read a mutant as the code, and on 2026-11-10 to 2026-11-11 a rig whose two rounds could have been one, a mark that covered only the paths driven, a reading that dropped the calls it could not name, a self-test that passed on text its author wrote, and a clause and a premise nothing observed, and on 2026-11-11 to 2026-11-12 an instrument's note taken for a finding, a check that passed for another reason, an observer too patient to see the fault, and a round that passed with its fix taken out, and later on 2026-11-12, from the Pi's Ethernet scan, a test that broke two things at once, a reading taken at the wrong moment, a rig named as the guard of code it never runs, and a list of what must not appear that was already short, and on 2026-11-13, from the Pi's first frame, an observer placed where neither answer could reach it and a pass that prints nothing, and on 2026-11-15, from the Pi's receive path and its address, a model written from the driver it tests, a line said once, a checksum of an error page, a comparison with a copy the device did not hold, and a wait that passed over its own answer, and on 2026-11-16, from the supervisor's restart rigs and the Pi's receive interrupt, a serving check that passed with its server dead, a check that passed in its own control, a count that passed with the fault in it, two tests that checked the parts and not the property, and a write no emulator could make fail, and on 2026-11-17 to 2026-11-18, from `netd`'s waits and its receive loop, a duration the mutation also met, a rig that checked a restart did not happen and never that one did, and a probe that judged the kernel's answer with a reading of its own, and on 2026-11-19, from the Pi net plan's last open items, a board run with nothing to test, a stop that was the firmware's, and tests named for a defect that lived elsewhere. The spine below has held for all of them.*
 
 The previous day's retrospective
 ([`repairing-the-repairs-postmortem.md`](repairing-the-repairs-postmortem.md))
@@ -3199,3 +3199,48 @@ found it. The reading is now one function, `got`, which both call, and
 the probe's line says how `got` read the answer; with `got` reading the
 sentinel as nothing, the rig failed. **A probe built beside the code it
 stands in for checks the probe. Have it call the code.**
+
+## Three more, from the Pi net plan's last open items (2026-11-19)
+
+Four pull requests closed the step 6 and step 8 items and #487's board
+question, and each first version had its central claim corrected by a
+review. Three of the corrections were instruments that could not see
+what they were run for.
+
+**A board run with nothing to test.** #487's review asked whether a
+frame in the transmitter when the link drops leaves it busy afterwards,
+and only the board could say. Boot 46 pulled the cable, put it back,
+pinged, and passed. Its log showed `first frame sent` after the cable
+went back in: nothing had been sent before the pull, so no frame could
+have been stranded, and the run would have passed with the transmitter
+broken in exactly the way asked about. Boot 47 pinged first, then
+pulled. **A run for a state has to put the device in that state first.
+Read the log for the event that makes the check mean something, not
+only for the absence of the failure.**
+
+**A stop that was the firmware's.** #488's first version stopped a boot
+with an unusable timer frequency by `panic!`, and its QEMU table said 0
+and 999 "stopped with the line". The rows were read from the first five
+lines of each log. uefi's panic handler prints, then stalls ten seconds
+on the firmware's timer (the one just found unusable), then calls
+`ResetSystem(SHUTDOWN)`. The 0 run's log, read whole, went on to edk2's
+`ASSERT ... TimerFreq != 0` inside that stall, and on a release firmware
+the board would have powered off with the line gone. The control (0
+with no check) had hit the same `ASSERT`, so the check and its control
+ended alike, and the table could not tell them apart. The review read
+the handler's source. The stop now parks in a loop of its own, and the
+line is the console's last. **Where a run ends is part of its result.
+Read the end of the log, and compare the check's ending with the
+control's: if they are the same, the check has shown nothing.**
+
+**Tests named for a defect that lived elsewhere.** #490 merged five
+address parsers into `netconf`'s and added two tests for `netd`'s wrap
+(`18446744073709551617.0.0.1` read as `1.0.0.1`). `netconf`'s parser had
+always refused a part of four digits, so both tests passed on the code
+before the change and could not fail on any code the change touched.
+The wrap was in `netd`'s copy and its decimal reader, and neither was
+tested. The review found it. The wrap tests now sit beside the readers
+that had the fault (`accounts::parse_dec`, which `netd` now calls), and
+fail with the wrapping arithmetic put back. **A test is for the code
+that had the fault. Run it against the old code first: a regression
+test that passes there was written for a different defect.**

@@ -11,6 +11,37 @@ here actually works today, see [`architecture.md`](architecture.md) and
 
 **Not yet released.** Changes since v0.25.0, drafted as they land.
 
+**An address is four numbers of at most three digits, everywhere
+(2026-11-19, #490).** `mount -r`, `cpu` and `ping` refuse a part such
+as `0001` that they used to take, as `/etc/net` and
+`/etc/cluster/authorized` always did; one parser, the new `netaddr`
+crate, now reads every dotted address. `netd`'s own copy took any
+number of digits and wrapped, so `18446744073709551617.0.0.1` was
+`1.0.0.1`, and a `/net/tcp` `connect` port of `18446744073709551696`
+was port 80; both are refused now.
+
+**A boot whose timer frequency is unusable stops and says so
+(2026-11-19, #488).** The kernel reads the generic timer's counter
+frequency once, logs it (the Pi 4's is 54 MHz, QEMU's 62.5 MHz), and
+uses that value on every core. Below 1 MHz the boot stops before
+leaving the firmware, with a line that stays on the screen, where
+before the first division by it ended the boot with no explanation.
+
+**The Pi's network survives a cable pulled and put back (2026-11-19,
+#487).** The link is asked once a second for as long as the board is
+up. A link that goes down refuses sends until it is back, and one that
+returns, at any speed, sets the MAC again at it; before, a cable
+pulled after the boot left the board with the old speed and nothing
+passing, or never noticed. If the PHY stops answering, the asking
+slows to once a minute until it reads again. Checked on the board with
+two pulls and `curl` after each.
+
+**The Pi logs what its link agreed about pause (2026-11-18, #485).**
+The link line now says what each end advertises of flow control, what
+that agrees, and what the MAC does. On the board: this end offers none,
+the switch both kinds, so none is agreed, which is what the MAC does
+since #480.
+
 **`NET_RECV` never answers a length past the caller's buffer
 (2026-11-18, #482). An ABI change.** A frame longer than the buffer is
 taken off the receive ring, dropped, and answered with a new sentinel,
