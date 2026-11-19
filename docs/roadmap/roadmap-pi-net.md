@@ -1338,8 +1338,11 @@ own. The entries below stand as they were put.
      unmodified build logged 62500000 Hz and booted. The control, 0 with
      no check, did not reach the kernel's division: edk2's debug firmware
      ended the boot first with the same `ASSERT`, in a delay of its own.
-     The Pi's frequency is in the log of its next boot.
-     `publish_cycle_word` stays open.
+     **Run on the board 2026-11-19, passed** (`73c1fb944a3f`, debug,
+     boot 48, by Hans): `the generic timer's counter runs at 54000000
+     Hz`, the Pi 4's first recorded frequency, 54 times the floor; the
+     three secondaries up, the link up at 1000 Mb/s, login, and a ping
+     with its reply. `publish_cycle_word` stays open.
    - *The send-time lines are said through the console that goes quiet
      once `cond` owns a framebuffer* (the review's reading, not checked
      here), so on a board with no serial console the first-frame line
