@@ -1354,7 +1354,17 @@ own. The entries below stand as they were put.
      not `mod reg`. **Its review** found the first version had made the
      store private and left `ring_publish` taking any pointer: the
      convention had moved up one layer, not ended. Code added inside
-     `mod ring` is not held, the limit `mod bus` has too.
+     `mod ring` is not held, the limit `mod bus` has too. **Run on the
+     board 2026-11-19, passed** (`f4d9ad31a673`, debug, boot 49, by
+     Hans), with a USB stick and a keyboard in: the command ring and EP0
+     rings enumerated the controller's hub, the stick (port 3, mass
+     storage, its bulk endpoints configured) and the keyboard behind the
+     hub (port 1.4); `keyboard ready` posted the interrupt ring, and keys
+     typed on it reached the shell. No assertion, fault, `wedged` or
+     `restarted` line. **The bulk rings were not run on the board:** the
+     kernel holds one block device, the SD card took it as the boot disk
+     (`usb-msd not installed: the SD card is the boot disk`), and no
+     transfer went to the stick; `make test-usb-hub` runs them on QEMU.
    - *The send-time lines are said through the console that goes quiet
      once `cond` owns a framebuffer* (the review's reading, not checked
      here), so on a board with no serial console the first-frame line
