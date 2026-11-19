@@ -1,6 +1,7 @@
-//! An IPv4 address and a port as text: the one parser of a dotted address
-//! ([`parse_ip`]), its one formatter ([`format_ip`]), and the one decimal
-//! reader `netd` takes a port or a connection number with ([`parse_dec`]).
+//! An IPv4 address as text: the one parser of a dotted address
+//! ([`parse_ip`]) and its one formatter ([`format_ip`]). A port or any
+//! other decimal is `accounts::parse_dec`'s, the checked reader `netd`
+//! already linked (the second review of #490 found a copy of it here).
 //! Pure, no dependencies, so the rules run on the host (`make test`) and
 //! every caller, kernel-free or not, can link it.
 //!
@@ -9,14 +10,14 @@
 //! `clusterkeys`' refused a part of more than three digits; the shell's and
 //! `ping`'s took any number of leading zeros; and `netd`'s took any digits
 //! and wrapped, so `18446744073709551617.0.0.1` was `1.0.0.1`, as its
-//! decimal reader made a `connect` port of 18446744073709551696 port 80.
+//! decimal reader made a `connect` port of 18446744073709551696 port 80
+//! (`netd` reads its decimals with `accounts::parse_dec` since).
 //! The first version of the change put the one parser in `netconf`, which
 //! is `/etc/net`'s, and so tied the cluster's identity files, the shell
 //! and `ping` to `netd`'s configuration; this crate is below all of them.
 //!
 //! Callers: `netconf` (`/etc/net`), `clusterkeys` (`/etc/cluster/authorized`)
-//! and the `clusterkey` tool, `netd` (`/net/tcp` `connect` and `announce`,
-//! `/net/ip`), the shell (`mount -r`, `cpu`, the mount listing) and `ping`.
+//! and the `clusterkey` tool, `netd` (`/net/tcp` `connect`, `/net/ip`), the shell (`mount -r`, `cpu`, the mount listing) and `ping`.
 //! A change here owes the rigs `docs/testing/make-targets.md` names for it.
 
 #![no_std]
@@ -84,22 +85,4 @@ pub fn format_ip(ip: &[u8; 4], out: &mut [u8; IP_TEXT_MAX]) -> usize {
         n += 1;
     }
     n
-}
-
-/// Decimal digits, and nothing else, as a `u64`. `None` on an empty word,
-/// a byte that is not a digit (no sign, no space), or a value past
-/// `u64::MAX`, which is refused and never wrapped. A caller with a smaller
-/// bound (a port's 65535) checks it on the value.
-pub fn parse_dec(word: &[u8]) -> Option<u64> {
-    if word.is_empty() {
-        return None;
-    }
-    let mut v = 0u64;
-    for &d in word {
-        if !d.is_ascii_digit() {
-            return None;
-        }
-        v = v.checked_mul(10)?.checked_add(u64::from(d - b'0'))?;
-    }
-    Some(v)
 }

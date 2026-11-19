@@ -6289,7 +6289,7 @@ fn parse_connect(data: &[u8]) -> Option<([u8; 4], u16)> {
     }
     let bang = rest.iter().position(|&b| b == b'!')?;
     let ip = netaddr::parse_ip(&rest[..bang])?;
-    let port = netaddr::parse_dec(&rest[bang + 1..])?;
+    let port = accounts::parse_dec(&rest[bang + 1..])?;
     if port > u16::MAX as u64 {
         return None;
     }
@@ -6304,7 +6304,7 @@ fn dial_path(sub: &[u8]) -> Option<(usize, &[u8])> {
     }
     let rest = &sub[1..]; // "<N>/<leaf>"
     let slash = rest.iter().position(|&b| b == b'/')?;
-    let n = netaddr::parse_dec(&rest[..slash])? as usize;
+    let n = accounts::parse_dec(&rest[..slash])? as usize;
     Some((n, &rest[slash + 1..]))
 }
 
@@ -6394,7 +6394,7 @@ fn dial_file_op(
             while !rest.is_empty() && matches!(rest[rest.len() - 1], b'\n' | b'\r' | b' ' | b'\t') {
                 rest = &rest[..rest.len() - 1];
             }
-            let Some(port) = netaddr::parse_dec(rest).filter(|p| *p <= u16::MAX as u64) else {
+            let Some(port) = accounts::parse_dec(rest).filter(|p| *p <= u16::MAX as u64) else {
                 return (syscall_abi::FS_ERR_INVALID_NAME, 0);
             };
             let c = dials[n].as_mut().unwrap();

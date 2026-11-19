@@ -29,20 +29,3 @@ fn addresses_round_trip() {
     let n = format_ip(&[10, 0, 2, 15], &mut buf);
     assert_eq!(&buf[..n], b"10.0.2.15");
 }
-
-#[test]
-fn a_decimal_is_digits_alone() {
-    assert_eq!(parse_dec(b"0"), Some(0));
-    assert_eq!(parse_dec(b"80"), Some(80));
-    assert_eq!(parse_dec(b"18446744073709551615"), Some(u64::MAX));
-    for bad in [&b""[..], b" 80", b"80 ", b"+80", b"-1", b"8x0"] {
-        assert_eq!(parse_dec(bad), None, "{:?}", core::str::from_utf8(bad));
-    }
-}
-
-/// The review of #490: netd's reader wrapped, so this port was 80.
-#[test]
-fn a_decimal_past_u64_is_refused_and_not_wrapped() {
-    assert_eq!(parse_dec(b"18446744073709551616"), None);
-    assert_eq!(parse_dec(b"18446744073709551696"), None);
-}

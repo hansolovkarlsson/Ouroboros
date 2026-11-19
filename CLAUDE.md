@@ -509,9 +509,8 @@ genet/               the Pi 4's Ethernet, Broadcom GENET v5: the logic that need
 netconf/             netd's network configuration: the /etc/net file (address, mask, gateway, dns; a file with a line not
                      understood is refused whole), the values with no file (QEMU user networking's, as netd always held), and
                      the next hop for a target. netd is the one caller; host-tested in make test
-netaddr/             an IPv4 address and a port as text: THE ONE dotted-address parser (parse_ip) and formatter (format_ip),
-                     and the checked decimal reader netd takes a port with (parse_dec). netconf, clusterkeys and the clusterkey
-                     tool, netd, the shell and ping call it; no dependencies; host-tested in make test
+netaddr/             an IPv4 address as text: THE ONE dotted-address parser (parse_ip) and formatter (format_ip). netconf,
+                     clusterkeys and the clusterkey tool, netd, the shell and ping call it; no dependencies; host-tested in make test
 heldkeys/            netd's held user keys: the table, whose key signs for a parked request, and when a run sent under one ends; liveness
                      is passed in, so the rules that turn on a login dead and not yet reaped run on the host. netd is the one caller
 keyseq/              tells a key's escape sequence (ESC [ A) from ordinary input: the ONE filter every keyboard reader uses

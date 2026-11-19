@@ -25,11 +25,11 @@ pub extern "C" fn _start() -> ! {
     let target = ulib::stdout_target();
 
     let mut argbuf = [0u8; 32];
-    let ip = match ulib::arg(1, &mut argbuf) {
-        Some(len) if len > 0 => core::str::from_utf8(&argbuf[..len]).unwrap_or(""),
+    let len = match ulib::arg(1, &mut argbuf) {
+        Some(len) if len > 0 => len,
         _ => fail(b"ping: usage: ping <a.b.c.d>\r\n", target),
     };
-    let Some(target_ip) = netaddr::parse_ip(ip.as_bytes()) else {
+    let Some(target_ip) = netaddr::parse_ip(&argbuf[..len]) else {
         fail(b"ping: usage: ping <a.b.c.d>\r\n", target);
     };
 

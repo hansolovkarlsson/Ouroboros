@@ -389,7 +389,7 @@ fn peers(target: u64) -> u64 {
                 found += 1;
                 out(target, p.name);
                 out(target, b"  ");
-                let mut ip = [0u8; 15];
+                let mut ip = [0u8; netaddr::IP_TEXT_MAX];
                 let ilen = netaddr::format_ip(&p.ip, &mut ip);
                 out(target, &ip[..ilen]);
                 out(target, b"  ");
