@@ -1472,6 +1472,23 @@ own. The entries below stand as they were put.
      on RGMII the MAC drives its own transmit clock, so it is expected
      to drain, and only the board can say); and if a switch at 100 Mb/s
      is at hand, a cable moved to it.
+     **Run on the board 2026-11-19, passed** (`289a4baf7afa`, debug,
+     boot 46, by Hans): link up at 1000 Mb/s full duplex at boot, the
+     pause line as boot 45's; the cable pulled, and at the next ask
+     `link down at a wait (no link): sends are refused until it is up
+     again; the MAC stays on`. A `ping 192.168.77.1` during the pull
+     answered `unreachable (no ARP reply)`, the send refused with no
+     busy or timeout line. The cable back: `link up at a wait, 1000 Mb/s,
+     full duplex`, `the MAC, on since before the link dropped, is set
+     again at 1000 Mb/s (UMAC_CMD 0x1000010b ...)` and the pause line;
+     the same ping then had its reply, and the boot's first frame sent
+     (42 bytes, the ARP request) was taken by the device. No `wedged`
+     or `restarted` line. **Not shown by this run:** a frame in the
+     transmitter at the drop, since nothing had been sent before the
+     pull (the first frame sent was after it), so the review's question
+     of a transmitter left busy stays open; the speed change, with no
+     100 Mb/s switch in the run; and `curl` (the ping stands for the
+     path through `netd`).
    - *The receiver is never turned off.* With nobody draining it
      (before `netd` first runs, after `netd` is past its restart cap,
      after the kernel halts) the ring fills and the DMA sits at its
