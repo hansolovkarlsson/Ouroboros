@@ -106,6 +106,7 @@ name = "clusterkeys"
 version = "0.1.0"
 dependencies = [
  "ed25519",
+ "netconf",
  "ninep-abi",
 ]
 
@@ -412,6 +413,7 @@ dependencies = [
 name = "ping"
 version = "0.1.0"
 dependencies = [
+ "netconf",
  "syscall-abi",
  "ulib",
 ]
@@ -570,6 +572,7 @@ dependencies = [
  "accounts",
  "clusterkeys",
  "keyseq",
+ "netconf",
  "ninep-abi",
  "syscall-abi",
 ]

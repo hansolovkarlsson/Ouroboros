@@ -96,6 +96,14 @@ fn unicast(ip: Ip) -> bool {
 
 /// Four decimal numbers of 0 to 255 with single dots between, and nothing
 /// else: no sign, no space, no empty part, at most three digits a part.
+///
+/// **The one dotted-address parser** (since 2026-11-19): `clusterkeys`
+/// re-exports it for `/etc/cluster/authorized` and the `clusterkey` tool,
+/// and `netd` (its `/net/tcp` `connect`), the shell (`mount -r`, `cpu`) and
+/// `ping` call it. Until then there were five, with five sets of rules:
+/// `netd`'s took any number of digits a part and wrapped, so
+/// `18446744073709551617.0.0.1` was `1.0.0.1`, and `ping`'s took any number
+/// of leading zeros.
 pub fn parse_ip(word: &[u8]) -> Option<Ip> {
     let mut ip = [0u8; 4];
     let mut part = 0;

@@ -10,39 +10,6 @@
 #![no_std]
 #![no_main]
 
-/// Parse a dotted-quad IPv4 (`10.0.2.2`) into its four octets. Hand-rolled
-/// byte-by-byte (no `str::split`) - relocation-safe, from the shell's original.
-fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
-    let mut out = [0u8; 4];
-    let mut idx = 0;
-    let mut val: u32 = 0;
-    let mut digits = 0;
-    for &c in s.as_bytes() {
-        if c == b'.' {
-            if digits == 0 || idx >= 3 {
-                return None;
-            }
-            out[idx] = val as u8;
-            idx += 1;
-            val = 0;
-            digits = 0;
-        } else if c.is_ascii_digit() {
-            val = val * 10 + (c - b'0') as u32;
-            if val > 255 {
-                return None;
-            }
-            digits += 1;
-        } else {
-            return None;
-        }
-    }
-    if digits == 0 || idx != 3 {
-        return None;
-    }
-    out[3] = val as u8;
-    Some(out)
-}
-
 /// Print an error to the console (stderr), close the stdout stream (a no-op for
 /// the console, an empty end-of-stream for a capture), and exit non-zero.
 fn fail(msg: &[u8], target: u64) -> ! {
@@ -62,7 +29,7 @@ pub extern "C" fn _start() -> ! {
         Some(len) if len > 0 => core::str::from_utf8(&argbuf[..len]).unwrap_or(""),
         _ => fail(b"ping: usage: ping <a.b.c.d>\r\n", target),
     };
-    let Some(target_ip) = parse_ipv4(ip) else {
+    let Some(target_ip) = netconf::parse_ip(ip.as_bytes()) else {
         fail(b"ping: usage: ping <a.b.c.d>\r\n", target);
     };
 

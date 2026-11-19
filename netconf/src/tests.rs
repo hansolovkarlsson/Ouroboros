@@ -48,7 +48,7 @@ fn an_address_is_four_numbers_and_nothing_else() {
         assert!(parse_ip(ok).is_some(), "{:?}", core::str::from_utf8(ok));
     }
     assert_eq!(parse_ip(b"010.000.002.015"), Some([10, 0, 2, 15]));
-    for bad in [&b""[..], b"1.2.3", b"1.2.3.4.5", b"1.2.3.", b".1.2.3", b"1..2.3", b"256.1.1.1", b"1.2.3.4 ", b"1.2.3.-4", b"1.2.3.4x", b"0001.2.3.4", b"1,2,3,4", b"1.2.3.+4"] {
+    for bad in [&b""[..], b"1.2.3", b"1.2.3.4.5", b"1.2.3.", b".1.2.3", b"1..2.3", b"256.1.1.1", b"1.2.3.4 ", b"1.2.3.-4", b"1.2.3.4x", b"0001.2.3.4", b"1,2,3,4", b"1.2.3.+4", b"18446744073709551617.0.0.1", b"1.2.3.18446744073709551620"] {
         assert_eq!(parse_ip(bad), None, "{:?}", core::str::from_utf8(bad));
     }
     assert_eq!(parse(b"address 10.1.2\nmask 255.0.0.0\n"), Err(Error::NotAnAddress { line: 1 }));

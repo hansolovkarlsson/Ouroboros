@@ -126,39 +126,9 @@ fn hex_digit(c: u8) -> Option<u8> {
     }
 }
 
-/// Parse a dotted-quad IPv4 address.
-pub fn parse_ip(s: &[u8]) -> Option<[u8; 4]> {
-    let mut out = [0u8; 4];
-    let mut field = 0usize;
-    let mut value: u32 = 0;
-    let mut digits = 0usize;
-    for &c in s {
-        match c {
-            b'0'..=b'9' => {
-                value = value * 10 + (c - b'0') as u32;
-                digits += 1;
-                if value > 255 || digits > 3 {
-                    return None;
-                }
-            }
-            b'.' => {
-                if digits == 0 || field >= 3 {
-                    return None;
-                }
-                out[field] = value as u8;
-                field += 1;
-                value = 0;
-                digits = 0;
-            }
-            _ => return None,
-        }
-    }
-    if field != 3 || digits == 0 {
-        return None;
-    }
-    out[3] = value as u8;
-    Some(out)
-}
+/// Parse a dotted-quad IPv4 address: `netconf`'s, the one parser (its
+/// doc), re-exported so this crate's callers keep their path.
+pub use netconf::parse_ip;
 
 /// Format a dotted-quad address into `out`, returning its length.
 pub fn format_ip(ip: &[u8; 4], out: &mut [u8; 15]) -> usize {
