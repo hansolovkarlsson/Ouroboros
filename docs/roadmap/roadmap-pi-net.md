@@ -1341,8 +1341,30 @@ own. The entries below stand as they were put.
      **Run on the board 2026-11-19, passed** (`73c1fb944a3f`, debug,
      boot 48, by Hans): `the generic timer's counter runs at 54000000
      Hz`, the Pi 4's first recorded frequency, 54 times the floor; the
-     three secondaries up, the link up at 1000 Mb/s, login, and a ping
-     with its reply. `publish_cycle_word` stays open.
+     three secondaries up, the link up at 1000 Mb/s, login, a ping with
+     its reply, and `curl` from the Mac returned the page.
+     **The first fixed 2026-11-19** (`xhci/cycle-word-in-reg`, #489):
+     `publish_cycle_word` is private to a `mod ring` in `xhci.rs`, and
+     `ring_publish`, its one caller, and `ring_push` take a `ring::Ring`,
+     a handle only that module builds, from the ring statics with each
+     array's own length, as only `reg::locate` builds `reg`'s. So from
+     outside the module neither the store nor a publish can be pointed at
+     a register, at any other address, or at a ring with another's
+     length. It is memory and not a register, so a module of its own and
+     not `mod reg`. **Its review** found the first version had made the
+     store private and left `ring_publish` taking any pointer: the
+     convention had moved up one layer, not ended. Code added inside
+     `mod ring` is not held, the limit `mod bus` has too. **Run on the
+     board 2026-11-19, passed** (`f4d9ad31a673`, debug, boot 49, by
+     Hans), with a USB stick and a keyboard in: the command ring and EP0
+     rings enumerated the controller's hub, the stick (port 3, mass
+     storage, its bulk endpoints configured) and the keyboard behind the
+     hub (port 1.4); `keyboard ready` posted the interrupt ring, and keys
+     typed on it reached the shell. No assertion, fault, `wedged` or
+     `restarted` line. **The bulk rings were not run on the board:** the
+     kernel holds one block device, the SD card took it as the boot disk
+     (`usb-msd not installed: the SD card is the boot disk`), and no
+     transfer went to the stick; `make test-usb-hub` runs them on QEMU.
    - *The send-time lines are said through the console that goes quiet
      once `cond` owns a framebuffer* (the review's reading, not checked
      here), so on a board with no serial console the first-frame line

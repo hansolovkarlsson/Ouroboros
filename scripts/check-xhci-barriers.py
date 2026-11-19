@@ -26,7 +26,9 @@ assembly rather than left to the compiler. Deleting a barrier, putting an
 instruction between it and its store, or routing a register write (a
 `reg::Whole32::write` that stores without calling `mmio_write32`) or the
 flip around its function fails it. That holds because each function has ONE
-caller in the source (`Whole32::write`, `Whole64::write`, `ring_publish`):
+caller in the source (`Whole32::write`, `Whole64::write`, `ring_publish`),
+each in a module that keeps its store private (`mod reg`; `mod ring`
+since 2026-11-19), so a second caller outside that module does not compile:
 with a second caller, routing one around it leaves "at least one call" true
 and the check green. `Kept32::write` and `PortStatus::write` go through
 `Whole32::write`, which the doorbells also call, and `Kept64::write` through
