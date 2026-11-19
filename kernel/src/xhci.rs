@@ -292,7 +292,7 @@ const EP_TYPE_BULK_OUT: u32 = 2;
 const EP_TYPE_BULK_IN: u32 = 6;
 
 const MAX_SLOTS_ENABLED: usize = 8;
-/// The most TRBs `Xhci::ring_publish` takes at once: a control transfer's
+/// The most TRBs `ring::ring_publish` takes at once: a control transfer's
 /// Setup, Data and Status stages.
 const MAX_PUBLISH: usize = 3;
 // The Pi 4's VL805 asks for 31 (HCSPARAMS2 0xfc000031, 2026-10-03); this
@@ -656,16 +656,6 @@ unsafe fn read32(addr: u64) -> u32 {
     unsafe { read_volatile(addr as *const u32) }
 }
 
-/// `ring_publish`'s flip: `dmb oshst; str w1, [x0]; ret`, the barrier and
-/// the one store that hands a batch of TRBs to the controller. Naked, like
-/// `reg`'s `mmio_write32`, so the image holds these fixed instructions
-/// whatever the profile: no edit can put a store between them, and
-/// `scripts/check-xhci-barriers.py` can find them. Inlining it would leave
-/// that check nothing to find.
-#[unsafe(naked)]
-unsafe extern "C" fn publish_cycle_word(ptr: *mut u32, val: u32) {
-    core::arch::naked_asm!("dmb oshst", "str w1, [x0]", "ret");
-}
 unsafe fn read64(addr: u64) -> u64 {
     unsafe { read32(addr) as u64 | ((read32(addr + 4) as u64) << 32) }
 }
@@ -711,6 +701,101 @@ const _: () = {
     assert!(rsvdp_merge(0, 0x30, 0x1000_0070) == 0x1000_0040);
 };
 
+/// A TRB batch handed to the controller: [`ring::ring_publish`] and the
+/// naked store that flips its first cycle bit, `publish_cycle_word`, which is
+/// private here so `ring_publish` is its one caller and no other code can
+/// reach the store (a second caller outside this module does not compile).
+/// Until 2026-11-19 the store sat at the file's top level, its one caller
+/// held by convention, and a call with a register's address would have
+/// stored there without the `dsb sy` or the RsvdP merge `reg` holds every
+/// register write to: what `genetnic.rs`'s `mod bus` was made to end for
+/// the GENET's store (the plan's step 6 item, `roadmap-pi-net.md`).
+mod ring {
+    use super::*;
+
+    /// [`ring_publish`]'s flip: `dmb oshst; str w1, [x0]; ret`, the barrier and
+    /// the one store that hands a batch of TRBs to the controller. Naked, like
+    /// `reg`'s `mmio_write32`, so the image holds these fixed instructions
+    /// whatever the profile: no edit can put a store between them, and
+    /// `scripts/check-xhci-barriers.py` can find them. Inlining it would leave
+    /// that check nothing to find.
+    #[unsafe(naked)]
+    unsafe extern "C" fn publish_cycle_word(ptr: *mut u32, val: u32) {
+        core::arch::naked_asm!("dmb oshst", "str w1, [x0]", "ret");
+    }
+
+    /// Writes `trbs` in order at the current producer position of `ring`,
+    /// advancing `enqueue`/`cycle` and wrapping through the ring's fixed
+    /// Link TRB (the last slot) when it reaches the end, and publishes them
+    /// to the controller at once. Returns each TRB's physical address at
+    /// the same index (the rest zero), for callers that match a later
+    /// completion event by pointer (see `push_command`). A batch is one TD,
+    /// or a control transfer's Setup, Data and Status stage TDs together,
+    /// as Linux's `xhci_queue_ctrl_tx` publishes them; at most
+    /// `MAX_PUBLISH` TRBs, which a caller's wrong count turns into a halt
+    /// before anything is written. The one way a TRB reaches a ring the
+    /// controller may be reading; the only other TRB stores are a ring's
+    /// setup (zeroing it and writing its Link TRB), made before the
+    /// command that gives the controller the ring.
+    ///
+    /// **The order is the contract.** A TRB belongs to the controller as
+    /// soon as its cycle bit matches the ring's, and the controller may
+    /// re-read the dequeue TRB without a new doorbell. So every word of
+    /// the batch is written first with the FIRST TRB's cycle bit still
+    /// software's, then `dmb oshst`, then that one bit flipped: the
+    /// controller sees all of the batch or none of it, never a fresh cycle
+    /// bit over a stale pointer or length, and never a Setup stage whose
+    /// Data and Status TRBs are not there yet. This is Linux's
+    /// `giveback_first_trb`; `dmb oshst` is its `dma_wmb()` on arm64, the
+    /// write-side twin of `event_ring_pop`'s `dmb oshld`. Until 2026-10-03
+    /// each TRB was one `write_volatile` of all four words, which the
+    /// compiler may split into stores in any order, cycle word included,
+    /// and which published the TRB as it was written.
+    ///
+    /// The Link TRB's own cycle bit is rewritten on every wrap, not just
+    /// set once at ring-init time: it's logically "produced" exactly like
+    /// any real TRB each time the ring cycles, and a stale cycle bit there
+    /// would make the second (and every further) lap invalid to hardware.
+    /// A real, easy-to-miss class of bug in a first xHCI driver - this
+    /// only actually matters once a ring wraps more than once, which the
+    /// command ring (at most 2-3 commands ever issued) never does in this
+    /// driver's own testing, but the EP0 ring (one `poll_key` per shell
+    /// loop iteration, indefinitely) certainly will. Only its cycle word
+    /// is written: its pointer words are fixed at ring setup. A wrap inside
+    /// a batch is covered by the same barrier, since the controller stops
+    /// at the held first TRB and reads nothing past it until the flip.
+    pub(super) unsafe fn ring_publish(ring_ptr: *mut Trb, ring_len: usize, enqueue: &mut usize, cycle: &mut bool, trbs: &[Trb]) -> [u64; MAX_PUBLISH] {
+        assert!(trbs.len() <= MAX_PUBLISH);
+        let mut addrs = [0u64; MAX_PUBLISH];
+        let Some(first) = trbs.first() else { return addrs };
+        let first_dw3_ptr = unsafe { ring_ptr.add(*enqueue).cast::<u32>().add(3) };
+        let first_dw3 = (first[3] & !1) | (*cycle as u32);
+        for (i, trb) in trbs.iter().enumerate() {
+            let dw3 = (trb[3] & !1) | (*cycle as u32);
+            let slot_ptr = unsafe { ring_ptr.add(*enqueue) };
+            let words = slot_ptr.cast::<u32>();
+            unsafe {
+                write_volatile(words, trb[0]);
+                write_volatile(words.add(1), trb[1]);
+                write_volatile(words.add(2), trb[2]);
+                // The first is held: its cycle bit software's until the flip.
+                write_volatile(words.add(3), if i == 0 { dw3 ^ 1 } else { dw3 });
+            }
+            addrs[i] = slot_ptr as u64;
+            *enqueue += 1;
+            if *enqueue == ring_len - 1 {
+                let link_dw3 = unsafe { ring_ptr.add(ring_len - 1).cast::<u32>().add(3) };
+                let link = unsafe { read_volatile(link_dw3) };
+                unsafe { write_volatile(link_dw3, (link & !1) | (*cycle as u32)) };
+                *cycle = !*cycle;
+                *enqueue = 0;
+            }
+        }
+        unsafe { publish_cycle_word(first_dw3_ptr, first_dw3) };
+        addrs
+    }
+}
+
 /// The xHCI registers, written only through a handle that knows how the
 /// register must be written. A register with RsvdP bits is a [`reg::Kept32`]
 /// or [`reg::Kept64`], whose `write` reads it and keeps those bits (RsvdP
@@ -735,8 +820,9 @@ const _: () = {
 /// What this does not cover: TRBs and contexts are memory, written with
 /// `write_volatile`, and nothing stops a raw pointer store to a register
 /// address; `publish_cycle_word`, the ring's `dmb oshst; str`, takes any
-/// pointer, so it too would store to a register without the `dsb sy` or the
-/// RsvdP merge; a block's `at` gives a plain address for a read, which can
+/// pointer, held to TRBs only by being private to [`ring`], whose one
+/// caller of it stores to a ring's own slot (since 2026-11-19; a second
+/// caller inside that module would still compile); a block's `at` gives a plain address for a read, which can
 /// name another block's offset; and DCBAAP and ERDP are both a `Whole64`,
 /// so a function taking one would take the other. PORTSC is a
 /// [`reg::PortStatus`] of its own, whose write writes back only the
@@ -1303,81 +1389,10 @@ struct KeyboardState {
 }
 
 impl Xhci {
-    /// Writes `trbs` in order at the current producer position of `ring`,
-    /// advancing `enqueue`/`cycle` and wrapping through the ring's fixed
-    /// Link TRB (the last slot) when it reaches the end, and publishes them
-    /// to the controller at once. Returns each TRB's physical address at
-    /// the same index (the rest zero), for callers that match a later
-    /// completion event by pointer (see `push_command`). A batch is one TD,
-    /// or a control transfer's Setup, Data and Status stage TDs together,
-    /// as Linux's `xhci_queue_ctrl_tx` publishes them; at most
-    /// `MAX_PUBLISH` TRBs, which a caller's wrong count turns into a halt
-    /// before anything is written. The one way a TRB reaches a ring the
-    /// controller may be reading; the only other TRB stores are a ring's
-    /// setup (zeroing it and writing its Link TRB), made before the
-    /// command that gives the controller the ring.
-    ///
-    /// **The order is the contract.** A TRB belongs to the controller as
-    /// soon as its cycle bit matches the ring's, and the controller may
-    /// re-read the dequeue TRB without a new doorbell. So every word of
-    /// the batch is written first with the FIRST TRB's cycle bit still
-    /// software's, then `dmb oshst`, then that one bit flipped: the
-    /// controller sees all of the batch or none of it, never a fresh cycle
-    /// bit over a stale pointer or length, and never a Setup stage whose
-    /// Data and Status TRBs are not there yet. This is Linux's
-    /// `giveback_first_trb`; `dmb oshst` is its `dma_wmb()` on arm64, the
-    /// write-side twin of `event_ring_pop`'s `dmb oshld`. Until 2026-10-03
-    /// each TRB was one `write_volatile` of all four words, which the
-    /// compiler may split into stores in any order, cycle word included,
-    /// and which published the TRB as it was written.
-    ///
-    /// The Link TRB's own cycle bit is rewritten on every wrap, not just
-    /// set once at ring-init time: it's logically "produced" exactly like
-    /// any real TRB each time the ring cycles, and a stale cycle bit there
-    /// would make the second (and every further) lap invalid to hardware.
-    /// A real, easy-to-miss class of bug in a first xHCI driver - this
-    /// only actually matters once a ring wraps more than once, which the
-    /// command ring (at most 2-3 commands ever issued) never does in this
-    /// driver's own testing, but the EP0 ring (one `poll_key` per shell
-    /// loop iteration, indefinitely) certainly will. Only its cycle word
-    /// is written: its pointer words are fixed at ring setup. A wrap inside
-    /// a batch is covered by the same barrier, since the controller stops
-    /// at the held first TRB and reads nothing past it until the flip.
-    unsafe fn ring_publish(ring_ptr: *mut Trb, ring_len: usize, enqueue: &mut usize, cycle: &mut bool, trbs: &[Trb]) -> [u64; MAX_PUBLISH] {
-        assert!(trbs.len() <= MAX_PUBLISH);
-        let mut addrs = [0u64; MAX_PUBLISH];
-        let Some(first) = trbs.first() else { return addrs };
-        let first_dw3_ptr = unsafe { ring_ptr.add(*enqueue).cast::<u32>().add(3) };
-        let first_dw3 = (first[3] & !1) | (*cycle as u32);
-        for (i, trb) in trbs.iter().enumerate() {
-            let dw3 = (trb[3] & !1) | (*cycle as u32);
-            let slot_ptr = unsafe { ring_ptr.add(*enqueue) };
-            let words = slot_ptr.cast::<u32>();
-            unsafe {
-                write_volatile(words, trb[0]);
-                write_volatile(words.add(1), trb[1]);
-                write_volatile(words.add(2), trb[2]);
-                // The first is held: its cycle bit software's until the flip.
-                write_volatile(words.add(3), if i == 0 { dw3 ^ 1 } else { dw3 });
-            }
-            addrs[i] = slot_ptr as u64;
-            *enqueue += 1;
-            if *enqueue == ring_len - 1 {
-                let link_dw3 = unsafe { ring_ptr.add(ring_len - 1).cast::<u32>().add(3) };
-                let link = unsafe { read_volatile(link_dw3) };
-                unsafe { write_volatile(link_dw3, (link & !1) | (*cycle as u32)) };
-                *cycle = !*cycle;
-                *enqueue = 0;
-            }
-        }
-        unsafe { publish_cycle_word(first_dw3_ptr, first_dw3) };
-        addrs
-    }
-
-    /// One TRB, through [`ring_publish`](Self::ring_publish); returns its
+    /// One TRB, through [`ring_publish`](ring::ring_publish); returns its
     /// physical address.
     unsafe fn ring_push(ring_ptr: *mut Trb, ring_len: usize, enqueue: &mut usize, cycle: &mut bool, trb: Trb) -> u64 {
-        let addrs = unsafe { Self::ring_publish(ring_ptr, ring_len, enqueue, cycle, &[trb]) };
+        let addrs = unsafe { ring::ring_publish(ring_ptr, ring_len, enqueue, cycle, &[trb]) };
         addrs[0]
     }
 
@@ -1424,13 +1439,13 @@ impl Xhci {
     /// (`slots[idx].ep0_enqueue`/`ep0_cycle`). A `None` slot is an
     /// internal caller bug; degrading to a no-op (returning a null
     /// pointer no completion will ever match) beats a panic-handler
-    /// hang. Published at once by [`ring_publish`](Self::ring_publish): a
+    /// hang. Published at once by [`ring_publish`](ring::ring_publish): a
     /// control request's Setup, Data and Status TRBs reach the controller
     /// together. Returns their addresses, all null for an empty slot.
     fn push_ep0(&mut self, idx: usize, trbs: &[Trb]) -> [u64; MAX_PUBLISH] {
         let ring_ptr = EP0_RINGS[idx].0.get().cast::<Trb>();
         let Some(slot) = self.slots[idx].as_mut() else { return [0; MAX_PUBLISH] };
-        unsafe { Self::ring_publish(ring_ptr, EP0_RING_SIZE, &mut slot.ep0_enqueue, &mut slot.ep0_cycle, trbs) }
+        unsafe { ring::ring_publish(ring_ptr, EP0_RING_SIZE, &mut slot.ep0_enqueue, &mut slot.ep0_cycle, trbs) }
     }
 
     fn ring_ep0_doorbell(&self, idx: usize) {

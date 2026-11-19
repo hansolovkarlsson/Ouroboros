@@ -182,8 +182,8 @@ pub(crate) fn report_rx_area() {
 /// it, and with a second caller `Mmio::write` could be routed around the
 /// barrier with the check still green (the review of this change,
 /// 2026-11-14; `xhci.rs` keeps its two register stores in `mod reg` for
-/// the same reason, though not `publish_cycle_word`, whose one caller is
-/// still held by convention). A second caller inside this module would
+/// the same reason, and since 2026-11-19 its `publish_cycle_word` in
+/// `mod ring` with its one caller). A second caller inside this module would
 /// compile, so the module is kept to the bus alone. What privacy does not stop: a raw `write_volatile` to a
 /// register, written anywhere in this file. There is none, and the check
 /// does not see one.
