@@ -25,8 +25,9 @@ The checks:
    neither the padding nor a checksum over it.
 3. Requests that must go unanswered, each watched for `QUIET_S`: a bad
    ICMP checksum, a bad IP header checksum, another host's address, the
-   subnet's broadcast address, a fragment, a broadcast IP source, a
-   multicast Ethernet source, and an echo reply (type 0).
+   subnet's broadcast address, a fragment, an IP source a reply cannot go
+   to (255.255.255.255, the subnet's broadcast, 0.0.0.0, 127.0.0.1, the
+   guest's own), a multicast Ethernet source, and an echo reply (type 0).
 4. `netd` still answers after them, and answers a burst of `BURST`
    requests sent back to back, every one.
 5. No server called wedged or restarted, and no fault line in QEMU's trace.
@@ -249,6 +250,10 @@ def main():
                 unanswered(e(13, b"x" * 8, dst_ip=BCAST_IP, eth_dst=b"\xff" * 6), "a request to the subnet's broadcast address")
                 unanswered(e(14, b"x" * 8, frag=0x2000), "a request that is a fragment (more fragments set)")
                 unanswered(e(15, b"x" * 8, src_ip=b"\xff\xff\xff\xff"), "a request from the broadcast address")
+                unanswered(e(18, b"x" * 8, src_ip=BCAST_IP), "a request from the subnet's broadcast address")
+                unanswered(e(19, b"x" * 8, src_ip=bytes(4)), "a request from 0.0.0.0")
+                unanswered(e(21, b"x" * 8, src_ip=bytes([127, 0, 0, 1])), "a request from 127.0.0.1")
+                unanswered(e(22, b"x" * 8, src_ip=guest_ip), "a request from the guest's own address")
                 unanswered(e(16, b"x" * 8, eth_src=bytes.fromhex("010203040506")), "a request from a multicast Ethernet address")
                 unanswered(e(17, b"x" * 8, icmp_type=0), "an echo reply nobody asked for")
 
