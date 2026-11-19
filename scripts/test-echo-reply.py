@@ -33,7 +33,11 @@ The checks:
 5. No server called wedged or restarted, and no fault line in QEMU's trace.
 
 Controlled 2026-11-19: `main` (`cde340c4`), which answers no echo request,
-fails every check in 2 and 4 and passes 3.
+fails every check in 2 and 4 and passes 3. And `answer_echo` with each of
+its fourteen guards removed in turn (each checksum, the destination, the
+fragment test, each of the five source tests, the Ethernet source, the
+type, and the length taken from the frame and not the IP header) fails the
+check for that guard and no other.
 
 Usage:  python3 scripts/test-echo-reply.py      (make test-echo-reply builds the image)
 Exit status: 0, 1 for a failed check, drive-qemu's INCONCLUSIVE for a boot

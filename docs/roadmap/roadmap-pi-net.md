@@ -2159,6 +2159,11 @@ own. The entries below stand as they were put.
     run returns its output; a board with no key in the other's `authorized`
     is refused. Then the same from the Mac with `scripts/np9p_client.py`,
     the foreign observer the QEMU rigs use.
+    Since 2026-11-19 `netd` answers an ICMP echo request
+    (`answer_echo`, `make test-echo-reply`), so `ping` of a board from
+    the Mac or from the other board is the first check of the wire. Step
+    7's and step 9's notes that the Mac's pings went unanswered were
+    true when they were written.
 
 11. **The records.** `testing-pi4.md` section 2 rewritten (its headline is
     "still no networking"), `gap-analysis.md`'s network rows,
