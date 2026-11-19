@@ -1511,7 +1511,22 @@ own. The entries below stand as they were put.
      second. The latched read would see every short drop as down and
      restart the MAC for it, the thing `phy::status` reads past on
      purpose. The kernel's half of the fixes is checked by reading and
-     clippy, not yet on the board.
+     clippy, and its common path on the board (below).
+     **Run on the board again 2026-11-19, passed** (`2cf07036941f`,
+     debug, boot 47, by Hans, the branch's head after its second
+     review): this time a ping before the pull, so the boot's first
+     frame was sent and taken before the link dropped. Two pulls, each
+     the same: `link down at a wait`, a ping during it `unreachable (no
+     ARP reply)`, the cable back, `link up at a wait, 1000 Mb/s, full
+     duplex`, `the MAC, on since before the link dropped, is set again`
+     and the pause line, then a ping with its reply; and `curl` from the
+     Mac returned the page after each. No line of a send refused as busy
+     or of a link that did not read, and no `wedged` or `restarted`.
+     **That answers the review's question:** with a frame sent before the
+     drop, the transmitter was free after it, and the first send after
+     each return was taken. Still not shown: the speed change and its
+     line, and the back-off on a stuck bus, neither of which the board
+     can be made to do with a cable alone.
    - *The receiver is never turned off.* With nobody draining it
      (before `netd` first runs, after `netd` is past its restart cap,
      after the kernel halts) the ring fills and the DMA sits at its
