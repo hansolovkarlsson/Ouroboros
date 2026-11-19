@@ -1489,6 +1489,29 @@ own. The entries below stand as they were put.
      of a transmitter left busy stays open; the speed change, with no
      100 Mb/s switch in the run; and `curl` (the ping stands for the
      path through `netd`).
+     **Its second review, 2026-11-19** (seven findings; five fixed, one
+     left open, one declined): a send's asks did not count toward the
+     back-off, so a send that read the link up left the wait asking once
+     a minute, and after a drop a stuck bus was read on every send. Every
+     ask now tells `linkask` whether it read, and a send does not ask
+     while the asking is backed off (`LinkAsk::backed_off`, host-tested;
+     three mutations of it each failed the tests). That closes step 6's
+     item that nothing remembered a failed read. The restart line said
+     the MAC was "on since before the link dropped" for a speed changed
+     with no drop read between, and says "on at the speed before" there
+     now. The line for a link that did not read at a send was said once
+     a boot, and is once a link. Three docs still said a single run of
+     `say_pause`, or that `Change::Up` covered a change of duplex.
+     **Left open:** a link renegotiated to half duplex runs with the MAC
+     at full duplex, since nothing sets `CMD_HD_EN` (Linux's
+     `bcmgenet_mac_config` does; U-Boot does not). The boot's own start
+     is the same, so it is older than this branch, and only a half-duplex
+     partner on the board can show it. **Declined:** reading the status
+     register once while a link is held, in place of three reads a
+     second. The latched read would see every short drop as down and
+     restart the MAC for it, the thing `phy::status` reads past on
+     purpose. The kernel's half of the fixes is checked by reading and
+     clippy, not yet on the board.
    - *The receiver is never turned off.* With nobody draining it
      (before `netd` first runs, after `netd` is past its restart cap,
      after the kernel halts) the ring fills and the DMA sits at its
