@@ -8,7 +8,8 @@ that the five were not five mistakes: four of them were **one design decision**,
 and the decision's flaw was that it made the dangerous thing merely* un-grepped
 *rather than* unspellable*. A later section, 2026-10-28, records the
 same shape in fsd's `NP_OPEN`: a permission skip whose safety lived in
-another function.*
+another function. Another, 2026-11-19, records it in `xhci.rs`'s TRB
+flip: a private store whose one caller took any pointer.*
 
 ## What was being built
 
@@ -198,3 +199,40 @@ check whole, so the failure mode of losing it went from *escalation* to
    another shape. Put the loosening and the answer in one place, so
    deleting the place deletes both, and run the control that removes the
    answer alone: it is the one that shows whether they were separable.
+
+## Privacy one layer too low (2026-11-19)
+
+The same shape again, in `xhci.rs` (#489). `publish_cycle_word` is the
+naked `dmb oshst; str` that hands a batch of TRBs to the controller,
+and it sat at the file's top level with `ring_publish` its one caller by
+convention: a call with a register's address would have stored there
+past `mod reg`'s barrier and RsvdP merge. The plan's step 6 item said so
+and named the cure that `genetnic.rs`'s `mod bus` had used, privacy.
+
+My first build applied it literally. The store went into `mod ring`,
+private, beside `ring_publish`, and a mutation showed that a second
+caller outside the module did not compile. Four documents said the
+hole was closed. The review asked what `ring_publish` took, and it took
+a `*mut Trb` and a length from its caller, both bare. Every caller in
+the file could still hand the store a register's address, now through
+`ring_publish`'s plain stores and then the flip. The convention had
+moved up one layer, and the mutation had tested the layer that no
+longer mattered.
+
+The repair is the shape `mod reg` already had: a handle. `ring::Ring`
+holds the pointer and the length privately, and only the module's own
+constructors build one, each from a ring static, with the length taken
+from the array's type. A publish to a register, to an address of the
+caller's choosing, or to a ring with another ring's length can no
+longer be written outside the module, and three mutations, one for
+each, failed to compile. The handle also closed the length hole, which
+no one had named: the old call passed pointer and length separately,
+and a mismatch would have rewritten the Link TRB's cycle bit in another
+ring's slot.
+
+9. **Privacy protects a value only if no public function takes the
+   value's ingredients.** Making the dangerous primitive private is not
+   enough when its one caller takes the dangerous argument from anyone.
+   Follow the argument up to where it is first accepted from outside, and
+   make *that* type unforgeable. The mutation to run is the one that
+   forges the argument, not the one that calls the primitive.
