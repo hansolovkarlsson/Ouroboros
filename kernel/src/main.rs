@@ -213,7 +213,7 @@ extern "C" fn kernel_main() -> ! {
     let hz = timer::frequency_hz();
     if hz < timer::MIN_FREQUENCY_HZ {
         panic!(
-            "Ouroboros kernel: the generic timer's counter frequency (CNTFRQ_EL0) reads {hz} Hz, below the {} Hz the kernel keeps time with: the firmware did not set it, and the kernel does not guess one",
+            "Ouroboros kernel: the generic timer's counter frequency (CNTFRQ_EL0) reads {hz} Hz, below the {} Hz the kernel keeps time with: the firmware left it unset or too low, and the kernel does not guess one",
             timer::MIN_FREQUENCY_HZ
         );
     }
