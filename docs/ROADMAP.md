@@ -3957,7 +3957,8 @@ would otherwise silently shrink into looking like nothing was ever found.
       review of #449:** a request sent again is acknowledged again, on the
       export and on the dial side, so one lost ACK does not bring the
       failure back; the time `netd` spends in a synchronous client request,
-      whose wait drops every frame but its own reply, is given back to a
+      whose wait drops every TCP segment but its own reply (ARP and echo
+      requests are answered there since 2026-11-20), is given back to a
       run's clock (`credit_deaf`), since a probe's answer swallowed there
       would have a live caller's run reaped (by reading: a rig round built
       to show it passed with the rule taken out, so the rule is graded by
