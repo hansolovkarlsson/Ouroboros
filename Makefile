@@ -2442,8 +2442,10 @@ test-net-flood: image netd-restart-rig-bin
 # netd answers an ICMP echo request, and only a good one addressed to it
 # (scripts/test-echo-reply.py): one boot of the FAT32 image, its NIC on a
 # socket netdev whose far end is the script, which builds and reads every
-# frame. About forty seconds. Run it whenever netd's on_frame or
-# answer_echo, ip_checksum, send, or its address configuration changes.
+# frame, and sends requests into each synchronous op's wait. About a
+# minute. Run it whenever netd's on_frame, answer_unasked, answer_echo,
+# handle_arp, recv, a polling loop, ip_checksum, send, or its address
+# configuration changes.
 test-echo-reply: image
 	python3 scripts/test-echo-reply.py
 

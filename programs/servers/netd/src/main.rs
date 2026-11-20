@@ -4164,9 +4164,8 @@ const ECHO_MAX_FRAME: usize = 1600;
 /// Ethernet padding is never echoed. The reply goes to the request's
 /// Ethernet source, as `handle_arp`'s does: no ARP lookup on the way out.
 ///
-/// A request that arrives while a synchronous client op is polling (a
-/// `ping`, an ARP resolve, a DNS lookup) is taken by that op's loop and not
-/// answered; the sender's next one is.
+/// Reached through [`answer_unasked`], from the serve loop and from every
+/// synchronous op's polling loop alike ([`recv`]).
 fn answer_echo(mac: &[u8; 6], frame: &[u8]) {
     const ETH: usize = 14;
     const IP: usize = ETH + 20;

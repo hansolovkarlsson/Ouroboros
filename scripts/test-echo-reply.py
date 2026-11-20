@@ -62,6 +62,14 @@ broadcast MAC, the Ethernet source, and each of the six source tests
 own). Not reached by any case: the 42-byte floor, which the later checks
 mask, and `ECHO_MAX_FRAME`, which no caller's buffer can exceed.
 
+Controlled 2026-11-20, for 4b: #492's head (`18889e83`), whose polling
+loops dropped every frame they were not waiting for, failed it in every
+loop it reached (the data loop was not: the handshake gave up during the
+failed probe's wait); `recv` with its answering arm removed did the same;
+`answer_unasked` passing ARP requests through unanswered failed the first
+ARP check; and with echo requests used up unanswered, every answered
+check failed and every 4b probe's echo half.
+
 Usage:  python3 scripts/test-echo-reply.py      (make test-echo-reply builds the image)
 Exit status: 0, 1 for a failed check, drive-qemu's INCONCLUSIVE for a boot
 the firmware never started.
