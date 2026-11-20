@@ -933,15 +933,16 @@ fn serve(packed_mac: u64) -> ! {
         // And the sessions that spoke for a user whose last key just went.
         close_unheld(&mut t.sessions, &t.held);
 
-        // 2. Incoming frames: ARP replies, parked remote mounts, dial-out
-        // connections, and the TCP server.
+        // 2. Incoming frames (`on_frame`): ARP and ICMP echo requests
+        // answered, then parked remote mounts, dial-out connections, and the
+        // TCP server.
         // At most `DRAIN_BUDGET` frames a pass, one too long for the buffer
         // counted like any other: what is left waits for the next pass,
         // which `NET_WAIT` starts at once.
         if packed_mac != syscall_abi::NET_ERROR {
             for _ in 0..DRAIN_BUDGET {
                 match recv_one(&mut t.frame) {
-                    Got::Frame(n) => on_frame(&mac, &t.frame[..n], &mut t.conns, &mut t.dials, &mut t.remotes, &mut t.sessions, &t.auth, &t.held),
+                    Got::Frame(n) => on_frame(&mac, &mut t.frame[..n], &mut t.conns, &mut t.dials, &mut t.remotes, &mut t.sessions, &t.auth, &t.held),
                     Got::TooLong => {}
                     Got::Nothing => break,
                 }
@@ -1654,7 +1655,7 @@ fn arp_resolve(mac: &[u8; 6], target: &[u8; 4]) -> Option<[u8; 6]> {
     let deadline = now() + 25; // ~500ms
     let mut frame = [0u8; 1600];
     loop {
-        if let Some(len) = recv(&mut frame) {
+        if let Some(len) = recv(mac, &mut frame) {
             if len >= 42
                 && frame[12] == 0x08
                 && frame[13] == 0x06 // ARP
@@ -1726,7 +1727,7 @@ fn icmp_echo(mac: &[u8; 6], target_mac: &[u8; 6], target: &[u8; 4]) -> bool {
     let deadline = now() + 50; // ~1s
     let mut frame = [0u8; 1600];
     loop {
-        if let Some(len) = recv(&mut frame) {
+        if let Some(len) = recv(mac, &mut frame) {
             if is_echo_reply(&frame[..len], target) {
                 return true;
             }
@@ -1802,7 +1803,7 @@ fn resolve_ip(mac: &[u8; 6], host: &[u8]) -> Result<[u8; 4], u64> {
                                // total stays under the supervisor wedge threshold)
     let mut rx = [0u8; 1600];
     loop {
-        if let Some(len) = recv(&mut rx) {
+        if let Some(len) = recv(mac, &mut rx) {
             if let Some(payload) = dns_payload(&rx[..len]) {
                 return parse_dns_a(payload).ok_or(syscall_abi::NET_RESOLVE_NXDOMAIN);
             }
@@ -1922,7 +1923,7 @@ fn tcp_get(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], dst_port: u16, re
             tries += 1;
             let deadline = now() + SYN_WAIT_TICKS;
             loop {
-                if let Some(len) = recv(&mut rx) {
+                if let Some(len) = recv(mac, &mut rx) {
                     if let Some(s) = parse_tcp(&rx[..len], target, dst_port, src_port) {
                         if s.flags & TCP_RST != 0 {
                             return (syscall_abi::NET_FETCH_REFUSED, 0);
@@ -1979,7 +1980,7 @@ fn tcp_get(mac: &[u8; 6], dst_mac: &[u8; 6], target: &[u8; 4], dst_port: u16, re
     let mut fin = false;
     let mut deadline = now() + 50;
     loop {
-        if let Some(len) = recv(&mut rx) {
+        if let Some(len) = recv(mac, &mut rx) {
             if let Some(s) = parse_tcp(&rx[..len], target, dst_port, src_port) {
                 if s.flags & TCP_RST != 0 {
                     break;
@@ -4040,43 +4041,73 @@ struct TcpIn {
 }
 
 /// Dispatch one received frame: answer ARP requests and ICMP echo requests
-/// for our IP, and feed TCP segments to the HTTP server. Everything else (including our own client
+/// for our IP ([`answer_unasked`], which [`recv`] calls too, and which may
+/// build its reply over the frame), and feed TCP
+/// segments to the HTTP server. Everything else (including our own client
 /// ops' replies, which the synchronous handlers already consumed) is ignored.
 #[allow(clippy::too_many_arguments)]
-fn on_frame(mac: &[u8; 6], frame: &[u8], conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], auth: &Auth, held: &held::Held) {
+fn on_frame(mac: &[u8; 6], frame: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], auth: &Auth, held: &held::Held) {
     if frame.len() < 14 {
         return;
     }
-    let ethertype = ((frame[12] as u16) << 8) | frame[13] as u16;
-    match ethertype {
-        0x0806 => handle_arp(mac, frame),
-        // ICMP: an echo request for us is answered; anything else, our own
-        // ping's late replies among them, is dropped. None of it is TCP.
-        0x0800 if frame.len() > 23 && frame[23] == 1 => answer_echo(mac, frame),
-        0x0800 => {
-            // A client connection's segment (a parked remote mount's, a held
-            // session's, or a dial-out's) is addressed to our ephemeral source
-            // port, not a listen port - try those first (and a retransmitted
-            // SYN for an already-accepted dial-in conn matches here too, so it
-            // never double-accepts below).
-            if dial_on_segment(mac, frame, remotes) {
-                return;
-            }
-            if dial_on_segment(mac, frame, sessions) {
-                return;
-            }
-            if dial_on_segment(mac, frame, dials) {
-                return;
-            }
-            // A fresh inbound SYN to an `announce`d port (dial-in) - accept it.
-            if dial_accept(mac, frame, dials) {
-                return;
-            }
-            if let Some(seg) = parse_tcp_in(frame) {
-                handle_tcp(mac, frame, &seg, conns, dials, auth, remotes, held);
-            }
+    if answer_unasked(mac, frame) {
+        return;
+    }
+    // Anything not IPv4 is no one's here; every TCP path below rejects
+    // what is not TCP.
+    if frame[12..14] != [0x08, 0x00] {
+        return;
+    }
+    // A client connection's segment (a parked remote mount's, a held
+    // session's, or a dial-out's) is addressed to our ephemeral source
+    // port, not a listen port - try those first (and a retransmitted
+    // SYN for an already-accepted dial-in conn matches here too, so it
+    // never double-accepts below).
+    if dial_on_segment(mac, frame, remotes) {
+        return;
+    }
+    if dial_on_segment(mac, frame, sessions) {
+        return;
+    }
+    if dial_on_segment(mac, frame, dials) {
+        return;
+    }
+    // A fresh inbound SYN to an `announce`d port (dial-in) - accept it.
+    if dial_accept(mac, frame, dials) {
+        return;
+    }
+    if let Some(seg) = parse_tcp_in(frame) {
+        handle_tcp(mac, frame, &seg, conns, dials, auth, remotes, held);
+    }
+}
+
+/// Answer a frame that asks something of this host and keeps no state: an
+/// ARP request ([`handle_arp`]) or an ICMP echo request ([`answer_echo`]).
+/// `true` when the frame was one, whether or not it was ours to answer: it
+/// is used up, since no loop here ever waits for a request, and an echo
+/// request's bytes are its reply's after it ([`answer_echo`]).
+///
+/// The serve loop's [`on_frame`] calls it, and so does [`recv`], which every
+/// synchronous op's polling loop takes its frames through: until 2026-11-20
+/// those loops (an ARP resolve, a `ping`, a DNS lookup, a `fetch`) dropped
+/// every frame they were not waiting for, so a request that came while one
+/// was in flight, for up to a second or so, was never answered.
+fn answer_unasked(mac: &[u8; 6], frame: &mut [u8]) -> bool {
+    if frame.len() < 14 {
+        return false;
+    }
+    match (frame[12], frame[13]) {
+        (0x08, 0x06) if frame.len() >= 22 && frame[20..22] == [0x00, 0x01] => {
+            handle_arp(mac, frame);
+            true
         }
-        _ => {}
+        // A 20-byte IPv4 header, ICMP, type 8: the one shape `answer_echo`
+        // answers, read at the one offset it reads.
+        (0x08, 0x00) if frame.len() > 34 && frame[14] == 0x45 && frame[23] == 1 && frame[34] == 8 => {
+            answer_echo(mac, frame);
+            true
+        }
+        _ => false,
     }
 }
 
@@ -4109,10 +4140,6 @@ fn handle_arp(mac: &[u8; 6], frame: &[u8]) {
     let _ = send(&arp);
 }
 
-/// The longest frame [`answer_echo`] answers: the receive buffer every
-/// caller of [`recv`] passes, so any request taken whole can be.
-const ECHO_MAX_FRAME: usize = 1600;
-
 /// Answer an ICMP echo request addressed to our IP with its echo reply
 /// (RFC 792): the request's identifier, sequence number and data sent back
 /// whole, from us to its sender, type 0. Until 2026-11-19 `netd` sent echo
@@ -4121,7 +4148,7 @@ const ECHO_MAX_FRAME: usize = 1600;
 /// Answered only when every part checks: an IPv4 header of 20 bytes (one
 /// with options is dropped, not answered without them) whose checksum
 /// holds, not a fragment, sent to our address exactly (never a broadcast)
-/// and to our MAC, from a unicast Ethernet address and an IP source a reply
+/// and to our MAC exactly, from a unicast Ethernet address and an IP source a reply
 /// can go to (not 0.x, 127.x, multicast or above, the subnet's network or
 /// broadcast address, or our own), and
 /// an ICMP message, type 8 code 0, whose checksum holds over the length
@@ -4129,10 +4156,16 @@ const ECHO_MAX_FRAME: usize = 1600;
 /// Ethernet padding is never echoed. The reply goes to the request's
 /// Ethernet source, as `handle_arp`'s does: no ARP lookup on the way out.
 ///
-/// A request that arrives while a synchronous client op is polling (a
-/// `ping`, an ARP resolve, a DNS lookup) is taken by that op's loop and not
-/// answered; the sender's next one is.
-fn answer_echo(mac: &[u8; 6], frame: &[u8]) {
+/// The reply is built over the request, in the caller's receive buffer: an
+/// echo reply is its request with the addresses swapped, the type changed
+/// and the checksums made again, the same length, so it needs no buffer of
+/// its own (until 2026-11-20 it had one, 1600 bytes on the stack, and a
+/// bound on the frame no caller could exceed). The request is gone after,
+/// answered or refused: [`answer_unasked`] says it is used up.
+///
+/// Reached through [`answer_unasked`], from the serve loop and from every
+/// synchronous op's polling loop alike ([`recv`]).
+fn answer_echo(mac: &[u8; 6], frame: &mut [u8]) {
     const ETH: usize = 14;
     const IP: usize = ETH + 20;
     if frame.len() < IP + 8 || frame[ETH] != 0x45 {
@@ -4143,7 +4176,7 @@ fn answer_echo(mac: &[u8; 6], frame: &[u8]) {
     }
     let total = u16::from_be_bytes([frame[ETH + 2], frame[ETH + 3]]) as usize;
     let len = ETH + total;
-    if total < 20 + 8 || len > frame.len() || len > ECHO_MAX_FRAME {
+    if total < 20 + 8 || len > frame.len() {
         return;
     }
     if u16::from_be_bytes([frame[ETH + 6], frame[ETH + 7]]) & 0x3fff != 0 {
@@ -4153,8 +4186,10 @@ fn answer_echo(mac: &[u8; 6], frame: &[u8]) {
     let mut src = [0u8; 4];
     src.copy_from_slice(&frame[ETH + 12..ETH + 16]);
     // Our address, and sent to our MAC: a unicast IP under a link-layer
-    // broadcast is one a host should drop (RFC 1122 3.3.6).
-    if frame[ETH + 16..ETH + 20] != config.address || frame[0] & 1 != 0 {
+    // broadcast is one a host should drop (RFC 1122 3.3.6), and one under
+    // another host's MAC was never ours (a NIC that passes every frame up,
+    // as QEMU's virtio-net does, would otherwise answer for it).
+    if frame[ETH + 16..ETH + 20] != config.address || frame[0..6] != mac[..] {
         return; // not ours: another host's, or a broadcast
     }
     // The subnet's own network and broadcast addresses, which a /31 and a
@@ -4175,9 +4210,8 @@ fn answer_echo(mac: &[u8; 6], frame: &[u8]) {
         return; // not an echo request, or damaged
     }
 
-    let mut r = [0u8; ECHO_MAX_FRAME];
-    r[..len].copy_from_slice(&frame[..len]);
-    r[0..6].copy_from_slice(&frame[6..12]); // eth dst: the requester
+    let r = &mut frame[..len];
+    r.copy_within(6..12, 0); // eth dst: the requester
     r[6..12].copy_from_slice(mac); // eth src: us
     r[ETH + 1] = 0; // DSCP/ECN
     r[ETH + 4..ETH + 8].fill(0); // id, flags and fragment offset
@@ -4191,7 +4225,7 @@ fn answer_echo(mac: &[u8; 6], frame: &[u8]) {
     r[IP + 2..IP + 4].fill(0);
     let csum = ip_checksum(&r[IP..len]);
     r[IP + 2..IP + 4].copy_from_slice(&csum.to_be_bytes());
-    let _ = send(&r[..len]);
+    let _ = send(r);
 }
 
 /// Parse an inbound frame as a TCP segment addressed to our listen port,
@@ -9036,14 +9070,22 @@ fn send(frame: &[u8]) -> Result<(), ()> {
 /// waiting, and `len` is never more than `buf`'s length, so every caller
 /// may index `buf` by it.
 ///
+/// For the synchronous ops' polling loops, which take nothing else. An ARP
+/// or ICMP echo request is answered here, as [`on_frame`] would answer it
+/// ([`answer_unasked`], the reply built over it in `buf`), and this says
+/// `None`, as for no frame, so the
+/// caller looks at its deadline before asking again. `mac` is required so
+/// that no loop can poll without answering.
+///
 /// A frame longer than the buffer (up to `NET_MAX_FRAME`, 2036, against
 /// the 1600 bytes every caller here passes) is none this stack sends or
 /// expects: the kernel drops it and answers `NET_FRAME_CUT`, and the next
 /// one is asked for, [`RECV_SKIP_MAX`] of them at most: past that this says
 /// `None`, and the frames still waiting are the caller's next ask.
-fn recv(buf: &mut [u8]) -> Option<usize> {
+fn recv(mac: &[u8; 6], buf: &mut [u8]) -> Option<usize> {
     for _ in 0..RECV_SKIP_MAX {
         match recv_one(buf) {
+            Got::Frame(n) if answer_unasked(mac, &mut buf[..n]) => return None,
             Got::Frame(n) => return Some(n),
             Got::TooLong => {}
             Got::Nothing => return None,

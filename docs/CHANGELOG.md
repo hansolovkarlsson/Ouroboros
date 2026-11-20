@@ -18,6 +18,12 @@ and answered none. A request that is damaged, a fragment, for another
 address or a broadcast, or from a source no reply should go to is
 dropped. `make test-echo-reply` plays the other host on the wire.
 
+**A node stays reachable while it waits (2026-11-20).** While `netd`
+waited for an answer of its own (a `ping`, an address lookup, a DNS
+query, a `fetch`), it threw away every other frame, so for up to a
+second or so it answered neither ARP nor ping. It answers both now,
+whatever it is waiting for.
+
 **An address is four numbers of at most three digits, everywhere
 (2026-11-19, #490).** `mount -r`, `cpu` and `ping` refuse a part such
 as `0001` that they used to take, as `/etc/net` and
