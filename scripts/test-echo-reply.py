@@ -42,10 +42,15 @@ The checks:
 
 Controlled 2026-11-19: `main` (`cde340c4`), which answers no echo request,
 fails every check in 2 and 4 and passes 3. And `answer_echo` with each of
-its fourteen guards removed in turn (each checksum, the destination, the
-fragment test, each of the five source tests, the Ethernet source, the
-type, and the length taken from the frame and not the IP header) fails the
-check for that guard and no other.
+nineteen guards removed in turn fails the check for that guard and no
+other: each checksum, the options test, the code, the type, a total too
+short, a total past the frame (`netd` panics on the copy and is restarted),
+the length taken from the frame and not the IP header, the fragment test
+for more-to-come and for an offset, the destination address and the
+broadcast MAC, the Ethernet source, and each of the six source tests
+(multicast and above, the subnet's network and broadcast, 0.x, 127.x, our
+own). Not reached by any case: the 42-byte floor, which the later checks
+mask, and `ECHO_MAX_FRAME`, which no caller's buffer can exceed.
 
 Usage:  python3 scripts/test-echo-reply.py      (make test-echo-reply builds the image)
 Exit status: 0, 1 for a failed check, drive-qemu's INCONCLUSIVE for a boot
