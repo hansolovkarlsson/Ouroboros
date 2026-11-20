@@ -36,6 +36,16 @@ The checks:
    source, and an echo reply (type 0).
 4. `netd` still answers after them, and answers a burst of `BURST`
    requests sent back to back, every one.
+4b. **Answered while `netd` waits for something else.** Each synchronous op
+   polls the NIC for its own answer and, before 2026-11-20, dropped every
+   other frame. Logged in, the guest's shell starts each op, the script
+   sees the op's own frame on the wire (so `netd` is in that loop now) and
+   withholds its answer, and sends an echo request and an ARP request into
+   the wait; both must be answered: `ping 10.0.2.98` (an ARP resolve no
+   one answers), `ping 10.0.2.2` (the echo reply withheld), `resolve
+   foo.test` (the DNS answer withheld), and `fetch foo.test` twice over,
+   its DNS answered with 10.0.2.2, once at its SYN (the SYN-ACK withheld)
+   and once at its request (the response withheld, then a RST).
 5. No server called wedged or restarted (a `netd` that panicked on a
    frame is restarted, and its next request may still be answered), and no
    fault line in QEMU's trace.
@@ -76,6 +86,11 @@ IMAGE = os.path.join(ROOT, "build", "esp.img")
 PORT = 5671
 PEER_MAC = bytes.fromhex("525400123502")
 PEER_IP = bytes([10, 0, 2, 2])
+# netd's DNS server with no /etc/net, answered for ARP like PEER_IP.
+DNS_IP = bytes([10, 0, 2, 3])
+# An address nobody on the wire answers ARP for.
+NOBODY_IP = bytes([10, 0, 2, 98])
+PEER_ISN = 0x10000000
 OTHER_IP = bytes([10, 0, 2, 99])
 BCAST_IP = bytes([10, 0, 2, 255])
 # How long a request that must not be answered is watched for a reply.
@@ -128,8 +143,8 @@ class Wire:
             while True:
                 (n,) = struct.unpack(">I", self._recv_exact(4))
                 frame = self._recv_exact(n)
-                if frame[12:14] == b"\x08\x06" and frame[20:22] == b"\x00\x01" and frame[38:42] == PEER_IP:
-                    self.send(arp(2, PEER_MAC, PEER_IP, frame[22:28], frame[28:32], frame[22:28]))
+                if frame[12:14] == b"\x08\x06" and frame[20:22] == b"\x00\x01" and frame[38:42] in (PEER_IP, DNS_IP):
+                    self.send(arp(2, PEER_MAC, frame[38:42], frame[22:28], frame[28:32], frame[22:28]))
                     continue
                 self.frames.put(frame)
         except (EOFError, OSError):
@@ -213,6 +228,43 @@ def judge_reply(req, rep, guest_mac, guest_ip):
     if rep[38:14 + total] != req[38:14 + req_total]:
         return "identifier, sequence or data changed"
     return ""
+
+
+def tcp_frame(guest_mac, guest_ip, sport, dport, seq, ack, flags):
+    """A TCP segment with no data from PEER_IP:sport to the guest, its
+    checksum over the pseudo-header computed here."""
+    tcp = struct.pack(">HHIIBBHHH", sport, dport, seq, ack, 5 << 4, flags, 8192, 0, 0)
+    pseudo = PEER_IP + guest_ip + struct.pack(">BBH", 0, 6, len(tcp))
+    tcp = tcp[:16] + struct.pack(">H", csum(pseudo + tcp)) + tcp[18:]
+    ip = struct.pack(">BBHHHBBH4s4s", 0x45, 0, 20 + len(tcp), 0, 0, 64, 6, 0, PEER_IP, guest_ip)
+    ip = ip[:10] + struct.pack(">H", csum(ip)) + ip[12:]
+    return guest_mac + PEER_MAC + b"\x08\x00" + ip + tcp
+
+
+def dns_answer(guest_mac, guest_ip, query, addr):
+    """The guest's DNS `query` frame answered with one A record, `addr`."""
+    ihl = (query[14] & 0x0F) * 4
+    udp = 14 + ihl
+    sport = struct.unpack(">H", query[udp:udp + 2])[0]
+    q = query[udp + 8:14 + struct.unpack(">H", query[16:18])[0]]
+    dns = q[0:2] + b"\x81\x80" + b"\x00\x01\x00\x01\x00\x00\x00\x00" + q[12:]
+    dns += b"\xc0\x0c" + struct.pack(">HHIH", 1, 1, 60, 4) + addr
+    u = struct.pack(">HHHH", 53, sport, 8 + len(dns), 0) + dns
+    ip = struct.pack(">BBHHHBBH4s4s", 0x45, 0, 20 + len(u), 0, 0, 64, 17, 0, DNS_IP, guest_ip)
+    ip = ip[:10] + struct.pack(">H", csum(ip)) + ip[12:]
+    return guest_mac + PEER_MAC + b"\x08\x00" + ip + u
+
+
+def guest_tcp(f):
+    """(sport, dport, seq, flags, data length) of a TCP frame from the guest, or None."""
+    if len(f) < 34 or f[12:14] != b"\x08\x00" or f[23] != 6:
+        return None
+    ihl = (f[14] & 0x0F) * 4
+    t = 14 + ihl
+    total = struct.unpack(">H", f[16:18])[0]
+    doff = (f[t + 12] >> 4) * 4
+    sport, dport, seq = struct.unpack(">HHI", f[t:t + 8])
+    return sport, dport, seq, f[t + 13], total - ihl - doff
 
 
 def main():
@@ -315,6 +367,72 @@ def main():
                     if f and f[34] == 0:
                         got.add(struct.unpack(">H", f[40:42])[0])
                 check(len(got) == BURST, f"a burst of {BURST} requests sent back to back: every one answered ({len(got)})")
+
+                # 4b: requests sent while netd polls for something else.
+                logged_in = g.run([("login:", "root"), ("assword", "root"), ("# ", "")])
+                check(logged_in, "the guest's shell logs in")
+                probe_seq = [200]
+
+                def probe(what):
+                    """An echo request and an ARP request into netd's wait, now; both
+                    must be answered."""
+                    probe_seq[0] += 1
+                    seq = struct.pack(">H", probe_seq[0])
+                    wire.send(e(probe_seq[0], b"waiting"))
+                    wire.send(arp(1, PEER_MAC, PEER_IP, b"\0" * 6, guest_ip, b"\xff" * 6))
+                    want = {"echo", "arp"}
+                    end = time.monotonic() + REPLY_S
+                    while want and time.monotonic() < end:
+                        f = wire.wait(lambda f: True, max(0.01, end - time.monotonic()))
+                        if f is None:
+                            break
+                        if is_icmp_from_guest(f) and f[34] == 0 and f[40:42] == seq:
+                            want.discard("echo")
+                        elif f[12:14] == b"\x08\x06" and f[20:22] == b"\x00\x02" and f[28:32] == guest_ip:
+                            want.discard("arp")
+                    check(not want, f"while netd waits on {what}: an echo request and an ARP request both answered"
+                          + (f" (not answered: {', '.join(sorted(want))})" if want else ""))
+
+                def start(command, seen, what):
+                    """Type `command` and wait for its op's frame (`seen`) on the wire."""
+                    wire.drain()
+                    g.type_line(command)
+                    f = wire.wait(seen, 15)
+                    check(f is not None, f"`{command}` puts {what} on the wire")
+                    return f
+
+                def back_at_prompt():
+                    g.wait_for("# ", timeout=20)
+
+                is_arp_for = lambda ip: (lambda f: f[12:14] == b"\x08\x06" and f[20:22] == b"\x00\x01" and f[38:42] == ip)
+                if logged_in:
+                    if start("ping 10.0.2.98", is_arp_for(NOBODY_IP), "an ARP request for 10.0.2.98"):
+                        probe("an ARP reply (arp_resolve)")
+                    back_at_prompt()
+                    if start("ping 10.0.2.2", lambda f: is_icmp_from_guest(f) and f[34] == 8 and f[30:34] == PEER_IP, "an echo request to 10.0.2.2"):
+                        probe("an echo reply (icmp_echo)")
+                    back_at_prompt()
+                    is_dns = lambda f: len(f) >= 42 and f[12:14] == b"\x08\x00" and f[23] == 17 and f[30:34] == DNS_IP
+                    if start("resolve foo.test", is_dns, "a DNS query"):
+                        probe("a DNS answer (resolve_ip)")
+                    back_at_prompt()
+                    q = start("fetch foo.test", is_dns, "a DNS query")
+                    if q:
+                        wire.send(dns_answer(guest_mac, guest_ip, q, PEER_IP))
+                        syn = wire.wait(lambda f: (t := guest_tcp(f)) is not None and t[1] == 80 and t[3] & 0x02, 15)
+                        check(syn is not None, "`fetch foo.test`, answered 10.0.2.2, sends a SYN to port 80")
+                        if syn:
+                            probe("a SYN-ACK (tcp_get's handshake)")
+                            sport, _, their, _, _ = guest_tcp(syn)
+                            wire.drain()
+                            wire.send(tcp_frame(guest_mac, guest_ip, 80, sport, PEER_ISN, their + 1, 0x12))
+                            req = wire.wait(lambda f: (t := guest_tcp(f)) is not None and t[0] == sport and t[4] > 0, 15)
+                            check(req is not None, "`fetch` sends its request after the SYN-ACK")
+                            if req:
+                                probe("the response (tcp_get's data loop)")
+                                _, _, rseq, _, rlen = guest_tcp(req)
+                                wire.send(tcp_frame(guest_mac, guest_ip, 80, sport, PEER_ISN + 1, rseq + rlen, 0x14))
+                    back_at_prompt()
             during = g.transcript()[mark:]
             wedged, restarted = during.count("wedged"), during.count("restarted")
             check(wedged == 0 and restarted == 0, f"no server called wedged or restarted ({wedged} wedged, {restarted} restarted)")
