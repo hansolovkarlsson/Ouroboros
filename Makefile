@@ -3111,6 +3111,10 @@ test-batch-refused: image image-exfat
 # run a test binary.
 HOST_TARGET := $(shell rustc -vV | sed -n 's/^host: //p')
 PURE_CRATES := accounts regex ed25519 clusterkeys heldkeys ninep-abi keyseq parttable amlscan genet netconf netaddr
+# What `make test` lints beside PURE_CRATES: the kernel's package and the
+# four supervised servers.
+KERNEL_PKG := ouroboros-kernel
+LINT_SERVERS := fsd cond netd accountd
 # `ninep-abi` joined the list at the flag day. It had always qualified - pure
 # consts plus `resolve_ns`, no I/O and no syscalls - and was simply never listed,
 # so its thirteen assertions about the WIRE FORMAT, including the one pinning
@@ -3226,6 +3230,19 @@ test:
 	@# here rather than remembered.
 	@for c in $(PURE_CRATES); do \
 		cargo clippy -p $$c --all-targets --target $(HOST_TARGET) -- -D warnings || exit 1; \
+	done
+	@# The kernel and the four supervised servers too (since 2026-11-20).
+	@# Until then this linted PURE_CRATES alone: a one-arm `match` in netd
+	@# failed clippy while `make test` exited 0 (#493), and the kernel had
+	@# to be made clean again by hand (#484). The servers are linted as
+	@# they are built, for USER_TARGET in release; their rig builds need no
+	@# run of their own, since each rig's code is behind `cfg!()`, which
+	@# compiles both branches. The other userland programs are not linted
+	@# yet (ROADMAP.md, "make test does not lint netd").
+	@echo "== clippy: the kernel and the four servers"
+	@cargo clippy -p $(KERNEL_PKG) -- -D warnings || exit 1
+	@for c in $(LINT_SERVERS); do \
+		cargo clippy -p $$c --target $(USER_TARGET) --release -- -D warnings || exit 1; \
 	done
 	@# The protocol constants are spelled independently in Rust and in the two
 	@# Python peers - there is no shared header across that boundary - so they

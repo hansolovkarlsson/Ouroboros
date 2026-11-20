@@ -3720,7 +3720,7 @@ impl Fs {
     /// `mv`).
     ///
     /// An existing `dst` is REPLACED when both it and `src` are ordinary files
-    /// - POSIX `rename` - and the same write-new-first ordering applies, so a
+    /// (POSIX `rename`), and the same write-new-first ordering applies, so a
     /// failure part-way leaves a transient duplicate name rather than a
     /// destroyed destination. Not atomic: an exFAT entry set carries the file's
     /// own location, so there is no inode number to re-point. A DIRECTORY on

@@ -1763,7 +1763,7 @@ impl Fs {
     /// Renames or moves the file or directory at `src` to `dst`.
     ///
     /// An existing `dst` is REPLACED when both it and `src` are ordinary files
-    /// - POSIX `rename`. Unlike ext2 this cannot be atomic: a FAT directory
+    /// (POSIX `rename`). Unlike ext2 this cannot be atomic: a FAT directory
     /// entry holds the file's first cluster and size itself, so there is no
     /// inode number to re-point and the old entry must be replaced. The name
     /// therefore resolves to two entries for an instant rather than to none,

@@ -2026,7 +2026,7 @@ impl Fs {
     /// parent, fixes its `..` and moves the parent-link-count contribution.
     ///
     /// An existing `dst` is REPLACED when both it and `src` are non-directories
-    /// - the POSIX rename, and on ext2 it is very nearly atomic: the whole
+    /// (the POSIX rename), and on ext2 it is very nearly atomic: the whole
     /// change is one write of `dst`'s directory entry, re-pointing it at
     /// `src`'s inode. The name never resolves to nothing. What follows that
     /// write is cleanup (unlink `src`'s name, drop the replaced inode), and a
