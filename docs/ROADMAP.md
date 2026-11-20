@@ -1664,20 +1664,21 @@ The small open tails those arcs deliberately left:
   without a retransmission; and `credit_deaf` is either gone or still
   shown to be needed.
 
-- **`make test` does not lint `netd` (found 2026-11-20, #493).** On #493's
-  branch, removing a dead `match` arm left a one-arm `match`, which
-  `cargo clippy -p netd --target aarch64-unknown-none --release -- -D
-  warnings` refuses; `make test` exited 0 on the same tree, and only that
-  separate run caught it. `make test`'s clippy covers `PURE_CRATES` alone
-  (with `--all-targets` on the host): not the userland programs, which
-  build for `aarch64-unknown-none`, and not the kernel either, which is
-  how #484 came to be needed to make it clean again. **To settle:** what it
-  should lint (the kernel, every program under `programs/`, or the kernel
-  and the four servers first), at what cost to `make test`'s time, and
-  whether the warnings already there are fixed first or allowed. **Done
-  when** `make test` fails on a lint in each thing it now covers,
-  controlled by planting one (the one-arm `match` will do) in `netd` and
-  one in the kernel.
+- **`make test` lints no userland program but the four servers (found
+  2026-11-20, #493; half done the same day).** On #493's branch, removing a
+  dead `match` arm left a one-arm `match`, which `cargo clippy -p netd
+  --target aarch64-unknown-none --release -- -D warnings` refuses; `make
+  test` exited 0 on the same tree, since its clippy covered `PURE_CRATES`
+  alone, not the kernel either (which is how #484 came to be needed).
+  **Done 2026-11-20, Hans's scope:** `make test` lints the kernel and
+  `fsd`, `cond`, `netd` and `accountd` (`KERNEL_PKG`, `LINT_SERVERS`),
+  about a second of its time; `fsd`'s fifteen warnings, one lint, were
+  fixed first; a lint planted in each of the five fails it. **Left:** the
+  other 62 programs under `programs/`. Measured the same day: 61 already
+  pass, linting all 62 takes 7 s, and the one that does not is
+  `openprobe` (`enum_variant_names`, `NoAnswer` in `enum ...Answer`).
+  **Done when** they are in `LINT_SERVERS`'s loop or one beside it, and a
+  lint planted in one of them fails `make test`.
 
 - **A server past its restart cap draws a second wedge line (seen
   2026-09-27).** Forcing `netd` through four ping-timeout wedges in one boot
