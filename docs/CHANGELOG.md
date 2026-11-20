@@ -11,6 +11,13 @@ here actually works today, see [`architecture.md`](architecture.md) and
 
 **Not yet released.** Changes since v0.25.0, drafted as they land.
 
+**A node answers ping (2026-11-19).** `netd` replies to an ICMP echo
+request for its own address, so `ping` from the Mac reaches the Pi and
+one node of the cluster can ping another. Before, it could send pings
+and answered none. A request that is damaged, a fragment, for another
+address or a broadcast, or from a source no reply should go to is
+dropped. `make test-echo-reply` plays the other host on the wire.
+
 **An address is four numbers of at most three digits, everywhere
 (2026-11-19, #490).** `mount -r`, `cpu` and `ping` refuse a part such
 as `0001` that they used to take, as `/etc/net` and

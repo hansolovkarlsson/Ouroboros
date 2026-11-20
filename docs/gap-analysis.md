@@ -121,7 +121,7 @@ permission enforcement as missing.
 
 | Capability | Status | Notes |
 |---|---|---|
-| Ethernet / ARP / IPv4 / ICMP | ✅ | Hand-rolled in `netd`; `ping`. |
+| Ethernet / ARP / IPv4 / ICMP | ✅ | Hand-rolled in `netd`; `ping`, and echo requests answered (since 2026-11-19). |
 | UDP + DNS | ✅ | `resolve` (DNS-over-UDP). |
 | TCP client | ✅ | `fetch` (HTTP GET), plus congestion control, SACK, adaptive RTO. |
 | TCP server | ✅ | Concurrent HTTP static-file server (up to 4 conns), directory listings, `HEAD`, `405`. |

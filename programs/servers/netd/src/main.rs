@@ -4039,8 +4039,8 @@ struct TcpIn {
     sack_n: usize,
 }
 
-/// Dispatch one received frame: answer ARP requests for our IP, and feed TCP
-/// segments to the HTTP server. Everything else (including our own client
+/// Dispatch one received frame: answer ARP requests and ICMP echo requests
+/// for our IP, and feed TCP segments to the HTTP server. Everything else (including our own client
 /// ops' replies, which the synchronous handlers already consumed) is ignored.
 #[allow(clippy::too_many_arguments)]
 fn on_frame(mac: &[u8; 6], frame: &[u8], conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], auth: &Auth, held: &held::Held) {
@@ -4050,6 +4050,9 @@ fn on_frame(mac: &[u8; 6], frame: &[u8], conns: &mut [Option<TcpConn>; MAX_CONNS
     let ethertype = ((frame[12] as u16) << 8) | frame[13] as u16;
     match ethertype {
         0x0806 => handle_arp(mac, frame),
+        // ICMP: an echo request for us is answered; anything else, our own
+        // ping's late replies among them, is dropped. None of it is TCP.
+        0x0800 if frame.len() > 23 && frame[23] == 1 => answer_echo(mac, frame),
         0x0800 => {
             // A client connection's segment (a parked remote mount's, a held
             // session's, or a dial-out's) is addressed to our ephemeral source
@@ -4104,6 +4107,91 @@ fn handle_arp(mac: &[u8; 6], frame: &[u8]) {
     arp[32..38].copy_from_slice(&req_mac); // tha: the requester
     arp[38..42].copy_from_slice(&req_ip); // tpa: the requester
     let _ = send(&arp);
+}
+
+/// The longest frame [`answer_echo`] answers: the receive buffer every
+/// caller of [`recv`] passes, so any request taken whole can be.
+const ECHO_MAX_FRAME: usize = 1600;
+
+/// Answer an ICMP echo request addressed to our IP with its echo reply
+/// (RFC 792): the request's identifier, sequence number and data sent back
+/// whole, from us to its sender, type 0. Until 2026-11-19 `netd` sent echo
+/// requests (`ping`) and answered none, so nothing could ping a node.
+///
+/// Answered only when every part checks: an IPv4 header of 20 bytes (one
+/// with options is dropped, not answered without them) whose checksum
+/// holds, not a fragment, sent to our address exactly (never a broadcast)
+/// and to our MAC, from a unicast Ethernet address and an IP source a reply
+/// can go to (not 0.x, 127.x, multicast or above, the subnet's network or
+/// broadcast address, or our own), and
+/// an ICMP message, type 8 code 0, whose checksum holds over the length
+/// the IP header gives. That length, not the frame's, bounds the reply, so
+/// Ethernet padding is never echoed. The reply goes to the request's
+/// Ethernet source, as `handle_arp`'s does: no ARP lookup on the way out.
+///
+/// A request that arrives while a synchronous client op is polling (a
+/// `ping`, an ARP resolve, a DNS lookup) is taken by that op's loop and not
+/// answered; the sender's next one is.
+fn answer_echo(mac: &[u8; 6], frame: &[u8]) {
+    const ETH: usize = 14;
+    const IP: usize = ETH + 20;
+    if frame.len() < IP + 8 || frame[ETH] != 0x45 {
+        return; // too short, not IPv4, or a header with options
+    }
+    if ip_checksum(&frame[ETH..IP]) != 0 {
+        return;
+    }
+    let total = u16::from_be_bytes([frame[ETH + 2], frame[ETH + 3]]) as usize;
+    let len = ETH + total;
+    if total < 20 + 8 || len > frame.len() || len > ECHO_MAX_FRAME {
+        return;
+    }
+    if u16::from_be_bytes([frame[ETH + 6], frame[ETH + 7]]) & 0x3fff != 0 {
+        return; // a fragment: more to come, or not the first
+    }
+    let config = netconf_now();
+    let mut src = [0u8; 4];
+    src.copy_from_slice(&frame[ETH + 12..ETH + 16]);
+    // Our address, and sent to our MAC: a unicast IP under a link-layer
+    // broadcast is one a host should drop (RFC 1122 3.3.6).
+    if frame[ETH + 16..ETH + 20] != config.address || frame[0] & 1 != 0 {
+        return; // not ours: another host's, or a broadcast
+    }
+    // The subnet's own network and broadcast addresses, which a /31 and a
+    // /32 have none of.
+    let host = !u32::from_be_bytes(config.mask);
+    let net = u32::from_be_bytes(config.address) & !host;
+    let s = u32::from_be_bytes(src);
+    if frame[6] & 1 != 0
+        || src[0] == 0
+        || src[0] == 127
+        || src[0] >= 224
+        || (host > 1 && (s == net || s == net | host))
+        || src == config.address
+    {
+        return; // a source no reply should go to
+    }
+    if frame[IP] != 8 || frame[IP + 1] != 0 || ip_checksum(&frame[IP..len]) != 0 {
+        return; // not an echo request, or damaged
+    }
+
+    let mut r = [0u8; ECHO_MAX_FRAME];
+    r[..len].copy_from_slice(&frame[..len]);
+    r[0..6].copy_from_slice(&frame[6..12]); // eth dst: the requester
+    r[6..12].copy_from_slice(mac); // eth src: us
+    r[ETH + 1] = 0; // DSCP/ECN
+    r[ETH + 4..ETH + 8].fill(0); // id, flags and fragment offset
+    r[ETH + 8] = 64; // TTL
+    r[ETH + 10..ETH + 12].fill(0); // checksum, computed below
+    r[ETH + 12..ETH + 16].copy_from_slice(&config.address);
+    r[ETH + 16..ETH + 20].copy_from_slice(&src);
+    let csum = ip_checksum(&r[ETH..IP]);
+    r[ETH + 10..ETH + 12].copy_from_slice(&csum.to_be_bytes());
+    r[IP] = 0; // type: echo reply
+    r[IP + 2..IP + 4].fill(0);
+    let csum = ip_checksum(&r[IP..len]);
+    r[IP + 2..IP + 4].copy_from_slice(&csum.to_be_bytes());
+    let _ = send(&r[..len]);
 }
 
 /// Parse an inbound frame as a TCP segment addressed to our listen port,
