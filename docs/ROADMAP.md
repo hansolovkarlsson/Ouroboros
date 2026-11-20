@@ -1643,6 +1643,42 @@ The small open tails those arcs deliberately left:
   spawn between two instants, #447). And `cpu_child_msg` with an empty
   message mid-run: no program was found that sends one.
 
+- **A synchronous op's wait still drops TCP (from the second review of
+  #493, 2026-11-20; Hans asked for it here).** Since #493 `recv`, the one
+  way `arp_resolve`, `icmp_echo`, `resolve_ip` and `tcp_get` take a frame,
+  answers ARP and echo requests itself (`answer_unasked`). Every other
+  frame those loops are not waiting for is still thrown away: a dial's
+  data, a held session's ACK or FIN, a SYN to the HTTP server or the
+  export, a `cpu` run's keepalive answer. Each costs the peer a
+  retransmission, for up to about a second of `fetch` (its SYN retries)
+  and less for the others, and the last of them is why `credit_deaf`
+  gives that time back to a run's clock. **The general fix:** hand each
+  frame a loop does not match to `on_frame`, as the serve loop would have,
+  or make the ops non-blocking as the remote mounts already are
+  (`roadmap-async-rmount.md`). Either is a design change, not a patch:
+  `on_frame` needs the serve loop's tables, which the ops do not hold, and
+  a frame for a connection that answers by sending must not recurse into
+  another op. `answer_unasked` would become one arm of it. **Done when** a
+  rig sends a dial's data, or a session's ACK, into an op's wait, as
+  `test-echo-reply` sends an echo request into it, and sees it taken
+  without a retransmission; and `credit_deaf` is either gone or still
+  shown to be needed.
+
+- **`make test` does not lint `netd` (found 2026-11-20, #493).** On #493's
+  branch, removing a dead `match` arm left a one-arm `match`, which
+  `cargo clippy -p netd --target aarch64-unknown-none --release -- -D
+  warnings` refuses; `make test` exited 0 on the same tree, and only that
+  separate run caught it. `make test`'s clippy covers `PURE_CRATES` alone
+  (with `--all-targets` on the host): not the userland programs, which
+  build for `aarch64-unknown-none`, and not the kernel either, which is
+  how #484 came to be needed to make it clean again. **To settle:** what it
+  should lint (the kernel, every program under `programs/`, or the kernel
+  and the four servers first), at what cost to `make test`'s time, and
+  whether the warnings already there are fixed first or allowed. **Done
+  when** `make test` fails on a lint in each thing it now covers,
+  controlled by planting one (the one-arm `match` will do) in `netd` and
+  one in the kernel.
+
 - **A server past its restart cap draws a second wedge line (seen
   2026-09-27).** Forcing `netd` through four ping-timeout wedges in one boot
   printed `failed more than 3 times this boot - giving up` and then
