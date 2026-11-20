@@ -21,16 +21,24 @@ The checks:
    data unchanged, both checksums good by this script's arithmetic, the
    IP total length the request's. Data of 56 bytes, of 37 (an odd length,
    the checksum's last byte alone), of 1472 (a 1500-byte packet), and of 0
-   with the frame padded to 60 bytes by junk, whose reply must carry
-   neither the padding nor a checksum over it.
-3. Requests that must go unanswered, each watched for `QUIET_S`: a bad
-   ICMP checksum, a bad IP header checksum, another host's address, the
-   subnet's broadcast address, a fragment, an IP source a reply cannot go
-   to (255.255.255.255, the subnet's broadcast, 0.0.0.0, 127.0.0.1, the
-   guest's own), a multicast Ethernet source, and an echo reply (type 0).
+   with 30 bytes of junk after the packet (a 72-byte frame), whose reply
+   must carry neither the junk nor a checksum over it.
+3. Requests that must go unanswered, each watched for `QUIET_S` for any
+   ICMP frame from the guest (a reply parsed at the wrong offset carries
+   no sequence number where one is looked for): a bad ICMP checksum, a bad IP
+   header checksum, an IP header with options, ICMP code 1, an IP total
+   length too short for an echo, one longer than the frame (which, taken
+   on trust, panicked `netd` on the copy), another host's address, the
+   subnet's broadcast address, our address under a broadcast MAC, a
+   fragment with more to come and one past the first, an IP source a reply
+   cannot go to (255.255.255.255, the subnet's network and broadcast
+   addresses, 0.0.0.0, 127.0.0.1, the guest's own), a multicast Ethernet
+   source, and an echo reply (type 0).
 4. `netd` still answers after them, and answers a burst of `BURST`
    requests sent back to back, every one.
-5. No server called wedged or restarted, and no fault line in QEMU's trace.
+5. No server called wedged or restarted (a `netd` that panicked on a
+   frame is restarted, and its next request may still be answered), and no
+   fault line in QEMU's trace.
 
 Controlled 2026-11-19: `main` (`cde340c4`), which answers no echo request,
 fails every check in 2 and 4 and passes 3. And `answer_echo` with each of
@@ -70,6 +78,11 @@ QUIET_S = 1.5
 REPLY_S = 3.0
 BURST = 40
 ECHO_ID = 0x5151
+# IP options whose words sum to zero in one's complement (0x0800 + 0xF7FF),
+# so the first 20 bytes' checksum holds too, and whose first byte is 8: a
+# parser that took the ICMP message at offset 20 would find an echo
+# request with a good checksum there, and answer it.
+OPTIONS = bytes.fromhex("0800f7ff")
 
 
 def csum(data):
@@ -141,21 +154,31 @@ def arp(op, sha, spa, tha, tpa, dst):
             + struct.pack(">H", op) + sha + spa + tha + tpa)
 
 
-def echo(guest_mac, guest_ip, seq, data, *, icmp_type=8, src_ip=PEER_IP, dst_ip=None,
-         eth_src=PEER_MAC, eth_dst=None, frag=0, bad_icmp=False, bad_ip=False, pad=b""):
-    """An ICMP echo request frame from the peer, every field overridable."""
-    icmp = struct.pack(">BBHHH", icmp_type, 0, 0, ECHO_ID, seq) + data
+def echo(guest_mac, guest_ip, seq, data, *, icmp_type=8, code=0, src_ip=PEER_IP, dst_ip=None,
+         eth_src=PEER_MAC, eth_dst=None, frag=0, bad_icmp=False, bad_ip=False, pad=b"",
+         options=b"", total=None, bare=False):
+    """An ICMP echo request frame from the peer, every field overridable.
+    `options` (a multiple of 4 bytes) lengthen the IP header; `total`
+    replaces the IP total length, the header's checksum still good.
+    `bare` is an ICMP message of its 4-byte header alone, checksum good,
+    `data` and `pad` then trailing it outside the packet."""
+    if bare:
+        icmp = struct.pack(">BBH", icmp_type, code, 0)
+    else:
+        icmp = struct.pack(">BBHHH", icmp_type, code, 0, ECHO_ID, seq) + data
     c = csum(icmp) ^ (0x0101 if bad_icmp else 0)
     icmp = icmp[:2] + struct.pack(">H", c) + icmp[4:]
-    ip = struct.pack(">BBHHHBBH4s4s", 0x45, 0, 20 + len(icmp), 0x1234, frag, 64, 1, 0,
-                     src_ip, dst_ip or guest_ip)
+    hlen = 20 + len(options)
+    ip = struct.pack(">BBHHHBBH4s4s", 0x40 | hlen // 4, 0, total or hlen + len(icmp), 0x1234, frag, 64, 1, 0,
+                     src_ip, dst_ip or guest_ip) + options
     c = csum(ip) ^ (0x0101 if bad_ip else 0)
     ip = ip[:10] + struct.pack(">H", c) + ip[12:]
-    return (eth_dst or guest_mac) + eth_src + b"\x08\x00" + ip + icmp + pad
+    return (eth_dst or guest_mac) + eth_src + b"\x08\x00" + ip + icmp + (data if bare else b"") + pad
 
 
 def is_icmp_from_guest(f):
-    return len(f) >= 42 and f[12:14] == b"\x08\x00" and f[23] == 1
+    # 34 bytes, not 42: a reply to the short-total case would be 38.
+    return len(f) >= 34 and f[12:14] == b"\x08\x00" and f[23] == 1
 
 
 def judge_reply(req, rep, guest_mac, guest_ip):
@@ -196,7 +219,11 @@ def main():
 
     lst = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     lst.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    lst.bind(("127.0.0.1", PORT))
+    try:
+        lst.bind(("127.0.0.1", PORT))
+    except OSError as err:
+        print(f"[FAIL] the rig's port 127.0.0.1:{PORT} is free ({err})", flush=True)
+        return drive_qemu.verdict("test-echo-reply", 1, 0)
     lst.listen(1)
     lst.settimeout(30)
     g = drive_qemu.Guest(IMAGE, extra_args=(
@@ -238,6 +265,10 @@ def main():
             def unanswered(req, what):
                 wire.drain()
                 wire.send(req)
+                # Any ICMP frame, not this request's sequence number: a reply
+                # built at the wrong offset (the options case) carries none
+                # where it would be looked for. Every request before this one
+                # was answered or not before it was sent, so none is late.
                 rep = wire.wait(is_icmp_from_guest, QUIET_S)
                 check(rep is None, f"{what}: not answered" + (f" (got {rep.hex()})" if rep else ""))
 
@@ -246,15 +277,22 @@ def main():
                 answered(e(1, bytes(range(56))), "a request with 56 bytes of data")
                 answered(e(2, bytes(range(37))), "a request with 37 bytes of data (an odd length)")
                 answered(e(3, bytes(i & 0xFF for i in range(1472))), "a request with 1472 bytes of data (a 1500-byte packet)")
-                answered(e(4, pad=b"\xa5" * 18), "a request with no data, its frame padded to 60 bytes with junk")
+                answered(e(4, pad=b"\xa5" * 30), "a request with no data and 30 bytes of junk after it (a 72-byte frame)")
 
                 unanswered(e(10, b"x" * 8, bad_icmp=True), "a request whose ICMP checksum is wrong")
                 unanswered(e(11, b"x" * 8, bad_ip=True), "a request whose IP header checksum is wrong")
+                unanswered(e(23, b"x" * 8, options=OPTIONS), "a request whose IP header has options")
+                unanswered(e(24, b"x" * 8, code=1), "a request with ICMP code 1")
+                unanswered(e(25, b"x" * 8, total=24, bare=True), "a request whose IP total length is too short for an echo")
+                unanswered(e(26, b"x" * 8, total=1400), "a request whose IP total length is longer than its frame")
                 unanswered(e(12, b"x" * 8, dst_ip=OTHER_IP), "a request for another host's address")
+                unanswered(e(27, b"x" * 8, eth_dst=b"\xff" * 6), "a request for our address under a broadcast MAC")
                 unanswered(e(13, b"x" * 8, dst_ip=BCAST_IP, eth_dst=b"\xff" * 6), "a request to the subnet's broadcast address")
                 unanswered(e(14, b"x" * 8, frag=0x2000), "a request that is a fragment (more fragments set)")
+                unanswered(e(28, b"x" * 8, frag=0x0001), "a request that is a fragment (an offset past the first)")
                 unanswered(e(15, b"x" * 8, src_ip=b"\xff\xff\xff\xff"), "a request from the broadcast address")
                 unanswered(e(18, b"x" * 8, src_ip=BCAST_IP), "a request from the subnet's broadcast address")
+                unanswered(e(29, b"x" * 8, src_ip=bytes([10, 0, 2, 0])), "a request from the subnet's network address")
                 unanswered(e(19, b"x" * 8, src_ip=bytes(4)), "a request from 0.0.0.0")
                 unanswered(e(21, b"x" * 8, src_ip=bytes([127, 0, 0, 1])), "a request from 127.0.0.1")
                 unanswered(e(22, b"x" * 8, src_ip=guest_ip), "a request from the guest's own address")

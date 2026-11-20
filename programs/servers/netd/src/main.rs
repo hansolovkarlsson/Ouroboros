@@ -4120,8 +4120,10 @@ const ECHO_MAX_FRAME: usize = 1600;
 ///
 /// Answered only when every part checks: an IPv4 header of 20 bytes (one
 /// with options is dropped, not answered without them) whose checksum
-/// holds, not a fragment, sent to our address exactly (never a broadcast),
-/// from a unicast Ethernet address and an IP source a reply can go to, and
+/// holds, not a fragment, sent to our address exactly (never a broadcast)
+/// and to our MAC, from a unicast Ethernet address and an IP source a reply
+/// can go to (not 0.x, 127.x, multicast or above, the subnet's network or
+/// broadcast address, or our own), and
 /// an ICMP message, type 8 code 0, whose checksum holds over the length
 /// the IP header gives. That length, not the frame's, bounds the reply, so
 /// Ethernet padding is never echoed. The reply goes to the request's
@@ -4150,15 +4152,21 @@ fn answer_echo(mac: &[u8; 6], frame: &[u8]) {
     let config = netconf_now();
     let mut src = [0u8; 4];
     src.copy_from_slice(&frame[ETH + 12..ETH + 16]);
-    if frame[ETH + 16..ETH + 20] != config.address {
+    // Our address, and sent to our MAC: a unicast IP under a link-layer
+    // broadcast is one a host should drop (RFC 1122 3.3.6).
+    if frame[ETH + 16..ETH + 20] != config.address || frame[0] & 1 != 0 {
         return; // not ours: another host's, or a broadcast
     }
-    let directed = u32::from_be_bytes(config.address) | !u32::from_be_bytes(config.mask);
+    // The subnet's own network and broadcast addresses, which a /31 and a
+    // /32 have none of.
+    let host = !u32::from_be_bytes(config.mask);
+    let net = u32::from_be_bytes(config.address) & !host;
+    let s = u32::from_be_bytes(src);
     if frame[6] & 1 != 0
         || src[0] == 0
         || src[0] == 127
         || src[0] >= 224
-        || u32::from_be_bytes(src) == directed
+        || (host > 1 && (s == net || s == net | host))
         || src == config.address
     {
         return; // a source no reply should go to

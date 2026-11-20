@@ -2443,7 +2443,7 @@ test-net-flood: image netd-restart-rig-bin
 # (scripts/test-echo-reply.py): one boot of the FAT32 image, its NIC on a
 # socket netdev whose far end is the script, which builds and reads every
 # frame. About forty seconds. Run it whenever netd's on_frame or
-# answer_echo, ip_checksum, or its address configuration changes.
+# answer_echo, ip_checksum, send, or its address configuration changes.
 test-echo-reply: image
 	python3 scripts/test-echo-reply.py
 
