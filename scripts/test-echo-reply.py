@@ -29,7 +29,8 @@ The checks:
    header checksum, an IP header with options, ICMP code 1, an IP total
    length too short for an echo, one longer than the frame (which, taken
    on trust, panicked `netd` on the copy), another host's address, the
-   subnet's broadcast address, our address under a broadcast MAC, a
+   subnet's broadcast address, our address under a broadcast MAC or
+   another host's unicast MAC, a
    fragment with more to come and one past the first, an IP source a reply
    cannot go to (255.255.255.255, the subnet's network and broadcast
    addresses, 0.0.0.0, 127.0.0.1, the guest's own), a multicast Ethernet
@@ -352,6 +353,7 @@ def main():
                 unanswered(e(26, b"x" * 8, total=1400), "a request whose IP total length is longer than its frame")
                 unanswered(e(12, b"x" * 8, dst_ip=OTHER_IP), "a request for another host's address")
                 unanswered(e(27, b"x" * 8, eth_dst=b"\xff" * 6), "a request for our address under a broadcast MAC")
+                unanswered(e(30, b"x" * 8, eth_dst=bytes.fromhex("525400123599")), "a request for our address under another host's MAC")
                 unanswered(e(13, b"x" * 8, dst_ip=BCAST_IP, eth_dst=b"\xff" * 6), "a request to the subnet's broadcast address")
                 unanswered(e(14, b"x" * 8, frag=0x2000), "a request that is a fragment (more fragments set)")
                 unanswered(e(28, b"x" * 8, frag=0x0001), "a request that is a fragment (an offset past the first)")
@@ -409,21 +411,21 @@ def main():
                     check(f is not None, f"`{command}` puts {what} on the wire")
                     return f
 
-                def back_at_prompt():
-                    g.wait_for("# ", timeout=20)
+                def back_at_prompt(command):
+                    check(g.wait_for("# ", timeout=20), f"`{command}` ends and the shell prompts again")
 
                 is_arp_for = lambda ip: (lambda f: f[12:14] == b"\x08\x06" and f[20:22] == b"\x00\x01" and f[38:42] == ip)
                 if logged_in:
                     if start("ping 10.0.2.98", is_arp_for(NOBODY_IP), "an ARP request for 10.0.2.98"):
                         probe("an ARP reply (arp_resolve)")
-                    back_at_prompt()
+                    back_at_prompt("ping 10.0.2.98")
                     if start("ping 10.0.2.2", lambda f: is_icmp_from_guest(f) and f[34] == 8 and f[30:34] == PEER_IP, "an echo request to 10.0.2.2"):
                         probe("an echo reply (icmp_echo)")
-                    back_at_prompt()
+                    back_at_prompt("ping 10.0.2.2")
                     is_dns = lambda f: len(f) >= 42 and f[12:14] == b"\x08\x00" and f[23] == 17 and f[30:34] == DNS_IP
                     if start("resolve foo.test", is_dns, "a DNS query"):
                         probe("a DNS answer (resolve_ip)")
-                    back_at_prompt()
+                    back_at_prompt("resolve foo.test")
                     q = start("fetch foo.test", is_dns, "a DNS query")
                     if q:
                         wire.send(dns_answer(guest_mac, guest_ip, q, PEER_IP))
@@ -440,7 +442,7 @@ def main():
                                 probe("the response (tcp_get's data loop)")
                                 _, _, rseq, _, rlen = guest_tcp(req)
                                 wire.send(tcp_frame(guest_mac, guest_ip, 80, sport, PEER_ISN + 1, rseq + rlen, 0x14))
-                    back_at_prompt()
+                    back_at_prompt("fetch foo.test")
             during = g.transcript()[mark:]
             wedged, restarted = during.count("wedged"), during.count("restarted")
             check(wedged == 0 and restarted == 0, f"no server called wedged or restarted ({wedged} wedged, {restarted} restarted)")
