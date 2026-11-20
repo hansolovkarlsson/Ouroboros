@@ -933,8 +933,9 @@ fn serve(packed_mac: u64) -> ! {
         // And the sessions that spoke for a user whose last key just went.
         close_unheld(&mut t.sessions, &t.held);
 
-        // 2. Incoming frames: ARP replies, parked remote mounts, dial-out
-        // connections, and the TCP server.
+        // 2. Incoming frames (`on_frame`): ARP and ICMP echo requests
+        // answered, then parked remote mounts, dial-out connections, and the
+        // TCP server.
         // At most `DRAIN_BUDGET` frames a pass, one too long for the buffer
         // counted like any other: what is left waits for the next pass,
         // which `NET_WAIT` starts at once.
@@ -4053,9 +4054,6 @@ fn on_frame(mac: &[u8; 6], frame: &[u8], conns: &mut [Option<TcpConn>; MAX_CONNS
     }
     let ethertype = ((frame[12] as u16) << 8) | frame[13] as u16;
     match ethertype {
-        // Any other ICMP, our own ping's late replies among them, is dropped.
-        // None of it is TCP.
-        0x0800 if frame.len() > 23 && frame[23] == 1 => {}
         0x0800 => {
             // A client connection's segment (a parked remote mount's, a held
             // session's, or a dial-out's) is addressed to our ephemeral source
@@ -4102,14 +4100,11 @@ fn answer_unasked(mac: &[u8; 6], frame: &[u8]) -> bool {
             handle_arp(mac, frame);
             true
         }
-        (0x08, 0x00) if frame.len() > 23 && frame[23] == 1 => {
-            let icmp = 14 + (frame[14] & 0x0f) as usize * 4;
-            if frame.len() > icmp && frame[icmp] == 8 {
-                answer_echo(mac, frame);
-                true
-            } else {
-                false
-            }
+        // A 20-byte IPv4 header, ICMP, type 8: the one shape `answer_echo`
+        // answers, read at the one offset it reads.
+        (0x08, 0x00) if frame.len() > 34 && frame[14] == 0x45 && frame[23] == 1 && frame[34] == 8 => {
+            answer_echo(mac, frame);
+            true
         }
         _ => false,
     }
@@ -4144,8 +4139,10 @@ fn handle_arp(mac: &[u8; 6], frame: &[u8]) {
     let _ = send(&arp);
 }
 
-/// The longest frame [`answer_echo`] answers: the receive buffer every
-/// caller of [`recv`] passes, so any request taken whole can be.
+/// The longest frame [`answer_echo`] answers: the size of every receive
+/// buffer in `netd` (the serve loop's `Tables::frame` and each polling
+/// loop's), so any request taken whole can be. No caller can pass a longer
+/// one today; the bound is what keeps the copy from panicking if one does.
 const ECHO_MAX_FRAME: usize = 1600;
 
 /// Answer an ICMP echo request addressed to our IP with its echo reply
@@ -4156,7 +4153,7 @@ const ECHO_MAX_FRAME: usize = 1600;
 /// Answered only when every part checks: an IPv4 header of 20 bytes (one
 /// with options is dropped, not answered without them) whose checksum
 /// holds, not a fragment, sent to our address exactly (never a broadcast)
-/// and to our MAC, from a unicast Ethernet address and an IP source a reply
+/// and to our MAC exactly, from a unicast Ethernet address and an IP source a reply
 /// can go to (not 0.x, 127.x, multicast or above, the subnet's network or
 /// broadcast address, or our own), and
 /// an ICMP message, type 8 code 0, whose checksum holds over the length
@@ -4187,8 +4184,10 @@ fn answer_echo(mac: &[u8; 6], frame: &[u8]) {
     let mut src = [0u8; 4];
     src.copy_from_slice(&frame[ETH + 12..ETH + 16]);
     // Our address, and sent to our MAC: a unicast IP under a link-layer
-    // broadcast is one a host should drop (RFC 1122 3.3.6).
-    if frame[ETH + 16..ETH + 20] != config.address || frame[0] & 1 != 0 {
+    // broadcast is one a host should drop (RFC 1122 3.3.6), and one under
+    // another host's MAC was never ours (a NIC that passes every frame up,
+    // as QEMU's virtio-net does, would otherwise answer for it).
+    if frame[ETH + 16..ETH + 20] != config.address || frame[0..6] != mac[..] {
         return; // not ours: another host's, or a broadcast
     }
     // The subnet's own network and broadcast addresses, which a /31 and a
