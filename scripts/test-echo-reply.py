@@ -61,7 +61,9 @@ for more-to-come and for an offset, the destination address and the
 broadcast MAC, the Ethernet source, and each of the six source tests
 (multicast and above, the subnet's network and broadcast, 0.x, 127.x, our
 own). Not reached by any case: the 42-byte floor, which the later checks
-mask, and `ECHO_MAX_FRAME`, which no caller's buffer can exceed.
+mask. (A bound on the frame against the reply's own buffer, `ECHO_MAX_FRAME`,
+no caller could reach either; since the reply is built over the request,
+2026-11-20, neither exists.)
 
 Controlled 2026-11-20, for 4b: #492's head (`18889e83`), whose polling
 loops dropped every frame they were not waiting for, failed it in every

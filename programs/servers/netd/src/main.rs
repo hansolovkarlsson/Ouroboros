@@ -942,7 +942,7 @@ fn serve(packed_mac: u64) -> ! {
         if packed_mac != syscall_abi::NET_ERROR {
             for _ in 0..DRAIN_BUDGET {
                 match recv_one(&mut t.frame) {
-                    Got::Frame(n) => on_frame(&mac, &t.frame[..n], &mut t.conns, &mut t.dials, &mut t.remotes, &mut t.sessions, &t.auth, &t.held),
+                    Got::Frame(n) => on_frame(&mac, &mut t.frame[..n], &mut t.conns, &mut t.dials, &mut t.remotes, &mut t.sessions, &t.auth, &t.held),
                     Got::TooLong => {}
                     Got::Nothing => break,
                 }
@@ -4041,11 +4041,12 @@ struct TcpIn {
 }
 
 /// Dispatch one received frame: answer ARP requests and ICMP echo requests
-/// for our IP ([`answer_unasked`], which [`recv`] calls too), and feed TCP
+/// for our IP ([`answer_unasked`], which [`recv`] calls too, and which may
+/// build its reply over the frame), and feed TCP
 /// segments to the HTTP server. Everything else (including our own client
 /// ops' replies, which the synchronous handlers already consumed) is ignored.
 #[allow(clippy::too_many_arguments)]
-fn on_frame(mac: &[u8; 6], frame: &[u8], conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], auth: &Auth, held: &held::Held) {
+fn on_frame(mac: &[u8; 6], frame: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], auth: &Auth, held: &held::Held) {
     if frame.len() < 14 {
         return;
     }
@@ -4083,14 +4084,15 @@ fn on_frame(mac: &[u8; 6], frame: &[u8], conns: &mut [Option<TcpConn>; MAX_CONNS
 /// Answer a frame that asks something of this host and keeps no state: an
 /// ARP request ([`handle_arp`]) or an ICMP echo request ([`answer_echo`]).
 /// `true` when the frame was one, whether or not it was ours to answer: it
-/// is used up, since no loop here ever waits for a request.
+/// is used up, since no loop here ever waits for a request, and an echo
+/// request's bytes are its reply's after it ([`answer_echo`]).
 ///
 /// The serve loop's [`on_frame`] calls it, and so does [`recv`], which every
 /// synchronous op's polling loop takes its frames through: until 2026-11-20
 /// those loops (an ARP resolve, a `ping`, a DNS lookup, a `fetch`) dropped
 /// every frame they were not waiting for, so a request that came while one
 /// was in flight, for up to a second or so, was never answered.
-fn answer_unasked(mac: &[u8; 6], frame: &[u8]) -> bool {
+fn answer_unasked(mac: &[u8; 6], frame: &mut [u8]) -> bool {
     if frame.len() < 14 {
         return false;
     }
@@ -4138,12 +4140,6 @@ fn handle_arp(mac: &[u8; 6], frame: &[u8]) {
     let _ = send(&arp);
 }
 
-/// The longest frame [`answer_echo`] answers: the size of every receive
-/// buffer in `netd` (the serve loop's `Tables::frame` and each polling
-/// loop's), so any request taken whole can be. No caller can pass a longer
-/// one today; the bound is what keeps the copy from panicking if one does.
-const ECHO_MAX_FRAME: usize = 1600;
-
 /// Answer an ICMP echo request addressed to our IP with its echo reply
 /// (RFC 792): the request's identifier, sequence number and data sent back
 /// whole, from us to its sender, type 0. Until 2026-11-19 `netd` sent echo
@@ -4160,9 +4156,16 @@ const ECHO_MAX_FRAME: usize = 1600;
 /// Ethernet padding is never echoed. The reply goes to the request's
 /// Ethernet source, as `handle_arp`'s does: no ARP lookup on the way out.
 ///
+/// The reply is built over the request, in the caller's receive buffer: an
+/// echo reply is its request with the addresses swapped, the type changed
+/// and the checksums made again, the same length, so it needs no buffer of
+/// its own (until 2026-11-20 it had one, 1600 bytes on the stack, and a
+/// bound on the frame no caller could exceed). The request is gone after,
+/// answered or refused: [`answer_unasked`] says it is used up.
+///
 /// Reached through [`answer_unasked`], from the serve loop and from every
 /// synchronous op's polling loop alike ([`recv`]).
-fn answer_echo(mac: &[u8; 6], frame: &[u8]) {
+fn answer_echo(mac: &[u8; 6], frame: &mut [u8]) {
     const ETH: usize = 14;
     const IP: usize = ETH + 20;
     if frame.len() < IP + 8 || frame[ETH] != 0x45 {
@@ -4173,7 +4176,7 @@ fn answer_echo(mac: &[u8; 6], frame: &[u8]) {
     }
     let total = u16::from_be_bytes([frame[ETH + 2], frame[ETH + 3]]) as usize;
     let len = ETH + total;
-    if total < 20 + 8 || len > frame.len() || len > ECHO_MAX_FRAME {
+    if total < 20 + 8 || len > frame.len() {
         return;
     }
     if u16::from_be_bytes([frame[ETH + 6], frame[ETH + 7]]) & 0x3fff != 0 {
@@ -4207,9 +4210,8 @@ fn answer_echo(mac: &[u8; 6], frame: &[u8]) {
         return; // not an echo request, or damaged
     }
 
-    let mut r = [0u8; ECHO_MAX_FRAME];
-    r[..len].copy_from_slice(&frame[..len]);
-    r[0..6].copy_from_slice(&frame[6..12]); // eth dst: the requester
+    let r = &mut frame[..len];
+    r.copy_within(6..12, 0); // eth dst: the requester
     r[6..12].copy_from_slice(mac); // eth src: us
     r[ETH + 1] = 0; // DSCP/ECN
     r[ETH + 4..ETH + 8].fill(0); // id, flags and fragment offset
@@ -4223,7 +4225,7 @@ fn answer_echo(mac: &[u8; 6], frame: &[u8]) {
     r[IP + 2..IP + 4].fill(0);
     let csum = ip_checksum(&r[IP..len]);
     r[IP + 2..IP + 4].copy_from_slice(&csum.to_be_bytes());
-    let _ = send(&r[..len]);
+    let _ = send(r);
 }
 
 /// Parse an inbound frame as a TCP segment addressed to our listen port,
@@ -9070,7 +9072,8 @@ fn send(frame: &[u8]) -> Result<(), ()> {
 ///
 /// For the synchronous ops' polling loops, which take nothing else. An ARP
 /// or ICMP echo request is answered here, as [`on_frame`] would answer it
-/// ([`answer_unasked`]), and this says `None`, as for no frame, so the
+/// ([`answer_unasked`], the reply built over it in `buf`), and this says
+/// `None`, as for no frame, so the
 /// caller looks at its deadline before asking again. `mac` is required so
 /// that no loop can poll without answering.
 ///
@@ -9082,7 +9085,7 @@ fn send(frame: &[u8]) -> Result<(), ()> {
 fn recv(mac: &[u8; 6], buf: &mut [u8]) -> Option<usize> {
     for _ in 0..RECV_SKIP_MAX {
         match recv_one(buf) {
-            Got::Frame(n) if answer_unasked(mac, &buf[..n]) => return None,
+            Got::Frame(n) if answer_unasked(mac, &mut buf[..n]) => return None,
             Got::Frame(n) => return Some(n),
             Got::TooLong => {}
             Got::Nothing => return None,
