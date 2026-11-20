@@ -69,7 +69,12 @@ loop it reached (the data loop was not: the handshake gave up during the
 failed probe's wait); `recv` with its answering arm removed did the same;
 `answer_unasked` passing ARP requests through unanswered failed the first
 ARP check; and with echo requests used up unanswered, every answered
-check failed and every 4b probe's echo half.
+check failed and every 4b probe's echo half. From the second review:
+#492's head answered a request for our address under another host's
+unicast MAC (QEMU's virtio-net passes it up), its check failing; with the
+destination MAC not compared at all, that check and the broadcast MAC's
+failed. `answer_unasked`'s own header test (0x45) has no case: a frame it
+misreads is one `answer_echo` refuses anyway.
 
 Usage:  python3 scripts/test-echo-reply.py      (make test-echo-reply builds the image)
 Exit status: 0, 1 for a failed check, drive-qemu's INCONCLUSIVE for a boot

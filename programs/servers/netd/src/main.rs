@@ -4052,32 +4052,31 @@ fn on_frame(mac: &[u8; 6], frame: &[u8], conns: &mut [Option<TcpConn>; MAX_CONNS
     if answer_unasked(mac, frame) {
         return;
     }
-    let ethertype = ((frame[12] as u16) << 8) | frame[13] as u16;
-    match ethertype {
-        0x0800 => {
-            // A client connection's segment (a parked remote mount's, a held
-            // session's, or a dial-out's) is addressed to our ephemeral source
-            // port, not a listen port - try those first (and a retransmitted
-            // SYN for an already-accepted dial-in conn matches here too, so it
-            // never double-accepts below).
-            if dial_on_segment(mac, frame, remotes) {
-                return;
-            }
-            if dial_on_segment(mac, frame, sessions) {
-                return;
-            }
-            if dial_on_segment(mac, frame, dials) {
-                return;
-            }
-            // A fresh inbound SYN to an `announce`d port (dial-in) - accept it.
-            if dial_accept(mac, frame, dials) {
-                return;
-            }
-            if let Some(seg) = parse_tcp_in(frame) {
-                handle_tcp(mac, frame, &seg, conns, dials, auth, remotes, held);
-            }
-        }
-        _ => {}
+    // Anything not IPv4 is no one's here; every TCP path below rejects
+    // what is not TCP.
+    if frame[12..14] != [0x08, 0x00] {
+        return;
+    }
+    // A client connection's segment (a parked remote mount's, a held
+    // session's, or a dial-out's) is addressed to our ephemeral source
+    // port, not a listen port - try those first (and a retransmitted
+    // SYN for an already-accepted dial-in conn matches here too, so it
+    // never double-accepts below).
+    if dial_on_segment(mac, frame, remotes) {
+        return;
+    }
+    if dial_on_segment(mac, frame, sessions) {
+        return;
+    }
+    if dial_on_segment(mac, frame, dials) {
+        return;
+    }
+    // A fresh inbound SYN to an `announce`d port (dial-in) - accept it.
+    if dial_accept(mac, frame, dials) {
+        return;
+    }
+    if let Some(seg) = parse_tcp_in(frame) {
+        handle_tcp(mac, frame, &seg, conns, dials, auth, remotes, held);
     }
 }
 
