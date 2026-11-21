@@ -3111,16 +3111,15 @@ test-batch-refused: image image-exfat
 # run a test binary.
 HOST_TARGET := $(shell rustc -vV | sed -n 's/^host: //p')
 PURE_CRATES := accounts regex ed25519 clusterkeys heldkeys ninep-abi keyseq parttable amlscan genet netconf netaddr
-# What `make test` lints beside PURE_CRATES: the kernel's package, the
-# four supervised servers, and every other program.
+# What `make test` lints beside PURE_CRATES: the kernel's package, and every
+# other workspace member for USER_TARGET. LINT_CRATES_PY prints those members
+# from cargo metadata (its arguments are the ones to leave out), so a crate
+# added anywhere is linted with no edit. One clippy run builds each as it
+# ships only while none sets features on a dependency, since cargo unifies
+# features across a run; such a crate is refused by name, as is an empty
+# list, which would lint nothing and pass.
 KERNEL_PKG := ouroboros-kernel
-LINT_SERVERS := fsd cond netd accountd
-# Every workspace package under programs/ but the servers, read from cargo
-# metadata when `make test` runs (`=`, so no other target pays for it), not
-# written out: a list by hand would leave out the next program added, which
-# is the gap this closes. None of them sets a feature, so one clippy run
-# over all of them builds each as it ships.
-LINT_PROGRAMS = $(shell cargo metadata --no-deps --format-version 1 | python3 -c 'import json, os, sys; m = json.load(sys.stdin); r = m["workspace_root"]; skip = set(sys.argv[1:]); print(" ".join(sorted(p["name"] for p in m["packages"] if os.path.relpath(p["manifest_path"], r).startswith("programs" + os.sep) and p["name"] not in skip)))' $(LINT_SERVERS))
+LINT_CRATES_PY := import json, subprocess, sys; m = json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"])); w = set(m["workspace_members"]); ps = [p for p in m["packages"] if p["id"] in w and p["name"] not in sys.argv[1:]]; bad = [p["name"] + " sets features on " + d["name"] for p in ps for d in p["dependencies"] if d["features"] or not d["uses_default_features"]]; bad and sys.exit("make test: " + bad[0] + ": one clippy run would lint every crate with them"); ps or sys.exit("make test: no crates found to lint"); print(" ".join(sorted(p["name"] for p in ps)))
 # `ninep-abi` joined the list at the flag day. It had always qualified - pure
 # consts plus `resolve_ns`, no I/O and no syscalls - and was simply never listed,
 # so its thirteen assertions about the WIRE FORMAT, including the one pinning
@@ -3237,24 +3236,20 @@ test:
 	@for c in $(PURE_CRATES); do \
 		cargo clippy -p $$c --all-targets --target $(HOST_TARGET) -- -D warnings || exit 1; \
 	done
-	@# The kernel and the four supervised servers too (since 2026-11-20).
-	@# Until then this linted PURE_CRATES alone: a one-arm `match` in netd
-	@# failed clippy while `make test` exited 0 (#493), and the kernel had
-	@# to be made clean again by hand (#484). The kernel is linted in the
-	@# dev profile only, as `make build` builds it; the servers as they ship,
-	@# for USER_TARGET in release. Their rig-feature builds are linted below,
-	@# where they are checked. The other programs follow.
-	@echo "== clippy: the kernel and the four servers"
+	@# The kernel and every userland crate too: the kernel and the four
+	@# servers since 2026-11-20, every other crate since 2026-11-21. Until
+	@# then this linted PURE_CRATES alone: a one-arm `match` in netd failed
+	@# clippy while `make test` exited 0 (#493), and the kernel had to be
+	@# made clean again by hand (#484). The kernel is linted in the dev
+	@# profile only, as `make build` builds it; the userland crates (see
+	@# LINT_CRATES_PY) as they ship, for USER_TARGET in release, in one run.
+	@# The servers' rig-feature builds are linted below, where they are
+	@# checked.
+	@echo "== clippy: the kernel"
 	@cargo clippy -p $(KERNEL_PKG) -- -D warnings
-	@for c in $(LINT_SERVERS); do \
-		cargo clippy -p $$c --target $(USER_TARGET) --release -- -D warnings || exit 1; \
-	done
-	@# The other programs, and nsresolve, the Rust staticlib every C program
-	@# links, which is outside programs/ (since 2026-11-21). An empty list
-	@# would lint nothing and pass, so it is refused.
-	@echo "== clippy: $(words $(LINT_PROGRAMS)) other programs and nsresolve"
-	@test -n "$(LINT_PROGRAMS)" || { echo "make test: no programs found to lint (cargo metadata)"; exit 1; }
-	@cargo clippy -q $(addprefix -p ,$(LINT_PROGRAMS)) -p nsresolve --target $(USER_TARGET) --release -- -D warnings
+	@crates=$$(python3 -c '$(LINT_CRATES_PY)' $(KERNEL_PKG) $(PURE_CRATES)) || exit 1; \
+	echo "== clippy: $$(echo $$crates | wc -w | tr -d ' ') userland crates"; \
+	cargo clippy -q $$(printf -- '-p %s ' $$crates) --target $(USER_TARGET) --release -- -D warnings
 	@# The protocol constants are spelled independently in Rust and in the two
 	@# Python peers - there is no shared header across that boundary - so they
 	@# can drift, and a drift surfaces as "authentication failed", which reads

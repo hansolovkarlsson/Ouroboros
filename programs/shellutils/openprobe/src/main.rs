@@ -50,9 +50,9 @@ fn usage() -> ! {
 }
 
 /// What one round trip to fsd came back with.
-enum Answer {
+enum Reply {
     Status(u64),
-    CallFailed(u64),
+    NoAnswer(u64),
     Short(u64),
 }
 
@@ -62,7 +62,7 @@ enum Answer {
 /// namespace (the high review of #369). A drift that malformed the request
 /// cannot pass the rig: the plain read open must answer `opened` and the
 /// searchable `O_EXCL` open EEXIST.
-fn call(verb: u64, params: [u64; 4], payload: &[u8]) -> Answer {
+fn call(verb: u64, params: [u64; 4], payload: &[u8]) -> Reply {
     const HDR: usize = ninep_abi::NP_REQ_PAYLOAD as usize;
     let mut req = [0u8; syscall_abi::MSG_MAX_LEN as usize];
     req[0..8].copy_from_slice(&verb.to_le_bytes());
@@ -81,15 +81,15 @@ fn call(verb: u64, params: [u64; 4], payload: &[u8]) -> Answer {
         reply.as_mut_ptr() as u64,
     );
     if packed >= syscall_abi::FS_ERR_MIN {
-        return Answer::CallFailed(packed);
+        return Reply::NoAnswer(packed);
     }
     let len = packed & 0xffff_ffff;
     if len < 8 {
-        return Answer::Short(len);
+        return Reply::Short(len);
     }
     let mut status = [0u8; 8];
     status.copy_from_slice(&reply[0..8]);
-    Answer::Status(u64::from_le_bytes(status))
+    Reply::Status(u64::from_le_bytes(status))
 }
 
 #[no_mangle]
@@ -120,7 +120,7 @@ pub extern "C" fn _start() -> ! {
     ulib::emit(&mut line, &mut n, b" ");
     let mut clunked = true;
     let answered = match answer {
-        Answer::Status(r) => {
+        Reply::Status(r) => {
             let name: Option<&[u8]> = match r {
                 syscall_abi::FS_ERR_ALREADY_EXISTS => Some(b"FS_ERR_ALREADY_EXISTS"),
                 syscall_abi::FS_ERR_PERM => Some(b"FS_ERR_PERM"),
@@ -134,13 +134,13 @@ pub extern "C" fn _start() -> ! {
                 None if r < syscall_abi::FS_ERR_MIN => {
                     ulib::emit(&mut line, &mut n, b"opened");
                     match call(ninep_abi::NP_CLUNK, [r, 0, 0, 0], &[]) {
-                        Answer::Status(0) => {}
-                        Answer::Status(c) => {
+                        Reply::Status(0) => {}
+                        Reply::Status(c) => {
                             ulib::emit(&mut line, &mut n, b", clunk ");
                             ulib::emit_dec(&mut line, &mut n, c);
                             clunked = false;
                         }
-                        Answer::CallFailed(_) | Answer::Short(_) => {
+                        Reply::NoAnswer(_) | Reply::Short(_) => {
                             ulib::emit(&mut line, &mut n, b", clunk no answer");
                             clunked = false;
                         }
@@ -153,12 +153,12 @@ pub extern "C" fn _start() -> ! {
             }
             clunked
         }
-        Answer::CallFailed(e) => {
+        Reply::NoAnswer(e) => {
             ulib::emit(&mut line, &mut n, b"no answer ");
             ulib::emit_dec(&mut line, &mut n, e);
             false
         }
-        Answer::Short(len) => {
+        Reply::Short(len) => {
             ulib::emit(&mut line, &mut n, b"short reply ");
             ulib::emit_dec(&mut line, &mut n, len);
             false
