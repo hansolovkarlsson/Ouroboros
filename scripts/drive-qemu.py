@@ -23,12 +23,14 @@ are load-bearing rather than defensive:
 
 1. **Type one character at a time, with a delay** (TYPE_DELAY). A burst is
    dropped after the first byte.
-2. **Wait for the prompt, and only match output produced SINCE the last step.**
+2. **Wait for the prompt, and only match output AFTER the last match.**
    Searching the whole buffer matches a *previous* prompt and starts typing
    while the guest is still printing - which silently eats the first characters
    of the command, so `cat /etc/shadow` arrives as `t /etc/shadow` and the test
    appears to fail for a reason that has nothing to do with the code. This
-   version tracks a high-water mark for exactly that reason.
+   version tracks a high-water mark for exactly that reason. The mark is the
+   end of the match, not of everything that has arrived: a mark past the
+   match would also pass over a line printed with it (until 2026-11-21).
 
 A settle delay after each match (SETTLE) covers the same hazard for the tail of
 a prompt that is still draining.
