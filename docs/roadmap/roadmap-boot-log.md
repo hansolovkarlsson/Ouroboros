@@ -4,8 +4,9 @@
 serial port to read. We probably need to create a boot log and driver log
 functionality so it's possible to download the log files without having a
 serial port." It closes `ROADMAP.md`'s open item "A kernel log buffer and
-`dmesg`" (the framebuffer section) and `gap-analysis.md`'s "Logging
-framework / `dmesg` / syslog" row, both open since before the Pi.*
+`dmesg`" (the framebuffer section) and the logging row of
+`gap-analysis.md`'s "Observability & debugging", both open since before
+the Pi.*
 
 ## Why
 
