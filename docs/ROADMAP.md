@@ -1672,13 +1672,20 @@ The small open tails those arcs deliberately left:
   alone, not the kernel either (which is how #484 came to be needed).
   **Done 2026-11-20, Hans's scope:** `make test` lints the kernel and
   `fsd`, `cond`, `netd` and `accountd` (`KERNEL_PKG`, `LINT_SERVERS`),
-  about a second of its time; `fsd`'s fifteen warnings, one lint, were
-  fixed first; a lint planted in each of the five fails it. **Left:** the
-  other 62 programs under `programs/`. Measured the same day: 61 already
-  pass, linting all 62 takes 7 s, and the one that does not is
-  `openprobe` (`enum_variant_names`, `NoAnswer` in `enum ...Answer`).
-  **Done when** they are in `LINT_SERVERS`'s loop or one beside it, and a
-  lint planted in one of them fails `make test`.
+  and the servers' five rig-feature builds, which were `cargo check` and
+  are now clippy, so an item under `#[cfg(feature = ...)]` is linted too;
+  about 1.4 s of its time on a warm cache, most of it the kernel rebuilt (its `build.rs` reruns every build), and 0.4 s for the five rig builds; `fsd`'s fifteen warnings, one lint, were fixed first; a
+  lint planted in each of the five fails it, and one planted under
+  `#[cfg(feature = "restart-rig")]` in `netd` does too. The kernel is
+  linted in the dev profile only, as `make build` builds it, not as
+  `PROFILE=release`. **Left:** the other 62 programs under `programs/`,
+  and `nsresolve`, the Rust staticlib every C program links, which is
+  outside `programs/`. Measured the same day: 61 of the 62 already pass,
+  linting all 62 takes 7 s, and the one that does not is `openprobe`
+  (`enum_variant_names`, `NoAnswer` in `enum ...Answer`). **Done when**
+  they and `nsresolve` are in a loop of their own beside `LINT_SERVERS`
+  (a `LINT_PROGRAMS`, so neither name says something false), and a lint
+  planted in one of them fails `make test`.
 
 - **A server past its restart cap draws a second wedge line (seen
   2026-09-27).** Forcing `netd` through four ping-timeout wedges in one boot

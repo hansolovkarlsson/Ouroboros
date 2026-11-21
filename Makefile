@@ -3234,13 +3234,13 @@ test:
 	@# The kernel and the four supervised servers too (since 2026-11-20).
 	@# Until then this linted PURE_CRATES alone: a one-arm `match` in netd
 	@# failed clippy while `make test` exited 0 (#493), and the kernel had
-	@# to be made clean again by hand (#484). The servers are linted as
-	@# they are built, for USER_TARGET in release; their rig builds need no
-	@# run of their own, since each rig's code is behind `cfg!()`, which
-	@# compiles both branches. The other userland programs are not linted
-	@# yet (ROADMAP.md, "make test does not lint netd").
+	@# to be made clean again by hand (#484). The kernel is linted in the
+	@# dev profile only, as `make build` builds it; the servers as they ship,
+	@# for USER_TARGET in release. Their rig-feature builds are linted below,
+	@# where they are checked. The other userland programs are not linted
+	@# yet (see ROADMAP.md's "make test lints no userland program but the four servers").
 	@echo "== clippy: the kernel and the four servers"
-	@cargo clippy -p $(KERNEL_PKG) -- -D warnings || exit 1
+	@cargo clippy -p $(KERNEL_PKG) -- -D warnings
 	@for c in $(LINT_SERVERS); do \
 		cargo clippy -p $$c --target $(USER_TARGET) --release -- -D warnings || exit 1; \
 	done
@@ -3260,25 +3260,27 @@ test:
 	@# reading of supervisor.rs and loader.rs need nothing, so they run here.
 	@python3 scripts/check-supervised-images.py --self-test || exit 1
 	@# fsd's disk-gate-rig feature (test-disk-gate's build) is built by
-	@# nothing else in this target. fsd reads it through cfg!(), so the
+	@# nothing else in this target. It is clippy, not check, since
+	@# 2026-11-20, so an item under #[cfg(feature = ...)], which the default
+	@# build never compiles, is linted too. fsd reads it through cfg!(), so the
 	@# default build compiles both branches; what only this sees is the
 	@# feature itself renamed or dropped from fsd's Cargo.toml, or a build
 	@# with it that fails, until the rig is next needed. A check makes no
 	@# fsd.bin, so it cannot touch the shipped one (the review of #371).
-	@echo "== cargo check -p fsd --features disk-gate-rig"
-	@cargo check -q -p fsd --target $(USER_TARGET) --release --features disk-gate-rig --target-dir $(FSD_GATE_DIR) || exit 1
+	@echo "== cargo clippy -p fsd --features disk-gate-rig"
+	@cargo clippy -q -p fsd --target $(USER_TARGET) --release --features disk-gate-rig --target-dir $(FSD_GATE_DIR) -- -D warnings || exit 1
 	@# netd's restart-rig feature (test-server-children's build), for the
 	@# same reason.
-	@echo "== cargo check -p netd --features restart-rig"
-	@cargo check -q -p netd --target $(USER_TARGET) --release --features restart-rig --target-dir $(NETD_RESTART_DIR) || exit 1
+	@echo "== cargo clippy -p netd --features restart-rig"
+	@cargo clippy -q -p netd --target $(USER_TARGET) --release --features restart-rig --target-dir $(NETD_RESTART_DIR) -- -D warnings || exit 1
 	@# fsd's, cond's and accountd's restart-rig features (their restart
 	@# rigs' builds), for the same reason.
-	@echo "== cargo check -p fsd --features restart-rig"
-	@cargo check -q -p fsd --target $(USER_TARGET) --release --features restart-rig --target-dir $(FSD_RESTART_DIR) || exit 1
-	@echo "== cargo check -p cond --features restart-rig"
-	@cargo check -q -p cond --target $(USER_TARGET) --release --features restart-rig --target-dir $(COND_RESTART_DIR) || exit 1
-	@echo "== cargo check -p accountd --features restart-rig"
-	@cargo check -q -p accountd --target $(USER_TARGET) --release --features restart-rig --target-dir $(ACCOUNTD_RESTART_DIR) || exit 1
+	@echo "== cargo clippy -p fsd --features restart-rig"
+	@cargo clippy -q -p fsd --target $(USER_TARGET) --release --features restart-rig --target-dir $(FSD_RESTART_DIR) -- -D warnings || exit 1
+	@echo "== cargo clippy -p cond --features restart-rig"
+	@cargo clippy -q -p cond --target $(USER_TARGET) --release --features restart-rig --target-dir $(COND_RESTART_DIR) -- -D warnings || exit 1
+	@echo "== cargo clippy -p accountd --features restart-rig"
+	@cargo clippy -q -p accountd --target $(USER_TARGET) --release --features restart-rig --target-dir $(ACCOUNTD_RESTART_DIR) -- -D warnings || exit 1
 	@# The host 9P peer's docstring lists which verbs it serves, and nothing
 	@# compared that prose to its dispatch chain - so when a range test silently
 	@# swallowed the five fid verbs, the prose went on claiming otherwise. This
