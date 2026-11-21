@@ -1679,20 +1679,31 @@ The small open tails those arcs deliberately left:
   sits: 69 crates, the 66 under `programs/`, `nsresolve` (the Rust
   staticlib every C program links), `ulib` and `syscall-abi`, in one
   clippy run for the userland target, 0.2 to 0.9 s warm (the kernel's
-  own lint about 1 s, its `build.rs` rerunning every build). The list is read
-  from `cargo metadata` when `make test` runs (`LINT_CRATES_PY`), so a
-  crate added anywhere is linted with no edit. One run builds each crate
-  as it ships only while none sets features on a dependency, since cargo
-  unifies features across a run, so such a crate is refused by name, and
-  so is an empty list. `openprobe`'s one lint (`enum_variant_names`,
-  `NoAnswer` in `enum Answer`) was fixed by naming the enum `Reply`.
-  Controls: a lint planted in each of the kernel, the four servers,
-  `hello` and `nsresolve` fails `make test`, and so does one under
-  `#[cfg(feature = "restart-rig")]` in `netd`; so does a new crate with a
-  lint, added to the workspace outside `programs/` and nowhere else, is
-  counted (70) and fails it; `cat` with `default-features = false` on
-  `ulib` is refused by name; and an empty list is refused. **Limit:** the kernel is linted in the dev profile only, as
-  `make build` builds it, not as `PROFILE=release`.
+  own lint about 1 s, its `build.rs` rerunning every build). The list is
+  read from `cargo metadata` when `make test` runs (`LINT_CRATES_PY`), so
+  a crate added anywhere is linted with no edit. One run builds each crate
+  as it ships only while nothing in that build turns on a dependency's
+  feature, since cargo unifies features across a run. So a member in the
+  build (the pure crates too, which are in it as dependencies) that does
+  is refused by name: by a normal dependency's `features` or
+  `default-features = false`, or by a `[features]` entry naming another
+  crate's. Dev- and build-dependencies are not in the build and are not
+  refused. An empty list is refused too. `--keep-going` reports every
+  crate with a lint in one run. `openprobe`'s one lint
+  (`enum_variant_names`, `NoAnswer` in `enum Answer`) was fixed by naming
+  the enum `Outcome`.
+  Controls, each failing `make test`: a lint planted in the kernel, in
+  each of the four servers, in `hello` and in `nsresolve`; one under
+  `#[cfg(feature = "restart-rig")]` in `netd`; and a new crate with a
+  lint, added to the workspace outside `programs/` and nowhere else,
+  which the step counted as one more crate before failing on it. Lints
+  planted in `hello` and `wc` together were both reported. Refused by
+  name: `cat` given `default-features = false` on `ulib`; `cat` with
+  `default = ["ulib/ctl"]` in its `[features]`; `clusterkeys`, a pure
+  crate, setting a feature on `ed25519`; and an empty list. Not refused,
+  and `make test` passed: `netconf` setting a feature on `netaddr` as a
+  dev-dependency. **Limit:** the kernel is linted in the dev profile
+  only, as `make build` builds it, not as `PROFILE=release`.
 
 - **A server past its restart cap draws a second wedge line (seen
   2026-09-27).** Forcing `netd` through four ping-timeout wedges in one boot
