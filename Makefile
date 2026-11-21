@@ -3111,10 +3111,20 @@ test-batch-refused: image image-exfat
 # run a test binary.
 HOST_TARGET := $(shell rustc -vV | sed -n 's/^host: //p')
 PURE_CRATES := accounts regex ed25519 clusterkeys heldkeys ninep-abi keyseq parttable amlscan genet netconf netaddr
-# What `make test` lints beside PURE_CRATES: the kernel's package and the
-# four supervised servers.
+# What `make test` lints beside PURE_CRATES: the kernel's package, and every
+# other workspace member for USER_TARGET. LINT_CRATES_PY prints those members
+# from cargo metadata (its first argument is the kernel's package, the rest the
+# pure crates, all left out), so a crate added anywhere is linted with no edit.
+# One clippy run builds each as it ships only while no crate in that build
+# turns on a feature of a dependency, since cargo unifies features across a
+# run: by a normal dependency's `features` or `default-features = false`, or
+# by a `[features]` entry naming another crate's (`x/y`, `x?/y`). That is
+# checked over every member but the kernel, the pure crates too, since they
+# are in the build as dependencies; dev- and build-dependencies are not in
+# it. A crate that does is refused by name, and so is an empty list, which
+# would lint nothing and pass.
 KERNEL_PKG := ouroboros-kernel
-LINT_SERVERS := fsd cond netd accountd
+LINT_CRATES_PY := import json, subprocess, sys; m = json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"])); w = set(m["workspace_members"]); built = [p for p in m["packages"] if p["id"] in w and p["name"] != sys.argv[1]]; ps = [p for p in built if p["name"] not in sys.argv[2:]]; bad = [p["name"] + " sets features on " + d["name"] for p in built for d in p["dependencies"] if d["kind"] is None and (d["features"] or not d["uses_default_features"])] + [p["name"] + " turns on " + f + " in its features" for p in built for v in p["features"].values() for f in v if "/" in f]; bad and sys.exit("make test: " + bad[0] + ": one clippy run would lint every crate with it"); ps or sys.exit("make test: no crates found to lint"); print(" ".join(sorted(p["name"] for p in ps)))
 # `ninep-abi` joined the list at the flag day. It had always qualified - pure
 # consts plus `resolve_ns`, no I/O and no syscalls - and was simply never listed,
 # so its thirteen assertions about the WIRE FORMAT, including the one pinning
@@ -3231,19 +3241,20 @@ test:
 	@for c in $(PURE_CRATES); do \
 		cargo clippy -p $$c --all-targets --target $(HOST_TARGET) -- -D warnings || exit 1; \
 	done
-	@# The kernel and the four supervised servers too (since 2026-11-20).
-	@# Until then this linted PURE_CRATES alone: a one-arm `match` in netd
-	@# failed clippy while `make test` exited 0 (#493), and the kernel had
-	@# to be made clean again by hand (#484). The kernel is linted in the
-	@# dev profile only, as `make build` builds it; the servers as they ship,
-	@# for USER_TARGET in release. Their rig-feature builds are linted below,
-	@# where they are checked. The other userland programs are not linted
-	@# yet (see ROADMAP.md's "make test lints no userland program but the four servers").
-	@echo "== clippy: the kernel and the four servers"
+	@# The kernel and every userland crate too: the kernel and the four
+	@# servers since 2026-11-20, every other crate since 2026-11-21. Until
+	@# then this linted PURE_CRATES alone: a one-arm `match` in netd failed
+	@# clippy while `make test` exited 0 (#493), and the kernel had to be
+	@# made clean again by hand (#484). The kernel is linted in the dev
+	@# profile only, as `make build` builds it; the userland crates (see
+	@# LINT_CRATES_PY) as they ship, for USER_TARGET in release, in one run.
+	@# The servers' rig-feature builds are linted below, where they are
+	@# checked.
+	@echo "== clippy: the kernel"
 	@cargo clippy -p $(KERNEL_PKG) -- -D warnings
-	@for c in $(LINT_SERVERS); do \
-		cargo clippy -p $$c --target $(USER_TARGET) --release -- -D warnings || exit 1; \
-	done
+	@crates=$$(python3 -c '$(LINT_CRATES_PY)' $(KERNEL_PKG) $(PURE_CRATES)) || exit 1; \
+	echo "== clippy: $$(echo $$crates | wc -w | tr -d ' ') userland crates"; \
+	cargo clippy -q --keep-going $$(printf -- '-p %s ' $$crates) --target $(USER_TARGET) --release -- -D warnings
 	@# The protocol constants are spelled independently in Rust and in the two
 	@# Python peers - there is no shared header across that boundary - so they
 	@# can drift, and a drift surfaces as "authentication failed", which reads
