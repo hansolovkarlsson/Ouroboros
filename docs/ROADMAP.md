@@ -1671,24 +1671,27 @@ The small open tails those arcs deliberately left:
   test` exited 0 on the same tree, since its clippy covered `PURE_CRATES`
   alone, not the kernel either (which is how #484 came to be needed).
   On 2026-11-20 (#495, Hans's scope) `make test` came to lint the kernel
-  and `fsd`, `cond`, `netd` and `accountd` (`KERNEL_PKG`,
-  `LINT_SERVERS`), and the servers' five rig-feature builds, which were
-  `cargo check` and are now clippy, so an item under `#[cfg(feature =
-  ...)]` is linted too: about 1.4 s on a warm cache, most of it the
-  kernel rebuilt (its `build.rs` reruns every build), and 0.4 s for the
-  rig builds. `fsd`'s fifteen warnings, one lint, were fixed first. On
-  2026-11-21 it came to lint the other 62 programs and `nsresolve`, the
-  Rust staticlib every C program links, in one clippy run, about 0.2 s
-  warm. `LINT_PROGRAMS` is read from `cargo metadata` (every package
-  under `programs/` but the servers), not written out, so a program
-  added later is linted with no edit; an empty list is refused.
-  `openprobe`'s one lint (`enum_variant_names`, `Answer::NoAnswer`) was
-  fixed by naming the variant `CallFailed`. Controls: a lint planted in
-  each of the kernel, the four servers, `hello` and `nsresolve` fails
-  `make test`, and so does one under `#[cfg(feature = "restart-rig")]` in
-  `netd`; a new program with a lint, added to the workspace alone, was
-  counted (63) and failed it; and `LINT_PROGRAMS=` on the command line
-  fails it. **Limit:** the kernel is linted in the dev profile only, as
+  and `fsd`, `cond`, `netd` and `accountd`, and the servers' five
+  rig-feature builds, which were `cargo check` and are now clippy, so an
+  item under `#[cfg(feature = ...)]` is linted too. `fsd`'s fifteen
+  warnings, one lint, were fixed first. On 2026-11-21 it came to lint
+  every workspace member but the kernel and the pure crates, wherever it
+  sits: 69 crates, the 66 under `programs/`, `nsresolve` (the Rust
+  staticlib every C program links), `ulib` and `syscall-abi`, in one
+  clippy run for the userland target, 0.2 to 0.9 s warm (the kernel's
+  own lint about 1 s, its `build.rs` rerunning every build). The list is read
+  from `cargo metadata` when `make test` runs (`LINT_CRATES_PY`), so a
+  crate added anywhere is linted with no edit. One run builds each crate
+  as it ships only while none sets features on a dependency, since cargo
+  unifies features across a run, so such a crate is refused by name, and
+  so is an empty list. `openprobe`'s one lint (`enum_variant_names`,
+  `NoAnswer` in `enum Answer`) was fixed by naming the enum `Reply`.
+  Controls: a lint planted in each of the kernel, the four servers,
+  `hello` and `nsresolve` fails `make test`, and so does one under
+  `#[cfg(feature = "restart-rig")]` in `netd`; so does a new crate with a
+  lint, added to the workspace outside `programs/` and nowhere else, is
+  counted (70) and fails it; `cat` with `default-features = false` on
+  `ulib` is refused by name; and an empty list is refused. **Limit:** the kernel is linted in the dev profile only, as
   `make build` builds it, not as `PROFILE=release`.
 
 - **A server past its restart cap draws a second wedge line (seen
