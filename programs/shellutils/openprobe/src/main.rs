@@ -52,7 +52,7 @@ fn usage() -> ! {
 /// What one round trip to fsd came back with.
 enum Answer {
     Status(u64),
-    NoAnswer(u64),
+    CallFailed(u64),
     Short(u64),
 }
 
@@ -81,7 +81,7 @@ fn call(verb: u64, params: [u64; 4], payload: &[u8]) -> Answer {
         reply.as_mut_ptr() as u64,
     );
     if packed >= syscall_abi::FS_ERR_MIN {
-        return Answer::NoAnswer(packed);
+        return Answer::CallFailed(packed);
     }
     let len = packed & 0xffff_ffff;
     if len < 8 {
@@ -140,7 +140,7 @@ pub extern "C" fn _start() -> ! {
                             ulib::emit_dec(&mut line, &mut n, c);
                             clunked = false;
                         }
-                        Answer::NoAnswer(_) | Answer::Short(_) => {
+                        Answer::CallFailed(_) | Answer::Short(_) => {
                             ulib::emit(&mut line, &mut n, b", clunk no answer");
                             clunked = false;
                         }
@@ -153,7 +153,7 @@ pub extern "C" fn _start() -> ! {
             }
             clunked
         }
-        Answer::NoAnswer(e) => {
+        Answer::CallFailed(e) => {
             ulib::emit(&mut line, &mut n, b"no answer ");
             ulib::emit_dec(&mut line, &mut n, e);
             false
