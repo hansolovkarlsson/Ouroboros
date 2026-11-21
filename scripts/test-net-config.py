@@ -122,9 +122,11 @@ def boot(label, conf, want_lines, reached, not_reached, ping):
         "-device", "virtio-net-device,netdev=net0",
     ), label=f"[{label}] ")
     try:
-        # The whole transcript is asked, not `wait_for` a line at a time:
-        # `wait_for` moves its mark to the end of what has arrived, so of two
-        # lines printed together it finds the first and has passed the second.
+        # The whole transcript is asked, not `wait_for` a line at a time,
+        # so the lines may come in any order. (This rig's first run is how
+        # `wait_for` was found passing over the second of two lines printed
+        # together; it moves its mark to the end of the match since
+        # 2026-11-21.)
         deadline = time.time() + 90
         while time.time() < deadline and not all(x in g.transcript() for x in [*want_lines, "login:"]):
             time.sleep(0.2)
