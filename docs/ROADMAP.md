@@ -2023,7 +2023,9 @@ The small open tails those arcs deliberately left:
 >             host reading guest memory cacheable could show it stale, and
 >             every scroll read 8 MB of uncached memory. Nothing becomes
 >             non-cacheable implicitly; only the ranges `main.rs` passes.
->       - [ ] **A kernel log buffer and `dmesg`.** Every kernel boot line,
+>       - [ ] **A kernel log buffer and `dmesg`.** Planned 2026-11-20 as an
+>             arc of its own: [`roadmap-boot-log.md`](roadmap/roadmap-boot-log.md).
+>             Every kernel boot line,
 >             the non-cacheable mapping's self-check included, reaches a
 >             framebuffer-only screen only until the console server clears
 >             it, and the kernel keeps nothing to read back. On the Pi,

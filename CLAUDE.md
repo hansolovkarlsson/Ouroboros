@@ -368,7 +368,8 @@ docs/                every document is annotated in full in `docs/README.md` - r
                      roadmap-smp.md (multi-core: the end of the single-core argument, the arc from 2026-10-12)
                      roadmap-one-disk.md (one disk for boot and root: the ESP first, the root beside it, the arc after multi-core)
                      roadmap-sd-card.md (the SD card as the Pi's only disk: an SDHCI driver, QEMU first, then EMMC2)
-                     and roadmap-pi-net.md (networking on the Pi 4: the on-board GENET, which no emulator models)
+                     roadmap-pi-net.md (networking on the Pi 4: the on-board GENET, which no emulator models)
+                     and roadmap-boot-log.md (the console's output kept by the board, read with no serial cable: planned 2026-11-20)
   work-journal/      chronological dev-log, one file per day plus an index README - a lighter companion to CHANGELOG.md
   testing/           testing-qemu.md (every `make run-*` target, the test images, the 9P host peers, the two-node
                      cluster rig), testing-parallels.md and testing-pi4.md (the real-hardware guides, sharing one
