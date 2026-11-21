@@ -3244,3 +3244,64 @@ that had the fault (`accounts::parse_dec`, which `netd` now calls), and
 fail with the wrapping arithmetic put back. **A test is for the code
 that had the fault. Run it against the old code first: a regression
 test that passes there was written for a different defect.**
+
+## Four more, from the echo reply and the lint (2026-11-19 to 2026-11-20)
+
+`netd` learned to answer a ping (#492), to answer it while it waits on
+an op of its own (#493), and `make test` learned to lint the kernel and
+the servers (#495). Each first version had an instrument that could not
+see what it was there for, and every one of the four was found by a
+review or a mutation, none by a failure.
+
+**Cases that an earlier check turned away.** `test-echo-reply` had a
+case for a request with IP options and one for a total too short for an
+echo, and each passed with the guard it was named for removed. The
+options broke the header checksum and the short total the ICMP one, so
+both frames were refused before they reached their guard. They were
+rebuilt to pass every check but their own: option words that sum to
+zero, and a bare 4-byte ICMP message with a good checksum. The record
+had also said fourteen guards were controlled; it was twelve, and is
+nineteen now, each removed in turn and failing its own check alone.
+**A case named for a guard has to pass every check before it, or it
+tests the first one that refuses it.**
+
+**An observer with a floor above the answer.** The same rig counted a
+frame from the guest as ICMP only from 42 bytes up, an echo's minimum
+with its 8-byte header. The reply to the bare 4-byte message is 38, so
+with the short-total guard removed `netd` would have answered and the
+rig would have reported nothing heard: a pass. The floor is 34, the
+Ethernet and IP headers. A match on the sequence number, tried for the
+"must not answer" cases, went back to any ICMP frame for the same
+reason: a mangled reply is still an answer. **A "nothing came back"
+check is only as wide as the observer's idea of what can come back.**
+
+**A mutation cut in half by precedence.** To remove `answer_echo`'s
+source checks at once, I put `if false &&` in front of a condition
+whose tests were joined by `||`. `&&` binds tighter, so only the first
+test, the Ethernet source, was removed; the others still refused, and
+their cases passed for the wrong reason. The source checks were then
+mutated one at a time, with cases of their own. **A mutation is code:
+read what it removes, not what it was meant to remove.**
+
+**A suite green on a tree its own tools refuse, and the fix's comment
+the next gap.** Removing a dead arm in #493 left a one-arm `match`;
+`cargo clippy -p netd -- -D warnings` refused it and `make test` exited
+0, because its clippy covered the pure crates and nothing else. #495
+added the kernel and the four servers, with a planted lint as the
+control for each. Its Makefile comment then said the servers' rig
+builds needed no lint, since every rig reads its feature through
+`cfg!()`. That was true of all eleven feature reads and checked by
+nothing, and the first `#[cfg(feature = "restart-rig")]` item would
+have reopened the gap with `make test` green. The review found it. The
+five `cargo check` runs of the rig builds are clippy now, and a lint
+planted under that `cfg` passes the default clippy and fails
+`make test`. **A comment that explains why a check is not needed is a
+check nobody runs; replace it with the check where it costs nothing.**
+
+The board added a repeat of 11-19's first lesson rather than a new
+one. Boot 50's first run, ten pings from the Mac with two Pi pings
+somewhere in it, could not show #493: with no timestamps nothing said
+the waits overlapped the Mac's pings, so it would have passed with the
+fix taken out. The run that could fail was a hundred Mac pings every
+0.2 s across seven Pi waits of a second each. It passed, and it rests
+on when the Pi's pings were typed, with no control on the board.

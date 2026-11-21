@@ -2164,6 +2164,13 @@ own. The entries below stand as they were put.
     the Mac or from the other board is the first check of the wire. Step
     7's and step 9's notes that the Mac's pings went unanswered were
     true when they were written.
+    On the board 2026-11-20 (`d05972c1edf6`, debug, boot 50): the Mac's
+    pings answered, 10 of 10 twice and then 100 of 100 at 0.2 s apart
+    while seven `ping 10.0.2.98` on the Pi each held `netd` in a wait of
+    about a second (#493); about 1.1 ms, TTL 64. The overlap rests on
+    when the Pi's pings were typed, and no control was run on the board.
+    The two boards' output is the boot log's to solve
+    (`roadmap-boot-log.md`), since one serial port reads one board.
 
 11. **The records.** `testing-pi4.md` section 2 rewritten (its headline is
     "still no networking"), `gap-analysis.md`'s network rows,
