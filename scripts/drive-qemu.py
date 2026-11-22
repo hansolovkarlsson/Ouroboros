@@ -31,6 +31,10 @@ are load-bearing rather than defensive:
    version tracks a high-water mark for exactly that reason. The mark is the
    end of the match, not of everything that has arrived: a mark past the
    match would also pass over a line printed with it (until 2026-11-21).
+   So a guest that prints the prompt twice, two shells on one console,
+   leaves the second for the next wait, and a rig expecting two waits for
+   both. A pattern that can match nothing is refused: it would match at
+   once on every wait and never move the mark.
 
 A settle delay after each match (SETTLE) covers the same hazard for the tail of
 a prompt that is still draining.
@@ -139,6 +143,8 @@ class Guest:
         timed out on a guest that had printed it (test-net-config's first
         run, 2026-11-15). `--self-test` holds both properties."""
         rx = re.compile(pattern.encode())
+        if rx.fullmatch(b""):
+            raise ValueError(f"wait_for: {pattern!r} matches the empty string, so it would never wait")
         deadline = time.time() + timeout
         while time.time() < deadline:
             with self.lock:
@@ -516,7 +522,19 @@ def wait_for_cases():
     it, an earlier prompt above all, is not."""
     global SETTLE
     settle, SETTLE = SETTLE, 0
+    try:
+        cases = _wait_for_cases()
+    finally:
+        SETTLE = settle
+    failed = 0
+    for name, got, want in cases:
+        ok = got == want
+        print(f"{'ok  ' if ok else 'FAIL'} wait_for: {name}" + ("" if ok else f" (got {got}, want {want})"))
+        failed += not ok
+    return failed
 
+
+def _wait_for_cases():
     def guest(out):
         g = Guest.__new__(Guest)
         g.buf, g.lock, g.seen = bytearray(out), threading.Lock(), 0
@@ -541,13 +559,25 @@ def wait_for_cases():
     g = guest(b"login: root\r\nPassword: ")
     cases.append(("one line holding two matches, the second still found",
                   waits(g, ["login: ", "root", "Password: "]), [True, True, True]))
-    SETTLE = settle
-    failed = 0
-    for name, got, want in cases:
-        ok = got == want
-        print(f"{'ok  ' if ok else 'FAIL'} wait_for: {name}" + ("" if ok else f" (got {got}, want {want})"))
-        failed += not ok
-    return failed
+    # Output arriving after a match (in a real run, during the settle) stays
+    # for the next wait: a second prompt is the next wait's, matched once.
+    # This states the rule for two shells on one console; the first case is
+    # the one the old mark, at the end of the buffer, failed.
+    g = guest(b"# ")
+    got = waits(g, ["# "])
+    g.buf.extend(b"# ")
+    got += waits(g, ["# ", "# "])
+    cases.append(("a second prompt printed after a match is matched once, by the next wait",
+                  got, [True, True, False]))
+    refused = []
+    for p in [r"\s*", "(?:ok)?", "(?m)^"]:
+        try:
+            guest(b"x").wait_for(p, timeout=0.3)
+            refused.append(False)
+        except ValueError:
+            refused.append(True)
+    cases.append(("a pattern that can match nothing is refused", refused, [True, True, True]))
+    return cases
 
 
 def attach(image, readonly, prefix="ouroboros-image."):

@@ -110,9 +110,10 @@ def main() -> int:
             ok = guest.wait_for("press keys")
         if ok:
             drive_qemu.sendkeys(MONITOR, [name for name, _ in KEYS] + [TAB[0], ESC[0], "q"], KEY_DELAY)
-            # The farewell and the prompt after it in one match: a wait for
-            # the farewell alone marks the prompt as seen too, and a second
-            # wait for it then never matches.
+            # The farewell and the prompt after it in one match, so the
+            # prompt is the one after the farewell. (Written when a wait for
+            # the farewell alone marked the prompt as seen too; since
+            # 2026-11-21 two waits would do.)
             ok = guest.wait_for(r"readkey: bye[\s\S]*# ", timeout=30)
             if ok:
                 steps_done.append("readkey")

@@ -106,8 +106,9 @@ def main() -> int:
     def step(name, command, banner, keys):
         """Run `command`, wait for `banner`, do `keys()`, wait for the prompt.
         With no keys the program exits by itself, so the banner and the
-        prompt are matched together: a match marks everything before it
-        seen, and a second wait for the prompt would never match."""
+        prompt are matched together, in one pattern that holds both in
+        order. (Written when a match marked everything that had arrived as
+        seen; since 2026-11-21 two waits would do too.)"""
         start = len(guest.transcript())
         guest.type_line(command)
         if keys is None:

@@ -70,12 +70,13 @@ def main() -> int:
         first_seen = time.monotonic()
         time.sleep(GAP)
         # No wait for the prompt: it came right after the first summary, and
-        # wait_for's settle has already counted it as seen.
+        # GAP has passed since. (Written when wait_for's settle counted it as
+        # seen; since 2026-11-21 a wait for it would find it.)
         driven = driven and guest.run([("", "cclock"), (SUMMARY, "")])
         second_seen = time.monotonic()
-        # The second run's exit line follows its summary; wait_for's settle may
-        # already have counted it as seen, so poll the transcript for it
-        # rather than wait on it.
+        # The second run's exit line follows its summary; the transcript is
+        # polled for it. (Written when wait_for's settle could count it as
+        # seen; since 2026-11-21 a wait on it would find it.)
         deadline = time.monotonic() + 10
         while len(re.findall(r"exited \(code \d+\)", guest.transcript().split("# cclock")[-1])) == 0 \
                 and time.monotonic() < deadline:
