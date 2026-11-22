@@ -1792,9 +1792,12 @@ retries over 6270 ms, and LOAD fails.
 **What to watch for on this board:** a card that mounts late on a busy wire,
 which is the case the QEMU boots stand in for. A boot that comes up with
 `export CLOSED` on a card holding a good `/etc/cluster/id` is the signature,
-and so is the default address with an `/etc/net` on the card. A disk mounting
-after 2 s still does that, by design: nothing reads either file again
-(`roadmap-pi-net.md`, step 8).
+and so is the default address with an `/etc/net` on the card. At boot `fsd`
+mounts the card before it takes a request, so a load that finds nothing mounted
+has found what the boot holds. A disk that comes later comes by `mount -a` (a
+stick plugged in after boot), and since 2026-11-22 `fsd` then tells `netd`,
+which reads both files again (`NETOP_ROOT_MOUNTED`, `make test-net-config`'s
+late boot).
 
 **First boot on this board after the fix, 2026-11-17** (`b4f7a97ef44c`, debug,
 boot 34, the card's boot partition staged by `make sdcard`, the cable in on the

@@ -11,6 +11,14 @@ here actually works today, see [`architecture.md`](architecture.md) and
 
 **Not yet released.** Changes since v0.25.0, drafted as they land.
 
+**A disk mounted after boot gives `netd` its address and identity
+(2026-11-22).** With a USB stick passed through to Parallels after the VM
+started, or plugged into a Pi after boot, `mount -a` mounts it, but
+`netd` had already looked for `/etc/net` and `/etc/cluster` with nothing
+mounted, and kept the default address and no cluster identity until the
+next boot. `fsd` now tells `netd` when the root mounts, and `netd` reads
+both files again and says so.
+
 **A node answers ping (2026-11-19).** `netd` replies to an ICMP echo
 request for its own address, so `ping` from the Mac reaches the Pi and
 one node of the cluster can ping another. Before, it could send pings

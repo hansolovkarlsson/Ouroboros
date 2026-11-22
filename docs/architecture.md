@@ -802,7 +802,7 @@ The policy:
 |---|---|---|---|
 | 0 | shell | fsd, cond, netd, spawned children (6–10) | none |
 | 1 | idle | none | none |
-| 2 | fsd | cond (its logs) | `CAP_BLOCK` |
+| 2 | fsd | cond (its logs), netd (one notice, `NETOP_ROOT_MOUNTED`, each time tree 0 mounts, since 2026-11-22) | `CAP_BLOCK` |
 | 3 | cond | none (only replies) | `CAP_CON` |
 | 4 | netd | fsd (serving files over HTTP), cond (its logs), and itself. The self-send bit exists only so netd may *delegate* the reply capability to a remote-exec child whose output pipes back to it | `CAP_NET` |
 | 5 | accountd | fsd (`/etc/passwd`, `/etc/shadow`), cond (its logs) | none (its privilege is policy, not a device) |

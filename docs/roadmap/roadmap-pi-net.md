@@ -1935,6 +1935,24 @@ own. The entries below stand as they were put.
      QEMU, not yet on the board (`testing-pi4.md`, risk 4b). What stays
      open is the rest of this item: a disk that mounts after 2 s still
      leaves the defaults, and nothing reads either file again.
+     **Done 2026-11-22** (`netd/late-etc-net`). Reading `fsd` first
+     changed the question: it mounts tree 0 before it takes its first
+     request, and the kernel queues a call to a task not yet receiving, so
+     at boot a load that answers `NO_FS` has found what the boot holds,
+     and the 2 s waits for nothing then (it stays, by Hans's choice, for
+     a change of its own). The disk that comes later comes by `mount -a`:
+     a stick passed through to Parallels after the VM started, or plugged
+     into the Pi after boot. `fsd` now sends `netd` a one-way notice,
+     `NETOP_ROOT_MOUNTED`, each time tree 0 mounts (`TO_NET` in its send
+     mask for it; Hans chose `fsd` telling `netd` over `netd` asking and
+     over the shell's `mount -a` telling it). `netd` takes it from `fsd`'s
+     slot alone and, when its last load found nothing mounted, runs
+     `load_auth` again, `/etc/net` last, replacing what it held, which had
+     no identity to lose. `make test-net-config`'s fourth boot is the
+     Parallels workflow on QEMU: the ESP on a read-only vvfat disk `fsd`
+     cannot mount, the root with `/etc/net` on a USB stick that `mount -a`
+     brings in, reached at the file's address after it and not at the
+     default; and the other three boots must not reload.
    - *Three parsers of a dotted address serve `netd`:* `netconf`'s,
      `clusterkeys::parse_ip` with the same rules, and `netd`'s own
      `parse_ip4`. One crate holding one is the change. **Done

@@ -150,7 +150,11 @@ inert regardless), but to exercise the *found* branch of `load_auth` rather than
 the retry-then-closed branch, put an `/etc/cluster/` directory at the root of the
 pass-through stick. Its absence is a valid test too: you should see
 `export CLOSED - no /etc/cluster/id to sign replies with (fail-closed)`, not a
-crash.
+crash. A stick passed through after the VM started is mounted by `mount -a`,
+and since 2026-11-22 `netd` then reads `/etc/cluster` and `/etc/net` from it:
+`netd: the root mounted after netd loaded: reading /etc/cluster and /etc/net
+again`, then its load's lines once more. Before, it kept what its boot-time
+load found, with nothing mounted, for the whole boot.
 
 Note that `clusterkey new` **cannot** generate an identity on Parallels: there is
 no virtio-rng, and generation refuses without real entropy rather than producing
