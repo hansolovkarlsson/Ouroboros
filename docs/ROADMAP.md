@@ -1638,13 +1638,32 @@ The small open tails those arcs deliberately left:
   SD card's write-protect switch, at the mount and at a write (QEMU refuses
   a read-only drive as a card, #445). The acknowledgement of data sent
   again, on the export and the dial side (no link here loses an ACK, #449).
-  `credit_deaf` (a round built for it passed with it taken out, #449).
+  `credit_deaf` (a round built for it passed with it taken out, #449;
+  since 2026-11-22 it applies only to an op whose wait lost frames, a case
+  `test-echo-reply` brings about, though no rig shows a run it saved).
   `KILL_ID` refusing a slot that holds another task (it needs a reap and a
   spawn between two instants, #447). And `cpu_child_msg` with an empty
   message mid-run: no program was found that sends one.
 
-- **A synchronous op's wait still drops TCP (from the second review of
-  #493, 2026-11-20; Hans asked for it here).** Since #493 `recv`, the one
+- ~~**A synchronous op's wait still drops TCP (from the second review of
+  #493, 2026-11-20; Hans asked for it here).**~~ **Fixed 2026-11-22, by a
+  third design (Hans's choice): keep and replay.** `recv` takes a `Backlog`
+  and a test for the op's own frames, both required, so no wait can poll
+  without keeping what it does not take. A frame the test refuses is kept
+  (`BACKLOG_FRAMES`, 16, in `Tables`) and handed to `on_frame` when the op
+  returns (`replay`), oldest first, before the NIC is read again: late by
+  as long as the op took, not dropped. The export path's `/net/tcp`
+  `connect`, which runs an ARP resolve inside `on_frame`, keeps too, and
+  `replay` copies each frame out first so `on_frame` may keep more. A frame
+  past the backlog is counted, and the op logs `netd: a client op's wait
+  lost N frames`; `credit_deaf` is kept for that op alone (`served`), the
+  case it is still needed for. `test-echo-reply` sends a SYN to port 80
+  into each of its five waits, once and never again, and sees each
+  answered after the op ends; and floods one wait with 40 frames, 24
+  logged lost. Controlled: `main`'s `netd` fails all six and passes the
+  rig's other 50 checks. Every rig that names `netd` passed on the change,
+  and `netd`'s deepest chain grew by 1,184 bytes (37,744 left).
+  What follows is the item as it was written. Since #493 `recv`, the one
   way `arp_resolve`, `icmp_echo`, `resolve_ip` and `tcp_get` take a frame,
   answers ARP and echo requests itself (`answer_unasked`). Every other
   frame those loops are not waiting for is still thrown away: a dial's
