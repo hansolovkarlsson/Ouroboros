@@ -301,7 +301,13 @@ class Volume:
     there)."""
 
     def __init__(self, image, start_lba):
-        self.fh = open(image, "rb")
+        # Unbuffered, so every read is the file as it is now. Rigs write the
+        # image through handles of their own while a Volume is open, and a
+        # buffered reader answers a seek inside its buffer from bytes read
+        # before those writes. At Python's default buffer of 128 KiB that
+        # held the whole root, and test-long-set wrote back a root it had
+        # not seen change (2026-11-22).
+        self.fh = open(image, "rb", buffering=0)
         try:
             self._read_geometry(start_lba)
         except BaseException:
