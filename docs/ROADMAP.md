@@ -1664,28 +1664,46 @@ The small open tails those arcs deliberately left:
   without a retransmission; and `credit_deaf` is either gone or still
   shown to be needed.
 
-- **`make test` lints no userland program but the four servers (found
-  2026-11-20, #493; half done the same day).** On #493's branch, removing a
-  dead `match` arm left a one-arm `match`, which `cargo clippy -p netd
+- ~~**`make test` lints no userland program but the four servers (found
+  2026-11-20, #493).**~~ **Fixed 2026-11-21.** On #493's branch, removing
+  a dead `match` arm left a one-arm `match`, which `cargo clippy -p netd
   --target aarch64-unknown-none --release -- -D warnings` refuses; `make
   test` exited 0 on the same tree, since its clippy covered `PURE_CRATES`
   alone, not the kernel either (which is how #484 came to be needed).
-  **Done 2026-11-20, Hans's scope:** `make test` lints the kernel and
-  `fsd`, `cond`, `netd` and `accountd` (`KERNEL_PKG`, `LINT_SERVERS`),
-  and the servers' five rig-feature builds, which were `cargo check` and
-  are now clippy, so an item under `#[cfg(feature = ...)]` is linted too;
-  about 1.4 s of its time on a warm cache, most of it the kernel rebuilt (its `build.rs` reruns every build), and 0.4 s for the five rig builds; `fsd`'s fifteen warnings, one lint, were fixed first; a
-  lint planted in each of the five fails it, and one planted under
-  `#[cfg(feature = "restart-rig")]` in `netd` does too. The kernel is
-  linted in the dev profile only, as `make build` builds it, not as
-  `PROFILE=release`. **Left:** the other 62 programs under `programs/`,
-  and `nsresolve`, the Rust staticlib every C program links, which is
-  outside `programs/`. Measured the same day: 61 of the 62 already pass,
-  linting all 62 takes 7 s, and the one that does not is `openprobe`
-  (`enum_variant_names`, `NoAnswer` in `enum ...Answer`). **Done when**
-  they and `nsresolve` are in a loop of their own beside `LINT_SERVERS`
-  (a `LINT_PROGRAMS`, so neither name says something false), and a lint
-  planted in one of them fails `make test`.
+  On 2026-11-20 (#495, Hans's scope) `make test` came to lint the kernel
+  and `fsd`, `cond`, `netd` and `accountd`, and the servers' five
+  rig-feature builds, which were `cargo check` and are now clippy, so an
+  item under `#[cfg(feature = ...)]` is linted too. `fsd`'s fifteen
+  warnings, one lint, were fixed first. On 2026-11-21 it came to lint
+  every workspace member but the kernel and the pure crates, wherever it
+  sits: 69 crates, the 66 under `programs/`, `nsresolve` (the Rust
+  staticlib every C program links), `ulib` and `syscall-abi`, in one
+  clippy run for the userland target, 0.2 to 0.9 s warm (the kernel's
+  own lint about 1 s, its `build.rs` rerunning every build). The list is
+  read from `cargo metadata` when `make test` runs (`LINT_CRATES_PY`), so
+  a crate added anywhere is linted with no edit. One run builds each crate
+  as it ships only while nothing in that build turns on a dependency's
+  feature, since cargo unifies features across a run. So a member in the
+  build (the pure crates too, which are in it as dependencies) that does
+  is refused by name: by a normal dependency's `features` or
+  `default-features = false`, or by a `[features]` entry naming another
+  crate's. Dev- and build-dependencies are not in the build and are not
+  refused. An empty list is refused too. `--keep-going` reports every
+  crate with a lint in one run. `openprobe`'s one lint
+  (`enum_variant_names`, `NoAnswer` in `enum Answer`) was fixed by naming
+  the enum `Outcome`.
+  Controls, each failing `make test`: a lint planted in the kernel, in
+  each of the four servers, in `hello` and in `nsresolve`; one under
+  `#[cfg(feature = "restart-rig")]` in `netd`; and a new crate with a
+  lint, added to the workspace outside `programs/` and nowhere else,
+  which the step counted as one more crate before failing on it. Lints
+  planted in `hello` and `wc` together were both reported. Refused by
+  name: `cat` given `default-features = false` on `ulib`; `cat` with
+  `default = ["ulib/ctl"]` in its `[features]`; `clusterkeys`, a pure
+  crate, setting a feature on `ed25519`; and an empty list. Not refused,
+  and `make test` passed: `netconf` setting a feature on `netaddr` as a
+  dev-dependency. **Limit:** the kernel is linted in the dev profile
+  only, as `make build` builds it, not as `PROFILE=release`.
 
 - **A server past its restart cap draws a second wedge line (seen
   2026-09-27).** Forcing `netd` through four ping-timeout wedges in one boot
