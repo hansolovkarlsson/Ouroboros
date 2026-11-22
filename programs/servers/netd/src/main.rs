@@ -57,17 +57,29 @@ fn default_netconf() -> netconf::Config {
     netconf::Config::slirp(last)
 }
 
-/// This machine's network configuration, set once at start
-/// ([`load_netconf`]) and read from everywhere a frame is built or judged.
-/// Four words and a flag, atomics so that no `unsafe` and no parameter
-/// through sixty functions is needed for values that never change after
-/// the start. An address is stored big-endian; 0 in the gateway or the DNS
+/// This machine's network configuration, set at start ([`load_netconf`])
+/// and read from everywhere a frame is built or judged. Four words and a
+/// flag, atomics so that no `unsafe` and no parameter through sixty
+/// functions is needed for values that change at most once after the
+/// start: when the root mounts after a load that found nothing mounted
+/// ([`reload_after_mount`]). An address is stored big-endian; 0 in the gateway or the DNS
 /// server is "none", which no file can name (`netconf::parse` refuses it).
 static NET_SET: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 static NET_ADDRESS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 static NET_MASK: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 static NET_GATEWAY: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 static NET_DNS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Whether the last load found nothing mounted: `/etc/net`'s read answered
+/// `NO_FS`, after `load_auth`'s reads had waited out their budget for a
+/// mount. Set by every [`load_netconf`], read by [`reload_after_mount`].
+static LOADED_UNMOUNTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Whether `fsd` has said the root mounted (`NETOP_ROOT_MOUNTED`) since the
+/// serve loop last looked. Set in [`drain_mailbox`], where the notice
+/// arrives, and taken by [`reload_after_mount`] in the serve loop, which
+/// owns the `Auth` a reload replaces.
+static ROOT_MOUNTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 fn set_netconf(c: &netconf::Config) {
     use core::sync::atomic::Ordering::Relaxed;
@@ -116,19 +128,19 @@ fn log_ip(ip: &[u8; 4]) {
     }
 }
 
-/// Reads `/etc/net` and sets the configuration for the boot, saying in one
-/// line what it is and where it came from. Called once, from
-/// [`load_auth`] after its reads, which have by then waited out the disk's
-/// mount or found there is no disk.
+/// Reads `/etc/net` and sets the configuration, saying in one line what it
+/// is and where it came from. Called from [`load_auth`] after its reads,
+/// which have by then waited out the disk's mount or found there is no
+/// disk: at start, and again by [`reload_after_mount`].
 ///
 /// **It does not wait for a mount itself.** `load_auth` holds the one
 /// retry budget for that (its comment says why there is one and not one a
 /// read), so `NO_FS` here is taken as "nothing is mounted" at once. The
 /// other transient answers (a full mailbox, a server mid-restart) are asked
 /// again for up to five retries' time, by a [`LoadBudget`] as `load_auth`'s
-/// are. A disk that mounts after `load_auth` gave up leaves this machine on
-/// the defaults for the boot, as it leaves it with no cluster identity:
-/// nothing reads either file again.
+/// are. A disk that mounts later, by `mount -a`, is read when `fsd` says so
+/// ([`reload_after_mount`]); until 2026-11-22 nothing read either file
+/// again, and the machine kept the defaults and no cluster identity.
 ///
 /// **Every way of not having a usable file ends in the configuration for
 /// no file**, each with its own words: the file absent or nothing mounted
@@ -158,6 +170,7 @@ fn load_netconf() {
             break len as u64;
         }
     };
+    LOADED_UNMOUNTED.store(n == syscall_abi::NO_FS, core::sync::atomic::Ordering::Relaxed);
     let mut config = default_netconf();
     let source: &[u8] = if n == syscall_abi::FS_ERR_NOT_FOUND {
         b" (no /etc/net: the defaults)"
@@ -868,6 +881,31 @@ fn load_auth() -> Auth {
     auth
 }
 
+/// Reads the configuration again when `fsd` has said the root mounted
+/// (`NETOP_ROOT_MOUNTED`) and the last load found nothing mounted: the boot
+/// whose disk came by `mount -a`, a stick passed through to Parallels after
+/// the VM started or plugged into the Pi after boot. `load_auth` runs whole,
+/// `/etc/net` last, and its lines say what it found, as at start; the `Auth`
+/// it returns replaces the one held. A notice after a load that found the
+/// disk (every boot's own, and a remount after `unmount`) changes nothing.
+///
+/// **What it replaces had nothing to lose.** A load that found nothing
+/// mounted holds no identity, so the export was closed and no session or
+/// remote mount could have been made under it; what a reload gives is the
+/// first identity of the boot. The address may change too. A connection
+/// made at the old one (an HTTP client of the boot's first seconds) is
+/// answered from the new one, which its peer does not know, and ends by
+/// its own timeouts; a node whose address is in a file is reached at that
+/// address, and the old one was never in anyone's configuration.
+fn reload_after_mount(auth: &mut Auth) {
+    use core::sync::atomic::Ordering::Relaxed;
+    if !ROOT_MOUNTED.swap(false, Relaxed) || !LOADED_UNMOUNTED.load(Relaxed) {
+        return;
+    }
+    log(b"netd: the root mounted after netd loaded: reading /etc/cluster and /etc/net again\r\n");
+    *auth = load_auth();
+}
+
 /// The event loop: block in `NET_WAIT` until either a client message or an
 /// incoming frame, then take both: every message waiting, and at most
 /// [`DRAIN_BUDGET`] frames, the rest left for the next pass, which
@@ -924,6 +962,7 @@ fn serve(packed_mac: u64) -> ! {
         // (any reply acks it). Also where a cpu child's output is captured
         // (cluster Phase 4a) - routed to its connection by drain_client_messages.
         drain_client_messages(packed_mac, &mut t.buf, &mut t.conns, &mut t.dials, &mut t.remotes, &mut t.sessions, &t.auth, &mut t.pending, &mut t.held);
+        reload_after_mount(&mut t.auth);
 
         // A held key whose login is gone goes now: a killed nested shell loses
         // its key within one wake of this loop, the health ping bounding how
@@ -1194,6 +1233,17 @@ fn drain_mailbox(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<TcpConn>; 
         // and the supervisor restarted netd for not acking. Measured
         // 2026-09-06 by holding a bare TCP connection open for a minute.
         let sender_id = syscall(syscall_abi::SENDER_TASK, 0);
+        // `fsd`'s notice that the root mounted: from its slot alone, which
+        // no other task can hold (a protected server's, restarted in place),
+        // and never answered, since it is a send and not a call.
+        if sender_id != syscall_abi::GET_ID_ERR
+            && syscall_abi::task_id_slot(sender_id) == syscall_abi::FSD_TASK
+            && len == 8
+            && read_u64(buf, 0) == syscall_abi::NETOP_ROOT_MOUNTED
+        {
+            ROOT_MOUNTED.store(true, core::sync::atomic::Ordering::Relaxed);
+            continue;
+        }
         let child_conn = if sender_id == syscall_abi::GET_ID_ERR {
             None
         } else {
