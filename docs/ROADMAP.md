@@ -1705,8 +1705,21 @@ The small open tails those arcs deliberately left:
   dev-dependency. **Limit:** the kernel is linted in the dev profile
   only, as `make build` builds it, not as `PROFILE=release`.
 
-- **`make test-long-set` fails before it boots, on main (found
-  2026-11-21, #499).** Two of its setups on the Mac refuse the image they
+- ~~**`make test-long-set` fails before it boots, on main (found
+  2026-11-21, #499).**~~ **Fixed 2026-11-22.** The cause was not the
+  root's contents but the reader. `exfatimg.Volume` held one buffered
+  `"rb"` handle while the rig wrote the image through others, and a seek
+  inside the buffer was answered from bytes read before the writes. At
+  Python's default buffer of 128 KiB (both installed Pythons, 3.14.10 and
+  3.15.2) the buffer held the whole root, so `plant()` read the root as it
+  was before `fill_deleted` and wrote that back: the runs `vroot` found
+  were the image's own deleted `._*` sets, unfilled. Shown on a copy of the
+  image: after `fill_deleted` the open handle read `0x05` at offset 96 and
+  a fresh one `0x85`; with `buffering=8192` or `0` both read `0x85`. The
+  handle is now unbuffered (`buffering=0`). `make test-long-set` exits 0,
+  140 checks, and the nine other rigs that read an image through `Volume`
+  pass on the fix. Which Python upgrade raised the buffer, and so when the rig
+  turned red, is not known. Two of its setups on the Mac refuse the image they
   planted. `vroot` reads back its planted sets and finds runs of three
   deleted entries in the root (`[96, 128, 160, 192, 384, ...]`), which
   its "no run of three deleted ones" condition forbids; `vlater` finds
