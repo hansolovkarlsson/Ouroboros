@@ -23,12 +23,18 @@ are load-bearing rather than defensive:
 
 1. **Type one character at a time, with a delay** (TYPE_DELAY). A burst is
    dropped after the first byte.
-2. **Wait for the prompt, and only match output produced SINCE the last step.**
+2. **Wait for the prompt, and only match output AFTER the last match.**
    Searching the whole buffer matches a *previous* prompt and starts typing
    while the guest is still printing - which silently eats the first characters
    of the command, so `cat /etc/shadow` arrives as `t /etc/shadow` and the test
    appears to fail for a reason that has nothing to do with the code. This
-   version tracks a high-water mark for exactly that reason.
+   version tracks a high-water mark for exactly that reason. The mark is the
+   end of the match, not of everything that has arrived: a mark past the
+   match would also pass over a line printed with it (until 2026-11-21).
+   So a guest that prints the prompt twice, two shells on one console,
+   leaves the second for the next wait, and a rig expecting two waits for
+   both. A pattern that can match nothing is refused: it would match at
+   once on every wait and never move the mark.
 
 A settle delay after each match (SETTLE) covers the same hazard for the tail of
 a prompt that is still draining.
@@ -128,15 +134,25 @@ class Guest:
                 self.buf.extend(b)
 
     def wait_for(self, pattern, timeout=TIMEOUT):
+        """Wait for `pattern` in the output after the mark, then move the
+        mark to the END OF THE MATCH, not of everything that has arrived.
+        Every earlier prompt is still behind the mark, which is the hazard
+        the mark is for (the module docstring's rule 2). Until 2026-11-21 it
+        moved to the end of the buffer, so of two lines printed together a
+        wait for the first passed over the second, and the next wait for it
+        timed out on a guest that had printed it (test-net-config's first
+        run, 2026-11-15). `--self-test` holds both properties."""
         rx = re.compile(pattern.encode())
+        if rx.fullmatch(b""):
+            raise ValueError(f"wait_for: {pattern!r} matches the empty string, so it would never wait")
         deadline = time.time() + timeout
         while time.time() < deadline:
             with self.lock:
                 cur = bytes(self.buf)
-            if rx.search(cur, self.seen):
+            m = rx.search(cur, self.seen)
+            if m:
                 time.sleep(SETTLE)
-                with self.lock:
-                    self.seen = len(self.buf)
+                self.seen = m.end()
                 return True
             time.sleep(0.15)
         return False
@@ -494,7 +510,74 @@ def self_test():
         ok = refused == [True, True, True]
         print(f"{'ok  ' if ok else 'FAIL'} a label classified twice in one run, holding a space, or empty, is refused")
         failed += not ok
+    failed += wait_for_cases()
     return failed
+
+
+def wait_for_cases():
+    """`Guest.wait_for`'s mark, on a guest with no QEMU behind it: its
+    output is a buffer the cases fill. Both halves of the mark's rule are
+    held: what came after a match is still there for the next wait (the
+    rule that failed test-net-config's first run), and what came before
+    it, an earlier prompt above all, is not."""
+    global SETTLE
+    settle, SETTLE = SETTLE, 0
+    try:
+        cases = _wait_for_cases()
+    finally:
+        SETTLE = settle
+    failed = 0
+    for name, got, want in cases:
+        ok = got == want
+        print(f"{'ok  ' if ok else 'FAIL'} wait_for: {name}" + ("" if ok else f" (got {got}, want {want})"))
+        failed += not ok
+    return failed
+
+
+def _wait_for_cases():
+    def guest(out):
+        g = Guest.__new__(Guest)
+        g.buf, g.lock, g.seen = bytearray(out), threading.Lock(), 0
+        return g
+
+    def waits(g, patterns):
+        return [g.wait_for(p, timeout=0.3) for p in patterns]
+
+    cases = []
+    g = guest(b"netd: address 10.0.2.15\r\nnetd: listening on :80\r\nlogin: ")
+    cases.append(("two lines printed together, waited for in turn, are both found",
+                  waits(g, ["netd: address", "netd: listening", "login: "]), [True, True, True]))
+    g = guest(b"netd: listening on :80\r\nnetd: address 10.0.2.15\r\n")
+    cases.append(("a line before the one matched is not found after it",
+                  waits(g, ["netd: address", "netd: listening"]), [True, False]))
+    g = guest(b"# ")
+    got = waits(g, ["# ", "# "])
+    g.buf.extend(b"ls\r\nbin  etc\r\n# ")
+    got += waits(g, ["bin", "# "])
+    cases.append(("an earlier prompt is not matched again, a new one is",
+                  got, [True, False, True, True]))
+    g = guest(b"login: root\r\nPassword: ")
+    cases.append(("one line holding two matches, the second still found",
+                  waits(g, ["login: ", "root", "Password: "]), [True, True, True]))
+    # Output arriving after a match (in a real run, during the settle) stays
+    # for the next wait: a second prompt is the next wait's, matched once.
+    # This states the rule for two shells on one console; the first case is
+    # the one the old mark, at the end of the buffer, failed.
+    g = guest(b"# ")
+    got = waits(g, ["# "])
+    g.buf.extend(b"# ")
+    got += waits(g, ["# ", "# "])
+    cases.append(("a second prompt printed after a match is matched once, by the next wait",
+                  got, [True, True, False]))
+    refused = []
+    for p in [r"\s*", "(?:ok)?", "(?m)^"]:
+        try:
+            guest(b"x").wait_for(p, timeout=0.3)
+            refused.append(False)
+        except ValueError:
+            refused.append(True)
+    cases.append(("a pattern that can match nothing is refused", refused, [True, True, True]))
+    return cases
 
 
 def attach(image, readonly, prefix="ouroboros-image."):

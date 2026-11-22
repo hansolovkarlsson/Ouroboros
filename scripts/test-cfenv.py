@@ -47,8 +47,8 @@ def main() -> int:
     guest = drive_qemu.Guest(IMAGE, label="test-cfenv: ")
     try:
         # No wait for the prompt before `cpico`: it came right after the
-        # summary, and wait_for's settle has already counted it as seen
-        # (test-cclock.py).
+        # summary (test-cclock.py). (Written when wait_for's settle counted
+        # it as seen; since 2026-11-21 a wait for it would find it.)
         driven = guest.run([("login:", "root"), ("assword", "root"), ("# ", "cpico fenv"), (SUMMARY, ""),
                             ("", "cpico"), (r"done\.\r?\n", "")])
         out = guest.transcript()
