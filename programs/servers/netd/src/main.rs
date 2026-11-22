@@ -387,10 +387,8 @@ const BACKLOG_FRAMES: usize = 16;
 /// `fetch`, and a `/net/tcp` `connect`'s ARP resolve, on the export path too)
 /// threw every such frame away: a dial's data, a held session's ACK or FIN,
 /// a SYN to the HTTP server or the export, a `cpu` run's keepalive answer.
-/// Each cost its peer a retransmission, and a keepalive answer lost cost a
-/// run its caller's silence clock, which [`credit_deaf`] gave back. A frame
-/// is late now by as long as the op took, and lost only when the backlog is
-/// full: [`recv`] takes the backlog as a required parameter, so no wait can
+/// Each cost its peer a retransmission. A frame is late now by as long as
+/// the op took, and lost only when the backlog is full: [`recv`] takes the backlog as a required parameter, so no wait can
 /// poll without keeping what it does not take.
 ///
 /// In [`Tables`], in the heap region, never on a stack.
@@ -400,9 +398,8 @@ struct Backlog {
     /// The oldest kept frame's index, and how many are kept.
     head: usize,
     count: usize,
-    /// Frames refused for want of room since boot: [`drain_mailbox`] reads
-    /// it before and after each op, and credits the run clocks only for an
-    /// op that lost one.
+    /// Frames refused for want of room since boot: [`after_wait`] reads it
+    /// before and after each wait, and logs a wait that lost any.
     lost: u64,
 }
 
@@ -415,7 +412,16 @@ impl Backlog {
     /// room. The oldest are kept and the newest refused: a refused frame is
     /// one its sender retransmits, as before the backlog, and the frames
     /// already kept are the ones longest unanswered.
+    ///
+    /// Only an IPv4 TCP segment is kept: after the ARP and echo requests
+    /// [`recv`] answers itself, it is the one frame [`on_frame`] acts on.
+    /// Anything else (IPv6 neighbour discovery, mDNS, a broadcast) is
+    /// dropped as it always was, and does not take a TCP segment's room or
+    /// count as lost (the review of #503).
     fn keep(&mut self, frame: &[u8]) {
+        if frame.len() < 34 || frame[12..14] != [0x08, 0x00] || frame[23] != 6 {
+            return;
+        }
         if self.count == BACKLOG_FRAMES || frame.len() > FRAME_BUF {
             self.lost += 1;
             return;
@@ -427,17 +433,19 @@ impl Backlog {
     }
 
     /// The oldest kept frame, copied into `out` and given up; its length.
-    /// `None` when none is kept (or, never here, `out` too short for it).
+    /// `None` when none is kept, or (never here: every caller passes a
+    /// `FRAME_BUF` buffer) when `out` is too short for it, which keeps it.
     fn take(&mut self, out: &mut [u8]) -> Option<usize> {
         if self.count == 0 {
             return None;
         }
         let i = self.head;
         let n = self.lens[i] as usize;
+        // Checked before the frame is given up, so a short `out` leaves it
+        // kept, not lost uncounted.
+        out.get_mut(..n)?.copy_from_slice(&self.frames[i][..n]);
         self.head = (self.head + 1) % BACKLOG_FRAMES;
         self.count -= 1;
-        let dst = out.get_mut(..n)?;
-        dst.copy_from_slice(&self.frames[i][..n]);
         Some(n)
     }
 }
@@ -1050,10 +1058,10 @@ fn serve(packed_mac: u64) -> ! {
         // handled synchronously; the supervisor health-ping is acked here too
         // (any reply acks it). Also where a cpu child's output is captured
         // (cluster Phase 4a) - routed to its connection by drain_client_messages.
-        if drain_client_messages(packed_mac, &mut t.buf, &mut t.conns, &mut t.dials, &mut t.remotes, &mut t.sessions, &t.auth, &mut t.pending, &mut t.held, &mut t.backlog) {
+        if drain_client_messages(packed_mac, &mut t.buf, &mut t.frame, &mut t.conns, &mut t.dials, &mut t.remotes, &mut t.sessions, &t.auth, &mut t.pending, &mut t.held, &mut t.backlog) {
             reload_after_mount(&mut t.auth);
         }
-        replay(&mac, t);
+        replay_tables(&mac, t);
 
         // A held key whose login is gone goes now: a killed nested shell loses
         // its key within one wake of this loop, the health ping bounding how
@@ -1072,14 +1080,16 @@ fn serve(packed_mac: u64) -> ! {
         if packed_mac != syscall_abi::NET_ERROR {
             for _ in 0..DRAIN_BUDGET {
                 match recv_one(&mut t.frame) {
-                    Got::Frame(n) => on_frame(&mac, &mut t.frame[..n], &mut t.conns, &mut t.dials, &mut t.remotes, &mut t.sessions, &t.auth, &t.held, &mut t.backlog),
+                    Got::Frame(n) => {
+                        heard(&mac, &mut t.frame[..n], &mut t.conns, &mut t.dials, &mut t.remotes, &mut t.sessions, &t.auth, &t.held, &mut t.backlog);
+                        // What that frame's `connect` kept goes before the
+                        // next frame off the NIC, which is newer.
+                        replay_tables(&mac, t);
+                    }
                     Got::TooLong => {}
                     Got::Nothing => break,
                 }
             }
-            // A frame reached the export's `/net/tcp` `connect`, whose ARP
-            // resolve may have kept others.
-            replay(&mac, t);
             // Answer every parked remote mount and session verb whose reply is
             // complete (or whose peer is gone), then drive the client
             // connections (SYN/data/FIN retransmits, idle GC). Service BEFORE
@@ -1125,10 +1135,10 @@ fn serve(packed_mac: u64) -> ! {
                     }
                     let before = c.snd_nxt;
                     pump_send(&mac, c); // `c` borrow ends here
-                    if drain_client_messages(packed_mac, &mut t.buf, &mut t.conns, &mut t.dials, &mut t.remotes, &mut t.sessions, &t.auth, &mut t.pending, &mut t.held, &mut t.backlog) {
+                    if drain_client_messages(packed_mac, &mut t.buf, &mut t.frame, &mut t.conns, &mut t.dials, &mut t.remotes, &mut t.sessions, &t.auth, &mut t.pending, &mut t.held, &mut t.backlog) {
                         reload_after_mount(&mut t.auth);
                     }
-                    replay(&mac, t);
+                    replay_tables(&mac, t);
                     match t.conns[i].as_ref() {
                         Some(c) if c.snd_nxt != before => {} // progress - continue
                         _ => break,
@@ -1244,8 +1254,8 @@ fn tables() -> &'static mut Tables {
 /// them: the caller holds the `Auth` a reload replaces, which the drain
 /// only borrows, and calls [`reload_after_mount`] on `true`.
 #[allow(clippy::too_many_arguments)]
-fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], auth: &Auth, pending: &mut PendingRun, held: &mut held::Held, backlog: &mut Backlog) -> bool {
-    let mut mounted = drain_mailbox(packed_mac, buf, conns, dials, remotes, sessions, auth, pending, held, backlog);
+fn drain_client_messages(packed_mac: u64, buf: &mut [u8], frame: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], auth: &Auth, pending: &mut PendingRun, held: &mut held::Held, backlog: &mut Backlog) -> bool {
+    let mut mounted = drain_mailbox(packed_mac, buf, frame, conns, dials, remotes, sessions, auth, pending, held, backlog);
     // A run's command that has ended is collected here, where nothing
     // blocks: see `run_child_ended`. Which ones have ended is asked BEFORE
     // the second drain, so everything such a command sent is already
@@ -1258,7 +1268,7 @@ fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<Tc
     if !ended.contains(&true) {
         return mounted;
     }
-    mounted |= drain_mailbox(packed_mac, buf, conns, dials, remotes, sessions, auth, pending, held, backlog);
+    mounted |= drain_mailbox(packed_mac, buf, frame, conns, dials, remotes, sessions, auth, pending, held, backlog);
     for (flag, c) in ended.iter().zip(conns.iter_mut()) {
         if let (true, Some(c)) = (*flag, c.as_mut()) {
             // Reaps a zombie; refused for a slot already empty or another
@@ -1270,59 +1280,90 @@ fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<Tc
     mounted
 }
 
-/// Serve one client message ([`handle_client`]), then hand the serve loop
-/// what its wait kept: the frames a synchronous op took off the NIC and was
-/// not waiting for go to [`on_frame`] now ([`replay`]), so a run's
-/// keepalive answer among them reaches its connection before the serve
-/// loop next reads `last_rx`. An op whose wait lost frames, the backlog
-/// full, has its time credited to the runs ([`credit_deaf`]) and is logged.
+/// Serve one client message ([`handle_client`]), then account for its wait
+/// ([`after_wait`]) and hand on what the wait kept ([`replay`]): the frames
+/// a synchronous op took off the NIC and was not waiting for go to
+/// [`on_frame`] now, before the next message is served, so the next op's
+/// wait finds the backlog empty and a run's keepalive answer among them
+/// reaches its connection before the serve loop next reads `last_rx`.
 #[allow(clippy::too_many_arguments)]
-fn served(packed_mac: u64, buf: &[u8], len: usize, conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], auth: &Auth, pending: &mut PendingRun, held: &mut held::Held, backlog: &mut Backlog) {
+fn served(packed_mac: u64, buf: &[u8], len: usize, frame: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], auth: &Auth, pending: &mut PendingRun, held: &mut held::Held, backlog: &mut Backlog) {
     let (before, lost) = (now(), backlog.lost);
     handle_client(packed_mac, buf, len, dials, remotes, sessions, auth, pending, held, backlog);
-    let deaf = now().wrapping_sub(before);
+    after_wait(conns, before, lost, backlog, b"netd: a client op's wait lost ");
+    let mac = if packed_mac == syscall_abi::NET_ERROR { [0u8; 6] } else { unpack_mac(packed_mac) };
+    replay(&mac, frame, conns, dials, remotes, sessions, auth, held, backlog);
+}
+
+/// Hand one frame to [`on_frame`] and account for the time it took
+/// ([`after_wait`]): a frame for the export's `/net/tcp` `connect` runs an
+/// ARP resolve inside `on_frame`, a wait like any op's. Every frame the
+/// serve loop takes, off the NIC or out of the backlog, goes through here.
+#[allow(clippy::too_many_arguments)]
+fn heard(mac: &[u8; 6], frame: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], auth: &Auth, held: &held::Held, backlog: &mut Backlog) {
+    let (before, lost) = (now(), backlog.lost);
+    on_frame(mac, frame, conns, dials, remotes, sessions, auth, held, backlog);
+    after_wait(conns, before, lost, backlog, b"netd: a frame's /net/tcp connect lost ");
+}
+
+/// What a wait that began at `before`, with `lost` frames counted lost, owes
+/// once it is over: its time credited to the runs ([`credit_deaf`]), and a
+/// line, opening `what`, when it lost frames to a full backlog.
+fn after_wait(conns: &mut [Option<TcpConn>; MAX_CONNS], before: u64, lost: u64, backlog: &Backlog, what: &[u8]) {
+    let at = now();
+    credit_deaf(conns, at.wrapping_sub(before), at);
     if backlog.lost != lost {
-        credit_deaf(conns, deaf);
-        let mut line = [0u8; 80];
-        let mut n = put(&mut line, 0, b"netd: a client op's wait lost ");
+        let mut line = [0u8; 96];
+        let mut n = put(&mut line, 0, what);
         n = put_dec(&mut line, n, backlog.lost - lost);
         n = put(&mut line, n, b" frames, the backlog full\r\n");
         log(&line[..n]);
     }
 }
 
-/// Hand the frames [`Backlog`] kept to [`on_frame`], oldest first, each
-/// through `t.frame`, so `on_frame` may keep more (the export's `/net/tcp`
-/// `connect` resolves an address) while one is handled. At most
-/// [`DRAIN_BUDGET`] a call, as for the NIC's: the rest wait for the next
-/// call, and the serve loop does not block while any are kept.
-fn replay(mac: &[u8; 6], t: &mut Tables) {
+/// Hand the frames [`Backlog`] kept to [`on_frame`] ([`heard`]), oldest
+/// first, each copied into `frame` first, so `on_frame` may keep more (the
+/// export's `/net/tcp` `connect` resolves an address) while one is handled.
+/// At most [`DRAIN_BUDGET`] a call, as for the NIC's: the rest wait for the
+/// next call, and the serve loop does not block while any are kept.
+#[allow(clippy::too_many_arguments)]
+fn replay(mac: &[u8; 6], frame: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], auth: &Auth, held: &held::Held, backlog: &mut Backlog) {
     for _ in 0..DRAIN_BUDGET {
-        let Some(n) = t.backlog.take(&mut t.frame) else {
+        let Some(n) = backlog.take(frame) else {
             return;
         };
-        on_frame(mac, &mut t.frame[..n], &mut t.conns, &mut t.dials, &mut t.remotes, &mut t.sessions, &t.auth, &t.held, &mut t.backlog);
+        heard(mac, &mut frame[..n], conns, dials, remotes, sessions, auth, held, backlog);
     }
 }
 
-/// Time `netd` could not hear is not a run's caller's silence. A client
-/// request handled synchronously (a ping, a name lookup, a fetch) keeps the
-/// frames its wait does not take ([`Backlog`]), a keepalive probe's answer
-/// among them, and they reach their connections when it returns
-/// ([`served`]). A wait that found the backlog full lost some, maybe that
-/// answer, and a user keeping `netd` in such requests for thirty seconds
-/// would have a live caller's run reaped and its command killed (the review
-/// of #449, by reading). So for such a request, and only such a one since
-/// 2026-11-22, the ticks it took are given back to every run's `last_rx`,
-/// the clock `probe_run` and `reap_idle` both read: a run is ended for the
-/// silence of its caller while `netd` was listening, and for no other.
-fn credit_deaf(conns: &mut [Option<TcpConn>; MAX_CONNS], deaf: u64) {
+/// [`replay`] on the serve loop's own tables.
+fn replay_tables(mac: &[u8; 6], t: &mut Tables) {
+    replay(mac, &mut t.frame, &mut t.conns, &mut t.dials, &mut t.remotes, &mut t.sessions, &t.auth, &t.held, &mut t.backlog);
+}
+
+/// Time `netd` could not hear or speak is not a run's caller's silence.
+/// During a synchronous wait (a ping, a name lookup, a fetch, a frame's
+/// `/net/tcp` `connect`) `probe_run` sends no keepalive probe, so a caller
+/// that speaks only when probed says nothing, and a user keeping `netd` in
+/// such waits for thirty seconds would have a live caller's run reaped and
+/// its command killed (the review of #449, by reading). Keeping the frames
+/// a wait does not take ([`Backlog`]) does not change that: the probe was
+/// never sent (the review of #503). So the ticks every wait took are given
+/// back to every run's `last_rx`, the clock `probe_run` and `reap_idle`
+/// both read: a run is ended for the silence of its caller while `netd`
+/// was listening, and for no other.
+///
+/// Never past `now`: a frame the wait kept, replayed, sets its run's
+/// `last_rx` to the moment it is handled, and a credit on top of that
+/// would put the clock in the future, which both readers' `wrapping_sub`
+/// reads as an age of nearly 2^64 ticks, and the run is reaped at once.
+fn credit_deaf(conns: &mut [Option<TcpConn>; MAX_CONNS], deaf: u64, now: u64) {
     if deaf == 0 {
         return;
     }
     for c in conns.iter_mut().flatten() {
         if c.cpu_child != CPU_NONE {
-            c.last_rx = c.last_rx.wrapping_add(deaf);
+            c.last_rx = c.last_rx.saturating_add(deaf).min(now);
         }
     }
 }
@@ -1355,7 +1396,7 @@ fn run_child_ended(child: u64) -> bool {
 /// worker. Answers whether `fsd`'s mount notice was among the messages, as
 /// `drain_client_messages` does, for [`reload_after_mount`].
 #[allow(clippy::too_many_arguments)]
-fn drain_mailbox(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], auth: &Auth, pending: &mut PendingRun, held: &mut held::Held, backlog: &mut Backlog) -> bool {
+fn drain_mailbox(packed_mac: u64, buf: &mut [u8], frame: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], auth: &Auth, pending: &mut PendingRun, held: &mut held::Held, backlog: &mut Backlog) -> bool {
     let mut mounted = false;
     loop {
         let packed =
@@ -1424,12 +1465,12 @@ fn drain_mailbox(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<TcpConn>; 
             let is_request = op == syscall_abi::NETOP_RMOUNT
                 || (syscall_abi::NETOP_KEY_HOLD..=syscall_abi::NETOP_KEY_LIST).contains(&op);
             if is_request {
-                served(packed_mac, buf, len, conns, dials, remotes, sessions, auth, pending, held, backlog);
+                served(packed_mac, buf, len, frame, conns, dials, remotes, sessions, auth, pending, held, backlog);
             } else {
                 cpu_child_msg(conns[ci].as_mut().unwrap(), &buf[..len]);
             }
         } else {
-            served(packed_mac, buf, len, conns, dials, remotes, sessions, auth, pending, held, backlog);
+            served(packed_mac, buf, len, frame, conns, dials, remotes, sessions, auth, pending, held, backlog);
         }
         // A HOLD carried a user's seed, and `buf` is never cleared between
         // messages: a shorter one leaves bytes 16..48 as they were. key_op

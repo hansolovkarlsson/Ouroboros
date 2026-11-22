@@ -52,9 +52,12 @@ The checks:
    `netd` keeps a frame its wait does not take and hands it on after
    (its `Backlog`, since 2026-11-22; before, the wait dropped it and only
    a retransmission was answered).
-4c. **More than `netd` keeps.** `FLOOD` UDP datagrams sent into one wait
-   (`ping 10.0.2.98`'s ARP resolve): `netd` keeps `KEPT` and logs the rest
-   lost in one line, and still answers an echo request after.
+4c. **More than `netd` keeps.** Into one wait (`ping 10.0.2.98`'s ARP
+   resolve) `NOISE` UDP datagrams, which `netd` must not keep, then `FLOOD`
+   SYNs to port 80 from as many ports. Exactly the first `KEPT` are
+   answered when the wait ends (a SYN-ACK or, the server's slots full, a
+   refusing RST), the rest logged lost in one line, `FLOOD - KEPT`; and an
+   echo request is answered after.
 5. No server called wedged or restarted (a `netd` that panicked on a
    frame is restarted, and its next request may still be answered), and no
    fault line in QEMU's trace.
@@ -125,6 +128,8 @@ BURST = 40
 # (BACKLOG_FRAMES in netd's main.rs).
 FLOOD = 40
 KEPT = 16
+# UDP datagrams sent into that wait before the flood: netd keeps none.
+NOISE = 20
 ECHO_ID = 0x5151
 # IP options whose words sum to zero in one's complement (0x0800 + 0xF7FF),
 # so the first 20 bytes' checksum holds too, and whose first byte is 8: a
@@ -156,6 +161,9 @@ class Wire:
         # each was seen. Recorded as they arrive, so no `wait` for another
         # frame can drop one.
         self.synacks = {}
+        # Every port the guest's port 80 first answered, a SYN-ACK or a RST,
+        # and with which flags: how 4c counts the SYNs `netd` kept.
+        self.from80 = {}
         threading.Thread(target=self._reader, daemon=True).start()
 
     def send(self, frame):
@@ -181,6 +189,8 @@ class Wire:
                 t = guest_tcp(frame)
                 if t is not None and t[0] == 80 and t[3] & 0x12 == 0x12:
                     self.synacks.setdefault(t[1], time.monotonic())
+                if t is not None and t[0] == 80:
+                    self.from80.setdefault(t[1], t[3])
                 self.frames.put(frame)
         except (EOFError, OSError):
             pass
@@ -502,16 +512,33 @@ def main():
                                 _, _, rseq, _, rlen = guest_tcp(req)
                                 wire.send(tcp_frame(guest_mac, guest_ip, 80, sport, PEER_ISN + 1, rseq + rlen, 0x14))
                     back_at_prompt("fetch foo.test")
-                    # 4c: more frames into one wait than netd keeps.
+                    # 4c: more frames into one wait than netd keeps. UDP first,
+                    # which it must not keep (only TCP is anything on_frame acts
+                    # on), then SYNs to port 80 from FLOOD ports: each one kept is
+                    # answered when the wait ends (a SYN-ACK while one of the
+                    # server's four slots is free, a refusing RST after), each
+                    # one lost is not. Exact counts, so a backlog of another
+                    # size, kept UDP or kept frames never handed on all fail.
                     lost_mark = len(g.transcript())
+                    ports = [42000 + i for i in range(FLOOD)]
                     if start("ping 10.0.2.98", is_arp_for(NOBODY_IP), "an ARP request for 10.0.2.98"):
-                        for i in range(FLOOD):
-                            wire.send(udp_frame(guest_mac, guest_ip, 5000, 9, b"flood %d" % i))
+                        for i in range(NOISE):
+                            wire.send(udp_frame(guest_mac, guest_ip, 5000, 9, b"noise %d" % i))
+                        for port in ports:
+                            wire.send(tcp_frame(guest_mac, guest_ip, port, 80, PEER_ISN, 0, 0x02))
                     back_at_prompt("ping 10.0.2.98")
+                    time.sleep(QUIET_S)
                     lost = re.findall(r"netd: a client op's wait lost (\d+) frames", g.transcript()[lost_mark:])
-                    check(len(lost) == 1 and 0 < int(lost[0]) <= FLOOD - KEPT,
-                          f"{FLOOD} frames sent into one wait: the ones past the {KEPT} netd keeps counted lost, in one line"
+                    heard = [p for p in ports if p in wire.from80]
+                    check(len(lost) == 1 and int(lost[0]) == FLOOD - KEPT,
+                          f"{NOISE} UDP datagrams and {FLOOD} SYNs sent into one wait: {FLOOD - KEPT} counted lost, in one line"
                           + f" ({', '.join(lost) or 'no line'})")
+                    check(heard == ports[:KEPT],
+                          f"the first {KEPT} SYNs of the flood answered when the wait ended, and none after them"
+                          + f" ({len(heard)} answered, {'the first ' + str(KEPT) if heard == ports[:KEPT] else heard})")
+                    for port in heard:
+                        if wire.from80[port] & 0x12 == 0x12:
+                            wire.send(tcp_frame(guest_mac, guest_ip, port, 80, PEER_ISN + 1, 0, 0x04))
                     answered(e(300, b"after the flood"), "a request after the flood")
             during = g.transcript()[mark:]
             wedged, restarted = during.count("wedged"), during.count("restarted")
