@@ -1935,6 +1935,43 @@ own. The entries below stand as they were put.
      QEMU, not yet on the board (`testing-pi4.md`, risk 4b). What stays
      open is the rest of this item: a disk that mounts after 2 s still
      leaves the defaults, and nothing reads either file again.
+     **Done 2026-11-22** (`netd/late-etc-net`). Reading `fsd` first
+     changed the question: it mounts tree 0 before it takes its first
+     request, and the kernel queues a call to a task not yet receiving, so
+     at boot a load that answers `NO_FS` has found what the boot holds,
+     and the 2 s waits for nothing then (it stays, by Hans's choice, for
+     a change of its own). The disk that comes later comes by `mount -a`:
+     a stick passed through to Parallels after the VM started, or plugged
+     into the Pi after boot. `fsd` now sends `netd` a one-way notice,
+     `NETOP_ROOT_MOUNTED`, each time tree 0 mounts (`TO_NET` in its send
+     mask for it; Hans chose `fsd` telling `netd` over `netd` asking and
+     over the shell's `mount -a` telling it). `netd` takes it from `fsd`'s
+     slot alone and, when its last load found nothing mounted, runs
+     `load_auth` again, `/etc/net` last, replacing what it held, which had
+     no identity to lose. `make test-net-config`'s fourth boot is the
+     Parallels workflow on QEMU: the ESP on a read-only vvfat disk `fsd`
+     cannot mount, the root with `/etc/net` on a USB stick that `mount -a`
+     brings in, reached at the file's address after it and not at the
+     default; and the other three boots must not reload.
+     **Its review** (high, eight findings, five fixed). The reload's
+     gate was `/etc/net`'s `NO_FS` alone, so a load whose identity read
+     went unanswered (`fsd` mid-restart) and whose `/etc/net` was then
+     read kept no identity for the boot; any of the load's retried reads
+     unanswered now counts (`Auth::unanswered`, which replaces two
+     statics). The notice taken by the drain inside a connection's send
+     loop waited for the next wake to act; both drains now answer whether
+     it came, and the reload follows each. `netd` refuses anything else
+     from `fsd`'s slot, since the send mask cannot narrow `TO_NET` to one
+     op, and `fsd` says in a line when the notice could not be sent (a
+     full mailbox). And the late boot's "before `mount -a`, no HTTP
+     server" check could not fail: it fetched `/etc/passwd`, which with
+     nothing mounted no address could serve. It asks for any HTTP answer
+     now, an error too, and must find one at the default address and none
+     at the file's. Declined, with the reason: a reload's 2 s budget
+     stalling the serve loop (only if the root is gone again by the time
+     the notice is read), and connections opened at the default address
+     before `mount -a` left to their own timeouts (seconds of a boot, at
+     an address nothing on a real network can reach).
    - *Three parsers of a dotted address serve `netd`:* `netconf`'s,
      `clusterkeys::parse_ip` with the same rules, and `netd`'s own
      `parse_ip4`. One crate holding one is the change. **Done

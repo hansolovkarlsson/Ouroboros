@@ -19,10 +19,23 @@ e2fsprogs) or left out:
    of a refused file is used.
 3. **No file**, the control: the defaults with no warning, reached at
    10.0.2.15.
+4. **A file on a root that mounts late** (since 2026-11-22): the ESP on a
+   virtio vvfat disk, which fsd cannot mount, as `make run` boots it, and
+   the copy with `/etc/net` naming 10.0.2.20 on a USB stick, which the
+   kernel takes only when `mount -a` rescans: the Parallels workflow for a
+   stick passed through after the VM started. `netd` must first say nothing
+   was mounted and use the defaults, and answer HTTP at 10.0.2.15 and not at
+   10.0.2.20 (any answer, an error too: with nothing mounted there is no
+   file to serve); after `mount -a` it must say the root
+   mounted after it loaded, then that its address is from the file, and the
+   host must reach it at 10.0.2.20 and not at 10.0.2.15. Before 2026-11-22
+   nothing read `/etc/net` again, so the guest stayed at 10.0.2.15.
 
 The two "not reached" checks are what make the "reached" ones mean
 something: SLIRP forwards a port to whatever address it is told, so a guest
-answering at both would pass a check that only looked for an answer.
+answering at both would pass a check that only looked for an answer. A
+"not reached" check asks for any HTTP answer, an error status included, so a
+server there that cannot serve the file still fails it.
 
 Usage:  python3 scripts/test-net-config.py      (make test-net-config builds the image)
 Exit status: the number of failed checks.
@@ -33,6 +46,7 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -42,6 +56,8 @@ drive_qemu = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(drive_qemu)
 
 IMAGE = os.path.join(ROOT, "build", "espext2.img")
+# The staged ESP directory, booted through vvfat in the late boot.
+ESP = os.path.join(ROOT, "build", "esp")
 COPY = os.path.join(ROOT, "build", "netconf.img")
 PART = os.path.join(ROOT, "build", "netconf-part.img")
 CONF = os.path.join(ROOT, "build", "netconf-etc-net.txt")
@@ -51,6 +67,11 @@ CONF = os.path.join(ROOT, "build", "netconf-etc-net.txt")
 OFF, SIZE = 2048 * 512, 49152 * 512
 OLD, NEW = "10.0.2.15", "10.0.2.20"
 PORT_OLD, PORT_NEW = 5661, 5662
+# netd's last line of a load with no identity (`load_auth`), at start and
+# after a reload: the late boot types once it has seen it.
+SETTLED = "netd: no /etc/cluster/id - cannot make remote requests"
+# netd's line when the root mounts after its load found nothing mounted.
+RELOAD = "netd: the root mounted after netd loaded: reading /etc/cluster and /etc/net again"
 # An address off the guest's subnet (TEST-NET-3), for the next hop.
 FAR = "203.0.113.9"
 
@@ -94,7 +115,8 @@ def make_copy(conf):
 
 
 def http(port):
-    """Whether the guest's HTTP server answers through the forwarded port."""
+    """Whether the guest's HTTP server serves /etc/passwd through the
+    forwarded port."""
     try:
         with urllib.request.urlopen(f"http://localhost:{port}/etc/passwd", timeout=8) as r:
             return b"root" in r.read()
@@ -102,7 +124,26 @@ def http(port):
         return False
 
 
-def boot(label, conf, want_lines, reached, not_reached, ping):
+def answers(port):
+    """Whether anything answers HTTP through the forwarded port, an error
+    status too: what is asked with nothing mounted, where /etc/passwd is
+    served nowhere. (A first version asked `http` there, which no address
+    could pass, the review of 2026-11-22.)"""
+    try:
+        with urllib.request.urlopen(f"http://localhost:{port}/etc/passwd", timeout=8):
+            return True
+    except urllib.error.HTTPError:
+        return True
+    except Exception:
+        return False
+
+
+def boot(label, conf, want_lines, reached, not_reached, ping, late=None):
+    """One boot of a copy of the image with `conf` as /etc/net. With `late`,
+    the lines netd must print before `mount -a`, the copy is a USB stick
+    and the boot disk the ESP through vvfat, which fsd cannot mount; the
+    shell types `mount -a` once netd has loaded, and `want_lines` are the
+    lines after it."""
     failed = 0
 
     def check(ok, what):
@@ -117,28 +158,61 @@ def boot(label, conf, want_lines, reached, not_reached, ping):
             if os.path.exists(leftover):
                 os.unlink(leftover)
         raise
-    g = drive_qemu.Guest(COPY, extra_args=(
+    net = (
         "-netdev", f"user,id=net0,hostfwd=tcp::{PORT_OLD}-{OLD}:80,hostfwd=tcp::{PORT_NEW}-{NEW}:80",
         "-device", "virtio-net-device,netdev=net0",
-    ), label=f"[{label}] ")
+    )
+    if late is None:
+        g = drive_qemu.Guest(COPY, extra_args=net, label=f"[{label}] ")
+    else:
+        # vvfat read-only (`fat:` and `readonly=on`, not `fat:rw:`), so
+        # nothing is written to the staged ESP; the stick is the copy.
+        g = drive_qemu.Guest(os.path.join(ESP, "boot"), virtio_disk=False, stamp_from=ESP, label=f"[{label}] ", extra_args=(
+            "-drive", f"file=fat:{ESP},format=raw,media=disk,if=none,id=hd0,readonly=on",
+            "-device", "virtio-blk-device,drive=hd0",
+            "-device", "qemu-xhci,id=xhci0",
+            "-drive", f"file={COPY},format=raw,if=none,id=usbstick",
+            "-device", "usb-storage,drive=usbstick,bus=xhci0.0,port=1",
+            *net,
+        ))
     try:
+        mark = 0
+        if late is not None:
+            ok = g.wait_for(drive_qemu.re.escape(SETTLED), timeout=90)
+            text = g.transcript()
+            for line in late:
+                check(line in text, f"before mount -a, netd says {line!r}")
+            check(answers(PORT_OLD), f"before mount -a, the host reaches netd's HTTP server at the default {OLD}")
+            check(not answers(PORT_NEW), f"and not at the file's {NEW}")
+            # What netd says after `mount -a` is read from here on, so the
+            # lines of its first load cannot answer for it.
+            mark = len(g.transcript())
+            ok = ok and g.run([("", drive_qemu.ENTER), ("# ", "mount -a")])
+            check(ok and g.wait_for("disk commands available", timeout=30), "mount -a mounts the stick")
         # The whole transcript is asked, not `wait_for` a line at a time,
         # so the lines may come in any order. (This rig's first run is how
         # `wait_for` was found passing over the second of two lines printed
         # together; it moves its mark to the end of the match since
         # 2026-11-21.)
         deadline = time.time() + 90
-        while time.time() < deadline and not all(x in g.transcript() for x in [*want_lines, "login:"]):
+        # After a reload, the export's line: the stick's root may hold an
+        # identity, so SETTLED need not come.
+        settled = ["netd: export"] if late is not None else ["login:"]
+        while time.time() < deadline and not all(x in g.transcript()[mark:] for x in [*want_lines, *settled]):
             time.sleep(0.2)
-        text = g.transcript()
+        text = g.transcript()[mark:]
         for line in want_lines:
             check(line in text, f"netd says {line!r}")
-        check("login:" in text, "the boot reaches a login")
+        if late is None:
+            check("login:" in text, "the boot reaches a login")
+            # fsd's notice of its own start's mount reaches every boot; a
+            # netd whose load found the disk must not read it as a late one.
+            check(RELOAD not in g.transcript(), "netd does not read its files again (its load found the disk)")
         warned = "netd: WARNING /etc/net" in text
         check(warned == any("WARNING" in line for line in want_lines), f"a warning about /etc/net: {warned}")
         port = {OLD: PORT_OLD, NEW: PORT_NEW}
         check(http(port[reached]), f"the host reaches its HTTP server at {reached}")
-        check(not http(port[not_reached]), f"and does not at {not_reached}")
+        check(not answers(port[not_reached]), f"and nothing answers at {not_reached}")
         if ping:
             g.type_line("root")
             g.run([("assword", "root"), ("# ", "ping 10.0.2.2"), ("# ", f"ping {FAR}"), ("# ", "")])
@@ -167,6 +241,11 @@ def boot(label, conf, want_lines, reached, not_reached, ping):
 
 def main():
     failed = 0
+    failed += boot("late", GOOD,
+                   [RELOAD,
+                    f"netd: address {NEW}/24, gateway 10.0.2.2, dns 10.0.2.3 (from /etc/net)"],
+                   reached=NEW, not_reached=OLD, ping=False,
+                   late=[f"netd: address {OLD}/24, gateway 10.0.2.2, dns 10.0.2.3 (nothing mounted to read /etc/net from: the defaults)"])
     failed += boot("file", GOOD,
                    [f"netd: address {NEW}/24, gateway 10.0.2.2, dns 10.0.2.3 (from /etc/net)"],
                    reached=NEW, not_reached=OLD, ping=True)

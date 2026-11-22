@@ -272,6 +272,7 @@ fn try_mount(device: &disk::Device, mounts: &mut [Option<vfs::Mount>; MAX_MOUNTS
             };
             con_write_parts(&[unread, hro, hwhy, hend, kro, kwhy, kend, "fsd: ", mounted.fs().name(), " mounted, disk commands available\r\n", ro, why, end, bpre, blba, bend]);
             mounts[0] = Some(mounted);
+            tell_netd_root_mounted();
             0
         }
         Err(e) => {
@@ -295,6 +296,28 @@ fn try_mount(device: &disk::Device, mounts: &mut [Option<vfs::Mount>; MAX_MOUNTS
                 _ => syscall_abi::NO_FS,
             }
         }
+    }
+}
+
+/// Tells `netd` that tree 0 has just mounted (`NETOP_ROOT_MOUNTED`), so a
+/// `netd` whose load found nothing mounted reads `/etc/net` and
+/// `/etc/cluster` again: the boot whose disk came by `mount -a`. Sent on
+/// every mount of tree 0, the one at fsd's start too, because only `netd`
+/// knows what its load found; one that found the disk ignores it.
+///
+/// A `MSG_SEND`, which does not block, and never a call: `netd` calls this
+/// server, so a call the other way could wait on a `netd` waiting on it.
+/// A notice that does not go is said in a line, since `netd` then stays on
+/// what its load found for the rest of the boot and nothing else would
+/// show why: a full mailbox (`MSG_ERR_FULL`), or a refusal. The one answer
+/// passed over is `TASK_ERR_NO_SUCH_TASK`, no `netd` to tell, which reads
+/// nothing to have missed it. The send is not retried: this server cannot
+/// wait on `netd`'s mailbox while a `mount -a` waits on it.
+fn tell_netd_root_mounted() {
+    let msg = syscall_abi::NETOP_ROOT_MOUNTED.to_le_bytes();
+    let r = syscall4::<{ syscall_abi::MSG_SEND }>(syscall_abi::NET_TASK, msg.as_ptr() as u64, msg.len() as u64, 0);
+    if r >= syscall_abi::FS_ERR_MIN && r != syscall_abi::TASK_ERR_NO_SUCH_TASK {
+        print("fsd: WARNING could not tell netd the root mounted; it keeps what it loaded\r\n");
     }
 }
 

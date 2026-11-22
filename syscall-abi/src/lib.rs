@@ -1562,6 +1562,16 @@ pub const NETOP_KEY_DROP_MINE: u64 = 9;
 /// test can see the table (`clusterkey held`).
 pub const NETOP_KEY_LIST: u64 = 10;
 
+/// **The root has mounted (a notice, `fsd` to `netd`).** Message `[op]`,
+/// sent with [`MSG_SEND`], never a call, and never answered. `fsd` sends it
+/// each time tree 0 mounts; `netd` takes it from [`FSD_TASK`]'s slot alone,
+/// and reads `/etc/net` and `/etc/cluster` again when its own load found
+/// nothing mounted. That is the boot whose disk came later, by `mount -a`:
+/// a stick passed through to Parallels after the VM started, or plugged into
+/// the Pi after boot. Before 2026-11-22 nothing read either file again, and
+/// the machine kept the default address and no cluster identity.
+pub const NETOP_ROOT_MOUNTED: u64 = 11;
+
 /// Most keys `netd` holds at once. Four logged-in users (or logins) per node.
 pub const NET_KEY_MAX: usize = 4;
 /// A key-op reply: done.

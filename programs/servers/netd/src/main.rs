@@ -57,11 +57,12 @@ fn default_netconf() -> netconf::Config {
     netconf::Config::slirp(last)
 }
 
-/// This machine's network configuration, set once at start
-/// ([`load_netconf`]) and read from everywhere a frame is built or judged.
-/// Four words and a flag, atomics so that no `unsafe` and no parameter
-/// through sixty functions is needed for values that never change after
-/// the start. An address is stored big-endian; 0 in the gateway or the DNS
+/// This machine's network configuration, set at start ([`load_netconf`])
+/// and read from everywhere a frame is built or judged. Four words and a
+/// flag, atomics so that no `unsafe` and no parameter through sixty
+/// functions is needed for values that change at most once after the
+/// start: when the root mounts after a load that found nothing mounted
+/// ([`reload_after_mount`]). An address is stored big-endian; 0 in the gateway or the DNS
 /// server is "none", which no file can name (`netconf::parse` refuses it).
 static NET_SET: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 static NET_ADDRESS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
@@ -116,19 +117,19 @@ fn log_ip(ip: &[u8; 4]) {
     }
 }
 
-/// Reads `/etc/net` and sets the configuration for the boot, saying in one
-/// line what it is and where it came from. Called once, from
-/// [`load_auth`] after its reads, which have by then waited out the disk's
-/// mount or found there is no disk.
+/// Reads `/etc/net` and sets the configuration, saying in one line what it
+/// is and where it came from. Called from [`load_auth`] after its reads,
+/// which have by then waited out the disk's mount or found there is no
+/// disk: at start, and again by [`reload_after_mount`].
 ///
 /// **It does not wait for a mount itself.** `load_auth` holds the one
 /// retry budget for that (its comment says why there is one and not one a
 /// read), so `NO_FS` here is taken as "nothing is mounted" at once. The
 /// other transient answers (a full mailbox, a server mid-restart) are asked
 /// again for up to five retries' time, by a [`LoadBudget`] as `load_auth`'s
-/// are. A disk that mounts after `load_auth` gave up leaves this machine on
-/// the defaults for the boot, as it leaves it with no cluster identity:
-/// nothing reads either file again.
+/// are. A disk that mounts later, by `mount -a`, is read when `fsd` says so
+/// ([`reload_after_mount`]); until 2026-11-22 nothing read either file
+/// again, and the machine kept the defaults and no cluster identity.
 ///
 /// **Every way of not having a usable file ends in the configuration for
 /// no file**, each with its own words: the file absent or nothing mounted
@@ -139,7 +140,11 @@ fn log_ip(ip: &[u8; 4]) {
 /// The file is read until a read returns nothing, as `read_registry` reads:
 /// a read may return fewer bytes than asked without being the end, and a
 /// file cut short could still parse, to an address nobody wrote.
-fn load_netconf() {
+///
+/// Answers whether the read went unanswered ([`transient_fs_failure`]:
+/// nothing mounted, `fsd` mid-restart, a full mailbox), for
+/// [`Auth::unanswered`].
+fn load_netconf() -> bool {
     let mut buf = [0u8; netconf::MAX_FILE + 1];
     let mut budget = LoadBudget::new(NETCONF_WAIT_US);
     let mut len = 0usize;
@@ -213,6 +218,7 @@ fn load_netconf() {
     }
     log(source);
     log(b"\r\n");
+    transient_fs_failure(n)
 }
 /// A fixed ephemeral UDP source port for DNS queries (one query at a time).
 const DNS_SRC_PORT: u16 = 0x8000;
@@ -437,6 +443,15 @@ struct Auth {
     /// unaffected.
     authorized: [u8; AUTHORIZED_MAX],
     authorized_len: usize,
+    /// Whether any of the load's retried reads (`\NOEXEC`, the identity,
+    /// the peers, `/etc/net`) ended unanswered: nothing mounted, `fsd`
+    /// mid-restart, a full mailbox ([`transient_fs_failure`]). Such a load
+    /// is read again when `fsd` says the root mounted
+    /// ([`reload_after_mount`]). Any read and not one: until the review of
+    /// this change only `/etc/net`'s `NO_FS` counted, so a load whose
+    /// identity went unread, `/etc/net` then read, kept no identity for
+    /// the boot.
+    unanswered: bool,
 }
 
 /// A machine identity: the expanded signing key, and the seed it came from.
@@ -655,6 +670,7 @@ fn load_auth() -> Auth {
         signing: None,
         authorized: [0u8; AUTHORIZED_MAX],
         authorized_len: 0,
+        unanswered: false,
     };
     // ONE retry budget across all three reads, not one each.
     //
@@ -844,7 +860,10 @@ fn load_auth() -> Auth {
     // lines. Two rigs type once they see the last of them
     // (`test-blank-disk.py`'s NETD_SETTLED, `test-sd.py`), and a line
     // printed after it could land in what they type.
-    load_netconf();
+    // `/etc/net` read first and on its own line: in the `||` it would be
+    // skipped whenever a read before it went unanswered.
+    let net_unanswered = load_netconf();
+    auth.unanswered = net_unanswered || transient_fs_failure(m) || transient_fs_failure(idn) || transient_fs_failure(n);
     // REPORTED PER DIRECTION: they have different preconditions, and a machine
     // can be able to do one and not the other. Naming WHICH half is missing
     // matters more now that there is no fallback format to fall back to - the
@@ -866,6 +885,36 @@ fn load_auth() -> Auth {
         log(b"netd: no /etc/cluster/id - cannot make remote requests\r\n");
     }
     auth
+}
+
+/// Reads the configuration again when `fsd` has said the root mounted
+/// (`NETOP_ROOT_MOUNTED`, which the drains answer as `true`) and a read of
+/// the last load went unanswered ([`Auth::unanswered`]): the boot
+/// whose disk came by `mount -a`, a stick passed through to Parallels after
+/// the VM started or plugged into the Pi after boot. `load_auth` runs whole,
+/// `/etc/net` last, and its lines say what it found, as at start; the `Auth`
+/// it returns replaces the one held. A notice after a load that found the
+/// disk (every boot's own, and a remount after `unmount`) changes nothing.
+///
+/// **What it replaces had nothing to lose.** A load that found nothing
+/// mounted holds no identity, so the export was closed and no session or
+/// remote mount could have been made under it; what a reload gives is the
+/// first identity of the boot. The address may change too. A connection
+/// made at the old one (an HTTP client of the boot's first seconds) is
+/// answered from the new one, which its peer does not know, and ends by
+/// its own timeouts; a node whose address is in a file is reached at that
+/// address, and the old one was never in anyone's configuration.
+///
+/// **Called after every drain that can take the notice**, the serve loop's
+/// and the one inside a connection's send loop, so a notice taken during a
+/// transfer is acted on at once and not at the next wake (the review of
+/// this change).
+fn reload_after_mount(auth: &mut Auth) {
+    if !auth.unanswered {
+        return;
+    }
+    log(b"netd: the root mounted after netd loaded: reading /etc/cluster and /etc/net again\r\n");
+    *auth = load_auth();
 }
 
 /// The event loop: block in `NET_WAIT` until either a client message or an
@@ -923,7 +972,9 @@ fn serve(packed_mac: u64) -> ! {
         // handled synchronously; the supervisor health-ping is acked here too
         // (any reply acks it). Also where a cpu child's output is captured
         // (cluster Phase 4a) - routed to its connection by drain_client_messages.
-        drain_client_messages(packed_mac, &mut t.buf, &mut t.conns, &mut t.dials, &mut t.remotes, &mut t.sessions, &t.auth, &mut t.pending, &mut t.held);
+        if drain_client_messages(packed_mac, &mut t.buf, &mut t.conns, &mut t.dials, &mut t.remotes, &mut t.sessions, &t.auth, &mut t.pending, &mut t.held) {
+            reload_after_mount(&mut t.auth);
+        }
 
         // A held key whose login is gone goes now: a killed nested shell loses
         // its key within one wake of this loop, the health ping bounding how
@@ -992,7 +1043,9 @@ fn serve(packed_mac: u64) -> ! {
                     }
                     let before = c.snd_nxt;
                     pump_send(&mac, c); // `c` borrow ends here
-                    drain_client_messages(packed_mac, &mut t.buf, &mut t.conns, &mut t.dials, &mut t.remotes, &mut t.sessions, &t.auth, &mut t.pending, &mut t.held);
+                    if drain_client_messages(packed_mac, &mut t.buf, &mut t.conns, &mut t.dials, &mut t.remotes, &mut t.sessions, &t.auth, &mut t.pending, &mut t.held) {
+                        reload_after_mount(&mut t.auth);
+                    }
                     match t.conns[i].as_ref() {
                         Some(c) if c.snd_nxt != before => {} // progress - continue
                         _ => break,
@@ -1100,9 +1153,12 @@ fn tables() -> &'static mut Tables {
 /// from a **cpu child** (cluster Phase 4a - a spawned remote-run command whose
 /// stdout we capture) is routed to *its* connection's output buffer instead of
 /// the normal client dispatch; everything else is a client request.
+/// Answers whether `fsd`'s mount notice (`NETOP_ROOT_MOUNTED`) was among
+/// them: the caller holds the `Auth` a reload replaces, which the drain
+/// only borrows, and calls [`reload_after_mount`] on `true`.
 #[allow(clippy::too_many_arguments)]
-fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], auth: &Auth, pending: &mut PendingRun, held: &mut held::Held) {
-    drain_mailbox(packed_mac, buf, conns, dials, remotes, sessions, auth, pending, held);
+fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], auth: &Auth, pending: &mut PendingRun, held: &mut held::Held) -> bool {
+    let mut mounted = drain_mailbox(packed_mac, buf, conns, dials, remotes, sessions, auth, pending, held);
     // A run's command that has ended is collected here, where nothing
     // blocks: see `run_child_ended`. Which ones have ended is asked BEFORE
     // the second drain, so everything such a command sent is already
@@ -1113,9 +1169,9 @@ fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<Tc
         *flag = matches!(c, Some(c) if run_child_ended(c.cpu_child));
     }
     if !ended.contains(&true) {
-        return;
+        return mounted;
     }
-    drain_mailbox(packed_mac, buf, conns, dials, remotes, sessions, auth, pending, held);
+    mounted |= drain_mailbox(packed_mac, buf, conns, dials, remotes, sessions, auth, pending, held);
     for (flag, c) in ended.iter().zip(conns.iter_mut()) {
         if let (true, Some(c)) = (*flag, c.as_mut()) {
             // Reaps a zombie; refused for a slot already empty or another
@@ -1124,6 +1180,7 @@ fn drain_client_messages(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<Tc
             c.cpu_child = CPU_NONE;
         }
     }
+    mounted
 }
 
 /// Time `netd` could not hear is not a run's caller's silence. A client
@@ -1173,14 +1230,16 @@ fn run_child_ended(child: u64) -> bool {
 }
 
 /// One pass over the mailbox, until it is empty: [`drain_client_messages`]'s
-/// worker.
+/// worker. Answers whether `fsd`'s mount notice was among the messages, as
+/// `drain_client_messages` does, for [`reload_after_mount`].
 #[allow(clippy::too_many_arguments)]
-fn drain_mailbox(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], auth: &Auth, pending: &mut PendingRun, held: &mut held::Held) {
+fn drain_mailbox(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<TcpConn>; MAX_CONNS], dials: &mut [Option<DialConn>; MAX_DIAL], remotes: &mut [Option<RemoteConn>; MAX_REMOTE], sessions: &mut [Option<SessionConn>; MAX_CLIENT_SESSIONS], auth: &Auth, pending: &mut PendingRun, held: &mut held::Held) -> bool {
+    let mut mounted = false;
     loop {
         let packed =
             syscall4(syscall_abi::MSG_TRY_RECV, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0);
         if packed >= syscall_abi::FS_ERR_MIN {
-            return; // NO_MSG or an error: mailbox drained
+            return mounted; // NO_MSG or an error: mailbox drained
         }
         let len = ((packed & 0xffff_ffff) as usize).min(buf.len());
         // The OCCUPANT, not the position: a cpu child's slot is recycled the
@@ -1194,6 +1253,25 @@ fn drain_mailbox(packed_mac: u64, buf: &mut [u8], conns: &mut [Option<TcpConn>; 
         // and the supervisor restarted netd for not acking. Measured
         // 2026-09-06 by holding a bare TCP connection open for a minute.
         let sender_id = syscall(syscall_abi::SENDER_TASK, 0);
+        // `fsd`'s notice that the root mounted: from its slot alone, which
+        // no other task can hold (a protected server's, restarted in place),
+        // and never answered, since it is a send and not a call.
+        //
+        // **And nothing else from that slot is served.** `fsd`'s send mask
+        // holds `TO_NET` for this notice only, but the mask cannot say so,
+        // and every other op would reach `handle_client` as any client's
+        // does (the review of this change). Refused here instead, with a
+        // line: answered `FS_ERROR`, so an `fsd` that called is not left
+        // waiting (a send's answer goes nowhere, `REPLY_STALE`).
+        if sender_id != syscall_abi::GET_ID_ERR && syscall_abi::task_id_slot(sender_id) == syscall_abi::FSD_TASK {
+            if len == 8 && read_u64(buf, 0) == syscall_abi::NETOP_ROOT_MOUNTED {
+                mounted = true;
+            } else {
+                log(b"netd: WARNING fsd sent netd something other than its mount notice; refused\r\n");
+                let _ = reply(syscall(syscall_abi::SENDER_CALL, 0), &syscall_abi::FS_ERROR.to_le_bytes());
+            }
+            continue;
+        }
         let child_conn = if sender_id == syscall_abi::GET_ID_ERR {
             None
         } else {

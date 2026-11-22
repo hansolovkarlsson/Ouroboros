@@ -236,7 +236,7 @@ make test-cond-restart        # the same for cond, which must answer a word of i
 make test-accountd-restart    # the same for accountd, which must answer `passwd` after
 make test-cred-client         # the client sends a user credential: served while the user is logged in, refused and its session closed after
 make test-no-identity         # an export with no /etc/cluster/id runs nothing, in either signed format
-make test-net-config          # netd's address from /etc/net: a good file, a refused one and none, each reached where it should be and not elsewhere
+make test-net-config          # netd's address from /etc/net: a good file, a refused one, none, and one on a root `mount -a` brings in later, each reached where it should be and not elsewhere
 make test-net-flood           # netd lives through a 15 s flood of frames (no server called wedged, HTTP after), netd spun on NET_WAIT is a wedge, and NET_RECV never answers a length past the buffer
 make test-echo-reply          # netd answers an ICMP echo request whole, and none that is damaged, not its own, a fragment or from a source a reply cannot go to; ARP and echo answered inside every op's wait too
 make test-heap                # the user heap on a booted image
