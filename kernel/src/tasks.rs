@@ -343,7 +343,9 @@ fn caps_for_slot(slot: usize) -> u32 {
         // (Its replies are MSG_REPLY, which needs no right.) TO_NET since
         // 2026-11-22, for one message: NETOP_ROOT_MOUNTED, the notice that
         // tree 0 has mounted, so a netd that loaded with nothing mounted
-        // reads its configuration again.
+        // reads its configuration again. The mask cannot narrow TO_NET to
+        // one op, so netd refuses anything else from this slot
+        // (drain_mailbox).
         syscall_abi::FSD_TASK => TO_CON | TO_NET | CAP_BLOCK,
         // Console server: only ever replies (MSG_REPLY), so no send-mask
         // bits; owns the console device.
