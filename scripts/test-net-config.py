@@ -24,14 +24,18 @@ e2fsprogs) or left out:
    the copy with `/etc/net` naming 10.0.2.20 on a USB stick, which the
    kernel takes only when `mount -a` rescans: the Parallels workflow for a
    stick passed through after the VM started. `netd` must first say nothing
-   was mounted and use the defaults; after `mount -a` it must say the root
+   was mounted and use the defaults, and answer HTTP at 10.0.2.15 and not at
+   10.0.2.20 (any answer, an error too: with nothing mounted there is no
+   file to serve); after `mount -a` it must say the root
    mounted after it loaded, then that its address is from the file, and the
    host must reach it at 10.0.2.20 and not at 10.0.2.15. Before 2026-11-22
    nothing read `/etc/net` again, so the guest stayed at 10.0.2.15.
 
 The two "not reached" checks are what make the "reached" ones mean
 something: SLIRP forwards a port to whatever address it is told, so a guest
-answering at both would pass a check that only looked for an answer.
+answering at both would pass a check that only looked for an answer. A
+"not reached" check asks for any HTTP answer, an error status included, so a
+server there that cannot serve the file still fails it.
 
 Usage:  python3 scripts/test-net-config.py      (make test-net-config builds the image)
 Exit status: the number of failed checks.
@@ -42,6 +46,7 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -110,10 +115,25 @@ def make_copy(conf):
 
 
 def http(port):
-    """Whether the guest's HTTP server answers through the forwarded port."""
+    """Whether the guest's HTTP server serves /etc/passwd through the
+    forwarded port."""
     try:
         with urllib.request.urlopen(f"http://localhost:{port}/etc/passwd", timeout=8) as r:
             return b"root" in r.read()
+    except Exception:
+        return False
+
+
+def answers(port):
+    """Whether anything answers HTTP through the forwarded port, an error
+    status too: what is asked with nothing mounted, where /etc/passwd is
+    served nowhere. (A first version asked `http` there, which no address
+    could pass, the review of 2026-11-22.)"""
+    try:
+        with urllib.request.urlopen(f"http://localhost:{port}/etc/passwd", timeout=8):
+            return True
+    except urllib.error.HTTPError:
+        return True
     except Exception:
         return False
 
@@ -162,7 +182,8 @@ def boot(label, conf, want_lines, reached, not_reached, ping, late=None):
             text = g.transcript()
             for line in late:
                 check(line in text, f"before mount -a, netd says {line!r}")
-            check(not http(PORT_NEW) and not http(PORT_OLD), "before mount -a, the host reaches no HTTP server")
+            check(answers(PORT_OLD), f"before mount -a, the host reaches netd's HTTP server at the default {OLD}")
+            check(not answers(PORT_NEW), f"and not at the file's {NEW}")
             # What netd says after `mount -a` is read from here on, so the
             # lines of its first load cannot answer for it.
             mark = len(g.transcript())
@@ -191,7 +212,7 @@ def boot(label, conf, want_lines, reached, not_reached, ping, late=None):
         check(warned == any("WARNING" in line for line in want_lines), f"a warning about /etc/net: {warned}")
         port = {OLD: PORT_OLD, NEW: PORT_NEW}
         check(http(port[reached]), f"the host reaches its HTTP server at {reached}")
-        check(not http(port[not_reached]), f"and does not at {not_reached}")
+        check(not answers(port[not_reached]), f"and nothing answers at {not_reached}")
         if ping:
             g.type_line("root")
             g.run([("assword", "root"), ("# ", "ping 10.0.2.2"), ("# ", f"ping {FAR}"), ("# ", "")])

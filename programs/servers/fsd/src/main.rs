@@ -307,12 +307,18 @@ fn try_mount(device: &disk::Device, mounts: &mut [Option<vfs::Mount>; MAX_MOUNTS
 ///
 /// A `MSG_SEND`, which does not block, and never a call: `netd` calls this
 /// server, so a call the other way could wait on a `netd` waiting on it.
-/// Its answer is not looked at. At boot `netd` may not be running yet, and
-/// a full mailbox loses the notice; either leaves `netd` as it was before
-/// the notice existed, on what its load found.
+/// A notice that does not go is said in a line, since `netd` then stays on
+/// what its load found for the rest of the boot and nothing else would
+/// show why: a full mailbox (`MSG_ERR_FULL`), or a refusal. The one answer
+/// passed over is `TASK_ERR_NO_SUCH_TASK`, no `netd` to tell, which reads
+/// nothing to have missed it. The send is not retried: this server cannot
+/// wait on `netd`'s mailbox while a `mount -a` waits on it.
 fn tell_netd_root_mounted() {
     let msg = syscall_abi::NETOP_ROOT_MOUNTED.to_le_bytes();
-    syscall4::<{ syscall_abi::MSG_SEND }>(syscall_abi::NET_TASK, msg.as_ptr() as u64, msg.len() as u64, 0);
+    let r = syscall4::<{ syscall_abi::MSG_SEND }>(syscall_abi::NET_TASK, msg.as_ptr() as u64, msg.len() as u64, 0);
+    if r >= syscall_abi::FS_ERR_MIN && r != syscall_abi::TASK_ERR_NO_SUCH_TASK {
+        print("fsd: WARNING could not tell netd the root mounted; it keeps what it loaded\r\n");
+    }
 }
 
 /// `mount -a`: mount tree 0 from the block device the kernel holds, and when
