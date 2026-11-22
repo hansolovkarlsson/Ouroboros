@@ -1705,6 +1705,22 @@ The small open tails those arcs deliberately left:
   dev-dependency. **Limit:** the kernel is linted in the dev profile
   only, as `make build` builds it, not as `PROFILE=release`.
 
+- **`make test-long-set` fails before it boots, on main (found
+  2026-11-21, #499).** Two of its setups on the Mac refuse the image they
+  planted. `vroot` reads back its planted sets and finds runs of three
+  deleted entries in the root (`[96, 128, 160, 192, 384, ...]`), which
+  its "no run of three deleted ones" condition forbids; `vlater` finds
+  the bitmap's entry not moved to the root's second cluster. Each
+  returns before its boot, so the guest is never asked. Found by running
+  every rig that waits through `wait_for` for #499: 60 of 61 passed, and
+  this one failed the same two checks with main's `drive-qemu.py`. When it
+  last passed is not known; its scripts last changed on 2026-10-30
+  (`exfatimg.py`, `2333600b`). `fill_deleted`'s docstring
+  counts 34 deleted slots in the image's root, which it fills so that no
+  create fits in one; what the root holds today has not been read. **Done when** `make test-long-set` passes, and the cause
+  is named, so the next change to the root's contents is not found the
+  same way.
+
 - **A server past its restart cap draws a second wedge line (seen
   2026-09-27).** Forcing `netd` through four ping-timeout wedges in one boot
   printed `failed more than 3 times this boot - giving up` and then
