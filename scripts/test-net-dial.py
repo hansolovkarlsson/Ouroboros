@@ -428,18 +428,37 @@ def main():
                                        and x[2] == cport and x[5] & (SYN | ACK) == SYN | ACK, 5)
                         if sa:
                             synacks[cport] = tcp_of(sa)
+                # Both complete their handshakes, A with a request. B, never
+                # handed out, stays open and pending: an unfinished one would
+                # run out of SYN-ACK retries and be freed on its own, and the
+                # check of the next serve could not fail.
+                b_sa = synacks.get(CLIENT_B)
+                if b_sa:
+                    wire.send(segment(guest_mac, guest_ip, CLIENT_B, 9100, PEER_ISN + 1, b_sa[3] + 1, ACK))
                 a_sa = synacks.get(CLIENT_A)
                 if a_sa:
-                    # Client A completes its handshake with a request; B never does.
                     wire.send(segment(guest_mac, guest_ip, CLIENT_A, 9100, PEER_ISN + 1, a_sa[3] + 1, PSH | ACK, b"req\r\n"))
-                reset = wire.wait(lambda f: (x := tcp_of(f)) is not None and x[1] == 9100 and x[2] == CLIENT_B
-                                  and x[5] & RST, 20) if len(synacks) == 2 else None
                 prompt(command)
                 out = g.transcript()[before:]
-                fin = wire.wait(lambda f: (x := tcp_of(f)) is not None and x[1] == 9100 and x[2] == CLIENT_A and x[5] & FIN, 3.0)
-                if fin:
-                    x = tcp_of(fin)
+                # serve closes A and then its listener: B's RST goes out in
+                # the close, A's FIN on the pump's next pass, so either may
+                # come first and one wait watches for both.
+                seen = {}
+
+                def closing(f):
+                    x = tcp_of(f)
+                    if x is not None and x[1] == 9100:
+                        if x[2] == CLIENT_B and x[5] & RST:
+                            seen["reset"] = x
+                        if x[2] == CLIENT_A and x[5] & FIN:
+                            seen["fin"] = x
+                    return "reset" in seen and "fin" in seen
+
+                wire.wait(closing, 3.0)
+                if "fin" in seen:
+                    x = seen["fin"]
                     wire.send(segment(guest_mac, guest_ip, CLIENT_A, 9100, x[4], x[3] + 1 + len(x[6]), ACK))
+                reset = seen.get("reset") if len(synacks) == 2 else None
                 check(listening and len(synacks) == 2 and "served + closed" in out,
                       f"`{command}` answers two SYNs and serves the first client"
                       + ("" if listening else " (never listening)") + f" ({len(synacks)} SYN-ACKs)"
