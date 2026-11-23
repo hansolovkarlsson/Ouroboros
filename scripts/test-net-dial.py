@@ -61,7 +61,12 @@ The checks:
    4-tuple was used up there. Each client's FIN must reach netd before the
    `listen` read it is about (netd's own FIN, sent on taking it, shows it),
    or the run is INCONCLUSIVE.
-8. No server called wedged or restarted, and no fault line in QEMU's
+8. **`serve` gives its listener back.** `MAX_DIAL` (3) runs of `serve`
+   that nobody connects to each time out, and a third good `dial` (port
+   8002) after them connects: a `Listening` slot is never idle-reaped, so
+   before 2026-11-23, when `serve` closed it only on success, the three held
+   every slot for the rest of the boot.
+9. No server called wedged or restarted, and no fault line in QEMU's
    trace.
 
 Exit status: 0, 1 for a failed check, drive-qemu's INCONCLUSIVE for a boot
@@ -110,6 +115,10 @@ CLIENT_EARLY = 43010
 EARLY_REQUEST = b"early-request\r\n"
 AGAIN_REQUEST = b"again-request\r\n"
 EARLY_WAIT_MS = 3000
+# netd's /net/tcp slots, and how long a `serve` nobody connects to may take to
+# give up (its 6000 listen polls).
+MAX_DIAL = 3
+SERVE_TIMEOUT_S = 120
 PEER_ISN = 0x20000000
 REQUEST = b"hello\r\n\r\n"
 ANSWER = b"dial-answer-%d\n"
@@ -378,6 +387,20 @@ def main():
                 for ok, what in ((early_in_time, "the first client's FIN"), (again_in_time, "the reconnected client's FIN")):
                     if ok is False:
                         unforced.append(f"netd took {what} after dialprobe's `listen` read, so its check did not test the close before the read")
+                # `serve` timing out with no connection closes its listener: a
+                # `Listening` slot is never idle-reaped, so before 2026-11-23
+                # each such run held its slot for the rest of the boot.
+                for k in range(MAX_DIAL):
+                    command = f"serve /net {9000 + k}"
+                    before = len(g.transcript())
+                    started = time.monotonic()
+                    g.type_line(command)
+                    ended = g.wait_for("# ", timeout=SERVE_TIMEOUT_S)
+                    out = g.transcript()[before:]
+                    check(ended and "serve: no connection accepted (timed out)" in out,
+                          f"`{command}`, nobody connecting, times out ({time.monotonic() - started:.1f} s)"
+                          + ("" if ended and "timed out" in out else f" (it said: {said(out)})"))
+                good_dial(8002, 3)
             during = g.transcript()[mark:]
             wedged, restarted = during.count("wedged"), during.count("restarted")
             check(wedged == 0 and restarted == 0, f"no server called wedged or restarted ({wedged} wedged, {restarted} restarted)")
