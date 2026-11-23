@@ -1639,8 +1639,8 @@ The small open tails those arcs deliberately left:
   a read-only drive as a card, #445). The acknowledgement of data sent
   again, on the export and the dial side (no link here loses an ACK, #449).
   `credit_deaf` (a round built for it passed with it taken out, #449;
-  since 2026-11-22 it applies only to an op whose wait lost frames, a case
-  `test-echo-reply` brings about, though no rig shows a run it saved).
+  since 2026-11-22 it credits every wait, the export's `connect` too, and
+  never past `now`, which no rig brings about either).
   `KILL_ID` refusing a slot that holds another task (it needs a reap and a
   spawn between two instants, #447). And `cpu_child_msg` with an empty
   message mid-run: no program was found that sends one.
@@ -1651,18 +1651,30 @@ The small open tails those arcs deliberately left:
   and a test for the op's own frames, both required, so no wait can poll
   without keeping what it does not take. A frame the test refuses is kept
   (`BACKLOG_FRAMES`, 16, in `Tables`) and handed to `on_frame` when the op
-  returns (`replay`), oldest first, before the NIC is read again: late by
-  as long as the op took, not dropped. The export path's `/net/tcp`
-  `connect`, which runs an ARP resolve inside `on_frame`, keeps too, and
-  `replay` copies each frame out first so `on_frame` may keep more. A frame
-  past the backlog is counted, and the op logs `netd: a client op's wait
-  lost N frames`; `credit_deaf` is kept for that op alone (`served`), the
-  case it is still needed for. `test-echo-reply` sends a SYN to port 80
-  into each of its five waits, once and never again, and sees each
-  answered after the op ends; and floods one wait with 40 frames, 24
-  logged lost. Controlled: `main`'s `netd` fails all six and passes the
-  rig's other 50 checks. Every rig that names `netd` passed on the change,
-  and `netd`'s deepest chain grew by 1,184 bytes (37,744 left).
+  returns (`replay`, from `served`), oldest first, before the next message
+  is served and before the NIC is read again: late by as long as the op
+  took, not dropped. Only an IPv4 TCP segment is kept, the one frame
+  `on_frame` acts on after ARP and echo. The export path's `/net/tcp`
+  `connect`, which runs an ARP resolve inside `on_frame`, keeps too: every
+  frame the serve loop takes goes through `heard`, which times it like an
+  op, and what it kept is replayed before the next NIC frame. A frame past
+  the backlog is counted, and the wait logs `netd: a client op's wait lost
+  N frames`. **`credit_deaf` is still needed, for every wait**: `netd`
+  sends no keepalive probe while it waits, so a caller that speaks only
+  when probed is silent whether or not a frame was lost (the high review of
+  #503, which caught a first version crediting only a wait that lost
+  frames). It never moves a clock past `now`, since a replayed frame sets
+  its run's clock to the moment it is handled and both readers'
+  `wrapping_sub` would read a future clock as an age of nearly 2^64 ticks.
+  `test-echo-reply` sends a SYN to port 80 into each of its five waits,
+  once and never again, and sees each answered after the op ends; and
+  sends one wait 20 UDP datagrams and 40 SYNs, exactly the first 16 SYNs
+  answered and 24 logged lost. Controlled: `main`'s `netd` failed the five
+  SYN checks and the first flood check, as the rig then was, and passed its
+  other 50; a backlog of 32, UDP kept, and no
+  replay each fail the flood's two (the last the five SYN checks too).
+  Every rig that names `netd` passed on the change, and `netd`'s deepest
+  chain is now through `served` and `heard`, 25,408 bytes (31,936 left).
   What follows is the item as it was written. Since #493 `recv`, the one
   way `arp_resolve`, `icmp_echo`, `resolve_ip` and `tcp_get` take a frame,
   answers ARP and echo requests itself (`answer_unasked`). Every other
@@ -1752,6 +1764,21 @@ The small open tails those arcs deliberately left:
   create fits in one; what the root holds today has not been read. **Done when** `make test-long-set` passes, and the cause
   is named, so the next change to the root's contents is not found the
   same way.
+
+- **`test-run-orphan` grades a firmware stall as a failure, and the stall
+  had an ending `firmware_stalled` does not know (seen 2026-11-22, #503).**
+  One boot of `make test-run-orphan` on `70b9bc39` stopped in QEMU's
+  firmware: `build/run-orphan.txt` was 10 lines, the firmware's own, ending
+  `Image at 0005FB65000 start failed: Aborted`, two `Tpm2` lines and the
+  screen clears, with no kernel line and no `Image type X64 can't be loaded`
+  line. The rig printed `TIMEOUT waiting for 'login:'` and one FAIL, and a
+  rerun on the same commit passed all 17. `test-run-orphan.py` does not call
+  `drive_qemu.boot_stalled`, and `firmware_stalled`'s `STALL_LINES` holds
+  the two endings of 2026-10-21 and 2026-10-22, not this one. The stalled
+  transcript was overwritten by the rerun. **Done when** a boot whose
+  transcript ends in the firmware's lines after `start failed: Aborted` is
+  graded INCONCLUSIVE by every rig that boots QEMU's firmware, with that
+  ending among `drive-qemu.py --self-test`'s fixtures.
 
 - **A server past its restart cap draws a second wedge line (seen
   2026-09-27).** Forcing `netd` through four ping-timeout wedges in one boot
