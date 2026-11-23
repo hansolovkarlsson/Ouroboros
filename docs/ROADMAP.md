@@ -5166,6 +5166,17 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   connection's idle clock). So C's `stat` refuses every `/net` path with
   `ENOSYS` for now (#223), and `ls -l /net/tcp` would meet the same. Found by
   the third review of #223, 2026-10-06.
+- **Every read of `/net/tcp/clone` allocates a slot, and `cat` reads it
+  until it fails.** `dial_file_op`'s clone arm ignores the read's offset, so
+  `cat /net/tcp/clone` printed `0`, `1` and `2` and then `cat: disk full`,
+  holding all `MAX_DIAL` slots until the 12 s idle reap; no `dial` can run in
+  that time. Plan 9 allocates at the open and reads the number back; here
+  there is no open, so the likely shape is a clone read at a nonzero offset
+  answering end of file, which `cat` stops at. Found 2026-11-23 while writing
+  `test-net-dial`'s slot check (#504), which uses `dialprobe` instead. A
+  shell tool cannot write a `ctl` either: ulib's bulk write refuses the local
+  `/net` as read-only, so `write` and redirection cannot reach it, and only
+  `dial`, `serve` and `dialprobe` can.
 - **`..` is lexical in the C library and `ulib`.** `normalize_path` collapses
   `.` and `..` as text before the namespace picks a mount (#215), as Plan 9
   does, so `stat("/NOSUCH/../etc/passwd")` succeeds and

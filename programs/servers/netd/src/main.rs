@@ -6860,6 +6860,7 @@ enum Reap {
     WhenReleased,
 }
 
+#[allow(clippy::needless_range_loop)] // index needed for the as_mut borrow and the reap's `dials[i] = None`
 fn pump_dials<const S: usize, const R: usize, const H: usize, const K: usize>(mac: &[u8; 6], dials: &mut [Option<Wire<S, R, H, K>>], idle_ticks: u64, when: Reap) {
     let mut frame = [0u8; 1600];
     let t = now();

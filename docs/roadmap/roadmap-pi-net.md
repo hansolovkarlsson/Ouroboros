@@ -2003,6 +2003,10 @@ own. The entries below stand as they were put.
      unreachable one and a second good dial. Its first run found `dial`
      holding its connection slot after every failed dial, three of which
      refused the next at its clone; `dial` closes it now (`fail_closed`).
+     The review of #504 found that close could reach another client:
+     netd freed a slot on `Closed`, so the next clone could take it
+     first. netd keeps a `/net/tcp` slot until its client closes it
+     (`Reap::WhenReleased`), checked by the rig's `dialprobe`.
      The 20-digit port does not fit `dial`'s 8-byte argument and stays a
      host test.
    - *The ext2 root's place in the image* is written out in three rigs
