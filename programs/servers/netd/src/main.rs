@@ -1100,12 +1100,12 @@ fn serve(packed_mac: u64) -> ! {
             // `client_exchange` used for the same event before step 2).
             service_remotes(&mut t.remotes, &t.auth, &t.held, syscall_abi::NO_FS, Some(&mut t.pending));
             service_remotes(&mut t.sessions, &t.auth, &t.held, syscall_abi::FS_ERROR, None);
-            pump_dials(&mac, &mut t.remotes, DIAL_IDLE_TICKS);
+            pump_dials(&mac, &mut t.remotes, DIAL_IDLE_TICKS, Reap::WhenClosed);
             // A held session idles for the far side's reap plus a margin (the
             // backstop for a client that crashed without clunking, Decision 4)
             // where a parked path verb or a dial idles for seconds.
-            pump_dials(&mac, &mut t.sessions, CLIENT_SESSION_IDLE_TICKS);
-            pump_dials(&mac, &mut t.dials, DIAL_IDLE_TICKS);
+            pump_dials(&mac, &mut t.sessions, CLIENT_SESSION_IDLE_TICKS, Reap::WhenClosed);
+            pump_dials(&mac, &mut t.dials, DIAL_IDLE_TICKS, Reap::WhenReleased);
             // 3. Per connection (by index, so the mailbox drain below can take
             // `&mut conns` without a borrow clash): service the retransmit timer,
             // then stream its response up to the window in bounded bursts,
@@ -4075,6 +4075,12 @@ struct Wire<const S: usize, const R: usize, const H: usize, const K: usize> {
     /// A freshly-accepted connection not yet handed to the client via a `listen`
     /// read. Cleared once `listen` returns its number.
     pending: bool,
+    /// The client wrote `close` to this slot's `ctl`. Under
+    /// [`Reap::WhenReleased`] (the `/net/tcp` table) a `Closed` slot is freed
+    /// only once this is set, or after the idle reap, so a client's late
+    /// `close` can never reach the slot's next owner. Never set on the remote
+    /// and session tables, which reap under [`Reap::WhenClosed`].
+    released: bool,
     /// A remote slot's parked request (`None` on every dial, and on a remote
     /// slot once its reply has gone out or its caller has been given up on).
     parked: Option<Parked>,
@@ -4213,6 +4219,7 @@ fn new_wire<const S: usize, const R: usize, const H: usize, const K: usize>(src_
         announce_port: 0,
         parent: DIAL_NO_PARENT,
         pending: false,
+        released: false,
         parked: None,
         uid: 0,
         fids: 0,
@@ -6755,6 +6762,7 @@ fn dial_file_op(
         }
         if data_in.starts_with(b"close") {
             let c = dials[n].as_mut().unwrap();
+            c.released = true;
             if c.state == DialState::Established {
                 c.state = DialState::Closing;
             } else {
@@ -6837,7 +6845,22 @@ fn dial_file_op(
 /// dial or a parked path verb, `CLIENT_SESSION_IDLE_TICKS` for a held session,
 /// which must outlive the far side's own reap (see there).
 #[allow(clippy::needless_range_loop)] // index needed for the reap re-borrow
-fn pump_dials<const S: usize, const R: usize, const H: usize, const K: usize>(mac: &[u8; 6], dials: &mut [Option<Wire<S, R, H, K>>], idle_ticks: u64) {
+/// When [`pump_dials`] frees a `Closed` slot. A parameter of the pump, not a
+/// default, so each table states which it is.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reap {
+    /// Once its receive buffer is drained: the remote and session tables,
+    /// whose only user is netd itself.
+    WhenClosed,
+    /// Once its client has written `close` (`Wire::released`): the
+    /// `/net/tcp` table, whose slots a client holds by number. Freed on
+    /// `Closed` alone, a slot could be cloned by the next client before the
+    /// first wrote its `close`, which then shut the new connection, since
+    /// netd has no owner to check a slot against (the review of #504).
+    WhenReleased,
+}
+
+fn pump_dials<const S: usize, const R: usize, const H: usize, const K: usize>(mac: &[u8; 6], dials: &mut [Option<Wire<S, R, H, K>>], idle_ticks: u64, when: Reap) {
     let mut frame = [0u8; 1600];
     let t = now();
     for i in 0..dials.len() {
@@ -6928,7 +6951,8 @@ fn pump_dials<const S: usize, const R: usize, const H: usize, const K: usize>(ma
                 _ => {}
             }
             // Reap a slot only once it's Closed AND its receive buffer is drained
-            // (so the client can still read the last bytes), or after a long idle -
+            // (so the client can still read the last bytes; under
+            // `Reap::WhenReleased`, once its client has closed it), or after a long idle -
             // but never idle-reap a Listening slot (a listener has no traffic of
             // its own yet must persist until an explicit close).
             // A slot with a request still parked belongs to `service_remotes`,
@@ -6958,8 +6982,15 @@ fn pump_dials<const S: usize, const R: usize, const H: usize, const K: usize>(ma
             // `was_open`, not the state after the line above: reaping on the
             // same pass that sets Closing would free the slot before the
             // Closing arm ever sends the FIN. One extra pass, then it reaps.
+            // Under `WhenReleased` the client's `close` frees the slot, read
+            // or not: it has said it wants nothing more. Without the `close`,
+            // only the idle reap frees it, the backstop for a client that died.
+            let done = match when {
+                Reap::WhenClosed => c.rlen == 0,
+                Reap::WhenReleased => c.released,
+            };
             c.parked.is_none()
-                && ((c.state == DialState::Closed && c.rlen == 0)
+                && ((c.state == DialState::Closed && done)
                     || (idle && !was_open))
         };
         if reap {

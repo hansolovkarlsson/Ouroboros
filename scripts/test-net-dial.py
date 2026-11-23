@@ -31,14 +31,25 @@ The checks:
    8-byte port argument and is not sent: `accounts`'s host test holds it.
 4. **Unreachable.** `dial /net 10.0.2.98 8000`: an ARP request for
    10.0.2.98, which nobody answers, no SYN, and `dial` says it was refused.
+   Run before the refusals of 3: its ARP wait is the slowest, and 5's
+   control needs the last three failures quick.
 5. **The slots come back.** After those eight refusals, more than
    `MAX_DIAL` (3) connections' worth, a second good `dial` (port 8001)
    connects and is answered as in 2.
-6. No server called wedged or restarted, and no fault line in QEMU's
+   Only while the last three failures and that clone fall within
+   `LEAK_WINDOW_S` of each other, or a leaking `dial`'s slots would be
+   idle-reaped in time: a slower run is INCONCLUSIVE.
+6. **A closed slot is its client's until it closes it.** `dialprobe
+   10.0.2.98!8000`, in one process: clone slot A, `connect` to its `ctl`
+   fails (ARP unanswered, netd sets A `Closed`), and the next clone must
+   not be A; after `close` to A's `ctl`, the next clone is A again. Before
+   the review of #504 netd freed A on `Closed`, so a client's late `close`
+   could shut the slot's next owner.
+7. No server called wedged or restarted, and no fault line in QEMU's
    trace.
 
 Exit status: 0, 1 for a failed check, drive-qemu's INCONCLUSIVE for a boot
-the firmware never started.
+the firmware never started or a run too slow for check 5's control.
 """
 import importlib.util
 import os
@@ -69,6 +80,13 @@ QUIET_S = echo_reply.QUIET_S
 RIG = "test-net-dial"
 IMAGE = os.path.join(os.path.dirname(HERE), "build", "esp.img")
 PORT = 5672
+# netd idle-reaps a slot DIAL_IDLE_TICKS (600 ticks, 12 s) after its last
+# activity. The last three failed dials must clone within this of the second
+# good dial's clone for a leak to hold all MAX_DIAL slots there. The window is
+# timed from before the first of the three is typed to before the good dial is,
+# so it overstates the time between the clones by the typing; 1 s of margin
+# below the 12. About 9 s on 2026-11-23.
+LEAK_WINDOW_S = 11
 PEER_ISN = 0x20000000
 REQUEST = b"hello\r\n\r\n"
 ANSWER = b"dial-answer-%d\n"
@@ -132,6 +150,7 @@ def main():
         "-device", "virtio-net-device,netdev=net0",
     ), label="[net-dial] ")
     booted = False
+    slow = None
     try:
         conn, _ = lst.accept()
         conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -215,15 +234,20 @@ def main():
                       + ("" if "dial: connect refused" in out else f" (not refused; it said: {said(out)})")
                       + (f" (a SYN to port {tcp_of(syn)[2]})" if syn else ""))
 
+            def run(command, timeout=20):
+                """Type `command` and return what the guest said before the prompt."""
+                before = len(g.transcript())
+                g.type_line(command)
+                prompt(command)
+                return g.transcript()[before:]
+
             if logged_in:
                 good_dial(8000, 1)
-                refused("10.0.2.2", "65536", "a port past 65535")
-                refused("10.0.2.2", "99999", "a port of five digits past 65535")
-                refused("10.0.2.2", "80x", "a port that is not a number")
-                refused("256.0.2.2", "8000", "an address part past 255")
-                refused("0010.0.2.2", "8000", "an address part of four digits")
-                refused("10.0.2", "8000", "an address of three parts")
-                refused("10.0.2.2.5", "8000", "an address of five parts")
+                # The leak control below needs the last three failed dials to
+                # hold their slots together when good_dial(8001) clones: under
+                # netd's DIAL_IDLE_TICKS (12 s) of each other, or a leaking
+                # dial's slots are reaped in time and the control cannot fail.
+                window = {}
                 # Unreachable: the ARP request goes out, nobody answers it.
                 command = "dial /net 10.0.2.98 8000"
                 wire.drain()
@@ -237,7 +261,29 @@ def main():
                       f"`{command}` (nobody answers ARP): an ARP request, no SYN, and refused"
                       + ("" if asked else " (no ARP request)") + (" (a SYN)" if syn else "")
                       + ("" if "dial: connect refused" in out else f" (not refused; it said: {said(out)})"))
+                refused("10.0.2.2", "65536", "a port past 65535")
+                refused("10.0.2.2", "99999", "a port of five digits past 65535")
+                refused("10.0.2.2", "80x", "a port that is not a number")
+                refused("256.0.2.2", "8000", "an address part past 255")
+                window["start"] = time.monotonic()
+                refused("0010.0.2.2", "8000", "an address part of four digits")
+                refused("10.0.2", "8000", "an address of three parts")
+                refused("10.0.2.2.5", "8000", "an address of five parts")
+                window["end"] = time.monotonic()
                 good_dial(8001, 2)
+                slow = window["end"] - window["start"]
+                print(f"[net-dial] the last three failed dials took {slow:.1f} s (the window is {LEAK_WINDOW_S} s)", flush=True)
+                # A slot netd has closed is held until its client writes
+                # `close`: the review of #504 found that freeing it on `Closed`
+                # alone let the next clone reuse it, and the first client's
+                # late `close` then shut the new connection.
+                out = run("dialprobe 10.0.2.98!8000")
+                m = re.search(r"dialprobe: (\S) connect (\d+) (\S) (\S)", out)
+                a, status, b, c = m.groups() if m else ("?", "?", "?", "?")
+                check(m is not None and a.isdigit() and status != "0" and b.isdigit() and b != a,
+                      f"a slot netd closed (connect to 10.0.2.98, unanswered ARP) is not cloned again before its client closes it"
+                      + (f" (slot {a}, connect answered {status}, then slot {b})" if m else f" (it said: {said(out)})"))
+                check(m is not None and c == a, f"its client's `close` frees it for the next clone (slot {a}, then {c})")
             during = g.transcript()[mark:]
             wedged, restarted = during.count("wedged"), during.count("restarted")
             check(wedged == 0 and restarted == 0, f"no server called wedged or restarted ({wedged} wedged, {restarted} restarted)")
@@ -257,7 +303,12 @@ def main():
     if not booted:
         check(False, "the boot reaches netd and a login")
     check(faults == 0, f"no fault lines in QEMU's trace ({faults})")
-    return drive_qemu.verdict(RIG, sum(1 for ok, _ in checks if not ok), 0)
+    failed = sum(1 for ok, _ in checks if not ok)
+    if not failed and slow is not None and slow > LEAK_WINDOW_S:
+        print(f"{RIG}: INCONCLUSIVE, the last three failed dials took {slow:.1f} s, past {LEAK_WINDOW_S} s: "
+              "a leaking dial's slots could be reaped in time, so the leak control could not fail. Run it again")
+        return drive_qemu.INCONCLUSIVE
+    return drive_qemu.verdict(RIG, failed, 0)
 
 
 if __name__ == "__main__":

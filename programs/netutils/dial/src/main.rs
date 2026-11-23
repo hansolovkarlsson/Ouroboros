@@ -63,6 +63,10 @@ fn fail(msg: &[u8], target: u64) -> ! {
 /// the `close`, so the slot was held until `netd` reaped it idle, 12 s
 /// later, and with `MAX_DIAL` three such failures refused the next `dial`,
 /// anyone's, at its clone (found by `make test-net-dial`).
+/// A path too long to build is the one failure that cannot close: `close`
+/// builds the same `ctl` path, so those call [`fail`] and leave the slot to
+/// netd's idle reap. A `close` after netd has closed the slot itself is safe:
+/// netd keeps a `/net/tcp` slot until its client closes it (`Reap::WhenReleased`).
 fn fail_closed(msg: &[u8], target: u64, base: &str, n: u8) -> ! {
     close(base, n);
     fail(msg, target);
@@ -135,7 +139,7 @@ pub extern "C" fn _start() -> ! {
     push(&mut ctlbuf, &mut cw, port);
     let ctl_path = match join(base, Some(n), b"ctl", &mut pbuf) {
         Some(p) => p,
-        None => fail_closed(b"dial: path too long\r\n", target, base, n),
+        None => fail(b"dial: path too long\r\n", target),
     };
     if fs_write_inline(ctl_path, &ctlbuf[..cw]) >= syscall_abi::FS_ERR_MIN {
         fail_closed(b"dial: connect refused\r\n", target, base, n);
@@ -148,7 +152,7 @@ pub extern "C" fn _start() -> ! {
     for _ in 0..80 {
         let status_path = match join(base, Some(n), b"status", &mut pbuf) {
             Some(p) => p,
-            None => fail_closed(b"dial: path too long\r\n", target, base, n),
+            None => fail(b"dial: path too long\r\n", target),
         };
         let mut sbuf = [0u8; 16];
         let sn = read_file(status_path, &mut sbuf).unwrap_or(0);
@@ -182,7 +186,7 @@ pub extern "C" fn _start() -> ! {
         push(&mut reqbuf, &mut rw, b"\r\n\r\n");
         let data_path = match join(base, Some(n), b"data", &mut pbuf) {
             Some(p) => p,
-            None => fail_closed(b"dial: path too long\r\n", target, base, n),
+            None => fail(b"dial: path too long\r\n", target),
         };
         let _ = fs_write_inline(data_path, &reqbuf[..rw]);
     }
