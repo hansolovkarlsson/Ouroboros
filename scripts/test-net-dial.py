@@ -66,7 +66,12 @@ The checks:
    8002) after them connects: a `Listening` slot is never idle-reaped, so
    before 2026-11-23, when `serve` closed it only on success, the three held
    every slot for the rest of the boot.
-9. No server called wedged or restarted, and no fault line in QEMU's
+9. **A listener's close takes its unhanded connections.** `serve /net
+   9100 hi` is sent two SYNs; the first client completes and is served, and
+   the second, accepted and never handed out by `listen`, must be reset when
+   `serve` closes its listener. The next `serve /net 9101`, on the same slot,
+   must time out, not be handed that connection (the review of #505).
+10. No server called wedged or restarted, and no fault line in QEMU's
    trace.
 
 Exit status: 0, 1 for a failed check, drive-qemu's INCONCLUSIVE for a boot
@@ -115,10 +120,15 @@ CLIENT_EARLY = 43010
 EARLY_REQUEST = b"early-request\r\n"
 AGAIN_REQUEST = b"again-request\r\n"
 EARLY_WAIT_MS = 3000
-# netd's /net/tcp slots, and how long a `serve` nobody connects to may take to
-# give up (its 6000 listen polls).
-MAX_DIAL = 3
+# netd's /net/tcp slots, read off netd's source rather than copied: with more
+# slots than leaked listeners, the serve check below could not fail (the
+# review of #505). And how long a `serve` nobody connects to may take to give
+# up (its 6000 listen polls).
+with open(os.path.join(HERE, "..", "programs", "servers", "netd", "src", "main.rs")) as fh:
+    MAX_DIAL = int(re.search(r"^const MAX_DIAL: usize = (\d+);", fh.read(), re.M).group(1))
 SERVE_TIMEOUT_S = 120
+# The far ports of the two clients the listener check opens.
+CLIENT_A, CLIENT_B = 43001, 43002
 PEER_ISN = 0x20000000
 REQUEST = b"hello\r\n\r\n"
 ANSWER = b"dial-answer-%d\n"
@@ -401,6 +411,48 @@ def main():
                           f"`{command}`, nobody connecting, times out ({time.monotonic() - started:.1f} s)"
                           + ("" if ended and "timed out" in out else f" (it said: {said(out)})"))
                 good_dial(8002, 3)
+                # A listener's close takes the connections it accepted and
+                # `listen` never handed out: before the review of #505 they
+                # outlived it, still naming its slot their parent, and the
+                # slot's next owner's first `listen` was handed one.
+                command = "serve /net 9100 hi"
+                wire.drain()
+                before = len(g.transcript())
+                g.type_line(command)
+                listening = g.wait_for("listening on 9100", timeout=20)
+                synacks = {}
+                if listening:
+                    for cport in (CLIENT_A, CLIENT_B):
+                        wire.send(segment(guest_mac, guest_ip, cport, 9100, PEER_ISN, 0, SYN))
+                        sa = wire.wait(lambda f, cport=cport: (x := tcp_of(f)) is not None and x[1] == 9100
+                                       and x[2] == cport and x[5] & (SYN | ACK) == SYN | ACK, 5)
+                        if sa:
+                            synacks[cport] = tcp_of(sa)
+                a_sa = synacks.get(CLIENT_A)
+                if a_sa:
+                    # Client A completes its handshake with a request; B never does.
+                    wire.send(segment(guest_mac, guest_ip, CLIENT_A, 9100, PEER_ISN + 1, a_sa[3] + 1, PSH | ACK, b"req\r\n"))
+                reset = wire.wait(lambda f: (x := tcp_of(f)) is not None and x[1] == 9100 and x[2] == CLIENT_B
+                                  and x[5] & RST, 20) if len(synacks) == 2 else None
+                prompt(command)
+                out = g.transcript()[before:]
+                fin = wire.wait(lambda f: (x := tcp_of(f)) is not None and x[1] == 9100 and x[2] == CLIENT_A and x[5] & FIN, 3.0)
+                if fin:
+                    x = tcp_of(fin)
+                    wire.send(segment(guest_mac, guest_ip, CLIENT_A, 9100, x[4], x[3] + 1 + len(x[6]), ACK))
+                check(listening and len(synacks) == 2 and "served + closed" in out,
+                      f"`{command}` answers two SYNs and serves the first client"
+                      + ("" if listening else " (never listening)") + f" ({len(synacks)} SYN-ACKs)"
+                      + ("" if "served + closed" in out else f" (it said: {said(out)})"))
+                check(reset is not None, "its listener's close resets the second client, accepted and never handed out")
+                command = "serve /net 9101"
+                before = len(g.transcript())
+                g.type_line(command)
+                ended = g.wait_for("# ", timeout=SERVE_TIMEOUT_S)
+                out = g.transcript()[before:]
+                check(ended and "timed out" in out and "accepted;" not in out,
+                      f"`{command}`, on the slot again, is handed no connection to the old port and times out"
+                      + ("" if ended and "timed out" in out and "accepted;" not in out else f" (it said: {said(out)})"))
             during = g.transcript()[mark:]
             wedged, restarted = during.count("wedged"), during.count("restarted")
             check(wedged == 0 and restarted == 0, f"no server called wedged or restarted ({wedged} wedged, {restarted} restarted)")

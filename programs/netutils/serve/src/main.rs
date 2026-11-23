@@ -59,8 +59,10 @@ fn fail(msg: &[u8], target: u64) -> ! {
 /// ended without the `close`, and a `Listening` slot is never idle-reaped, so
 /// the slot was held for the rest of the boot; three such runs refused every
 /// `dial` and `serve` after them at the clone (the second review of #504).
-/// A path too long to build is the one failure that cannot close: `close`
-/// builds the same `ctl` path, so those call [`fail`].
+/// The "path too long" failures after the clone close too. They cannot
+/// happen today (a base of at most 96 bytes, a 128-byte buffer, and a
+/// `/tcp/N/<leaf>` suffix of ASCII), and if one did, `close` would only
+/// fail as well where its own `ctl` path did, which is shorter than `listen`'s.
 fn fail_closed(msg: &[u8], target: u64, base: &str, n: u8) -> ! {
     close(base, n);
     fail(msg, target);
@@ -125,7 +127,7 @@ pub extern "C" fn _start() -> ! {
     push(&mut ctlbuf, &mut cw, port);
     let ctl_path = match join(base, Some(n), b"ctl", &mut pbuf) {
         Some(p) => p,
-        None => fail(b"serve: path too long\r\n", target),
+        None => fail_closed(b"serve: path too long\r\n", target, base, n),
     };
     if fs_write_inline(ctl_path, &ctlbuf[..cw]) >= syscall_abi::FS_ERR_MIN {
         fail_closed(b"serve: announce refused\r\n", target, base, n);
@@ -140,7 +142,7 @@ pub extern "C" fn _start() -> ! {
     for _ in 0..6000 {
         let listen_path = match join(base, Some(n), b"listen", &mut pbuf) {
             Some(p) => p,
-            None => fail(b"serve: path too long\r\n", target),
+            None => fail_closed(b"serve: path too long\r\n", target, base, n),
         };
         let mut lbuf = [0u8; 16];
         let ln = read_file(listen_path, &mut lbuf).unwrap_or(0);
@@ -194,9 +196,11 @@ pub extern "C" fn _start() -> ! {
         push(&mut resp, &mut rw, b"hello from Ouroboros /net/tcp");
     }
     push(&mut resp, &mut rw, b"\r\n");
-    if let Some(data_path) = join(base, Some(m), b"data", &mut pbuf) {
-        let _ = fs_write_inline(data_path, &resp[..rw]);
-    }
+    let Some(data_path) = join(base, Some(m), b"data", &mut pbuf) else {
+        close(base, m);
+        fail_closed(b"serve: path too long\r\n", target, base, n);
+    };
+    let _ = fs_write_inline(data_path, &resp[..rw]);
 
     // 6. close the accepted connection (netd flushes the response, then FINs -
     // it holds the conn independent of this program's lifetime).
