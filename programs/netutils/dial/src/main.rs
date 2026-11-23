@@ -57,6 +57,25 @@ fn fail(msg: &[u8], target: u64) -> ! {
     exit(1);
 }
 
+/// [`fail`] once the clone has given this program connection `n`: close it
+/// first. Until 2026-11-22 every failure after the clone (a refused
+/// `connect`, a refused or closed connection, a timeout) ended here without
+/// the `close`, so the slot was held until `netd` reaped it idle, 12 s
+/// later, and with `MAX_DIAL` three such failures refused the next `dial`,
+/// anyone's, at its clone (found by `make test-net-dial`).
+fn fail_closed(msg: &[u8], target: u64, base: &str, n: u8) -> ! {
+    close(base, n);
+    fail(msg, target);
+}
+
+/// Write `close` to connection `n`'s `ctl`.
+fn close(base: &str, n: u8) {
+    let mut pbuf = [0u8; 128];
+    if let Some(ctl_path) = join(base, Some(n), b"ctl", &mut pbuf) {
+        let _ = fs_write_inline(ctl_path, b"close");
+    }
+}
+
 /// Read a `/net/tcp` file into `buf`; returns the byte count, or `None` on error.
 fn read_file(path: &str, buf: &mut [u8]) -> Option<usize> {
     let r = fs_read_file(path, buf);
@@ -116,10 +135,10 @@ pub extern "C" fn _start() -> ! {
     push(&mut ctlbuf, &mut cw, port);
     let ctl_path = match join(base, Some(n), b"ctl", &mut pbuf) {
         Some(p) => p,
-        None => fail(b"dial: path too long\r\n", target),
+        None => fail_closed(b"dial: path too long\r\n", target, base, n),
     };
     if fs_write_inline(ctl_path, &ctlbuf[..cw]) >= syscall_abi::FS_ERR_MIN {
-        fail(b"dial: connect refused\r\n", target);
+        fail_closed(b"dial: connect refused\r\n", target, base, n);
     }
 
     // 3. poll status until Established (or Closed/error). Each read is a blocking
@@ -129,7 +148,7 @@ pub extern "C" fn _start() -> ! {
     for _ in 0..80 {
         let status_path = match join(base, Some(n), b"status", &mut pbuf) {
             Some(p) => p,
-            None => fail(b"dial: path too long\r\n", target),
+            None => fail_closed(b"dial: path too long\r\n", target, base, n),
         };
         let mut sbuf = [0u8; 16];
         let sn = read_file(status_path, &mut sbuf).unwrap_or(0);
@@ -138,11 +157,11 @@ pub extern "C" fn _start() -> ! {
             break;
         }
         if sbuf[..sn].starts_with(b"Closed") {
-            fail(b"dial: connection refused / closed\r\n", target);
+            fail_closed(b"dial: connection refused / closed\r\n", target, base, n);
         }
     }
     if !established {
-        fail(b"dial: connect timed out\r\n", target);
+        fail_closed(b"dial: connect timed out\r\n", target, base, n);
     }
 
     // 4. optional request: the remaining args joined by spaces, then CRLF.
@@ -163,7 +182,7 @@ pub extern "C" fn _start() -> ! {
         push(&mut reqbuf, &mut rw, b"\r\n\r\n");
         let data_path = match join(base, Some(n), b"data", &mut pbuf) {
             Some(p) => p,
-            None => fail(b"dial: path too long\r\n", target),
+            None => fail_closed(b"dial: path too long\r\n", target, base, n),
         };
         let _ = fs_write_inline(data_path, &reqbuf[..rw]);
     }
@@ -201,9 +220,7 @@ pub extern "C" fn _start() -> ! {
     }
 
     // 6. close.
-    if let Some(ctl_path) = join(base, Some(n), b"ctl", &mut pbuf) {
-        let _ = fs_write_inline(ctl_path, b"close");
-    }
+    close(base, n);
     ulib::end_of_stream(target);
     exit(0);
 }
