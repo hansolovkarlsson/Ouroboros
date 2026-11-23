@@ -7001,6 +7001,11 @@ fn pump_dials<const S: usize, const R: usize, const H: usize, const K: usize>(ma
             let was_open = c.state == DialState::Established;
             if idle && c.parked.is_none() && was_open {
                 c.state = DialState::Closing;
+                // The reap has decided to free it, so it is released: waiting
+                // at `Closed` for a `close` from a client that has gone quiet
+                // would hold the slot a second idle period (the fifth review
+                // of #504).
+                c.released = true;
             }
             // `was_open`, not the state after the line above: reaping on the
             // same pass that sets Closing would free the slot before the
@@ -7052,9 +7057,14 @@ fn dial_on_segment<const S: usize, const R: usize, const H: usize, const K: usiz
         // on the same 4-tuple wants them, and a bare SYN goes on to
         // `dial_accept`: a client reconnecting from the port of a connection
         // still held Closed was ignored for up to the idle reap (the fourth
+        // review of #504). Only a SYN past everything the closed connection
+        // received is a new one, as in TCP's own rule for a SYN on a 4-tuple
+        // in TIME-WAIT: a late copy of the first connection's SYN, passed on,
+        // was accepted as a connection with no client behind it (the fifth
         // review of #504).
         if c.state == DialState::Closed {
-            closed_match |= s.flags & TCP_SYN == 0 || s.flags & TCP_ACK != 0;
+            let fresh = s.flags & TCP_SYN != 0 && s.flags & TCP_ACK == 0 && !seq_gt(c.rcv_nxt, s.seq);
+            closed_match |= !fresh;
             continue;
         }
         c.last_activity = t;

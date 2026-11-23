@@ -48,11 +48,14 @@ The checks:
    the review of #504 netd freed A on `Closed`, so a client's late `close`
    could shut the slot's next owner.
 7. **A client that closes before `listen` is read is still handed out.**
-   `dialprobe accept 9200 2000` announces and sleeps before reading
+   `dialprobe accept 9200 3000` announces and sleeps before reading
    `listen`; in that time the script connects and sends its request with a
    FIN. The read must hand the connection out, request whole: before the
    third review of #504 netd freed it on `Closed` with the request unread.
-   Then, with that connection held `Closed`, the client reconnects from
+   While the probe holds that connection `Closed`, the script resends its
+   first SYN: it must get no SYN-ACK (before the fifth review that late
+   copy was accepted, a connection with no client). Then the client
+   reconnects from
    the same port, and the probe's second `listen` read must hand the new
    one out: before the fourth review a bare SYN on a `Closed` slot's
    4-tuple was used up there. Each client's FIN must reach netd before the
@@ -106,7 +109,7 @@ LEAK_WINDOW_S = 11
 CLIENT_EARLY = 43010
 EARLY_REQUEST = b"early-request\r\n"
 AGAIN_REQUEST = b"again-request\r\n"
-EARLY_WAIT_MS = 2000
+EARLY_WAIT_MS = 3000
 PEER_ISN = 0x20000000
 REQUEST = b"hello\r\n\r\n"
 ANSWER = b"dial-answer-%d\n"
@@ -348,6 +351,14 @@ def main():
 
                 early, early_in_time = connect_early(PEER_ISN, EARLY_REQUEST) if listening else (None, None)
                 first = g.wait_for("dialprobe: accepted", timeout=10)
+                # A late copy of the first connection's SYN, while that
+                # connection is held Closed, is not a new one: the fifth
+                # review of #504 found it accepted, a connection with no
+                # client behind it holding a slot.
+                if first:
+                    wire.send(segment(guest_mac, guest_ip, CLIENT_EARLY, 9200, PEER_ISN, 0, SYN))
+                    stale = wire.wait(lambda f: (x := tcp_of(f)) is not None and x[1] == 9200 and x[2] == CLIENT_EARLY
+                                      and x[5] & (SYN | ACK) == SYN | ACK, 1.0)
                 again, again_in_time = connect_early(PEER_ISN + 0x1000, AGAIN_REQUEST) if first else (None, None)
                 prompt(command)
                 out = g.transcript()[before:]
@@ -361,6 +372,9 @@ def main():
                 check(again is not None and rehanded is not None and rehanded.group(2) == AGAIN_REQUEST.decode().strip(),
                       f"the client reconnecting from that port while its first connection is held Closed is accepted and handed out"
                       + ("" if again else " (no SYN-ACK)") + ("" if rehanded else f" (it said: {said(out)})"))
+                check(first and not stale,
+                      "a late copy of the first connection's SYN, while that connection is held Closed, gets no SYN-ACK"
+                      + ("" if first else " (the first connection was never handed out)"))
                 for ok, what in ((early_in_time, "the first client's FIN"), (again_in_time, "the reconnected client's FIN")):
                     if ok is False:
                         unforced.append(f"netd took {what} after dialprobe's `listen` read, so its check did not test the close before the read")

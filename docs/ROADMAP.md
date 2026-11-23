@@ -5175,6 +5175,21 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   `close` land on the new connection. Closing it needs an owner or a
   generation on each slot that `ctl` and `data` check. Found by the second
   review of #504, 2026-11-23.
+- **A `/net/tcp` client killed after its peer closed holds its slot 12 s.**
+  Since #504 a slot netd has set `Closed` waits for its client's `close`, so a
+  `dial` killed in that window holds the slot until the idle reap, where
+  before it was freed at once. Kept on purpose: freeing on `Closed` alone is
+  the bug the first review of #504 found. A slot owner (the item above), seen
+  dead by netd, would free it at once. Found by the fifth review of #504,
+  2026-11-23.
+- **netd's `/net/tcp` slot rules as a pure, host-tested function.** Reviews
+  two to five of #504 each found a bug in the previous round's fix, all in
+  when a slot is freed (`pump_dials`, `Reap`, the `close` arm) and which
+  segments reach it (`dial_on_segment`'s `Closed` arm, `dial_accept`). The
+  rules have no host tests, and `test-net-dial` reaches only some states.
+  Taken out into a crate like `heldkeys` (the state, `released`, `pending`,
+  `parked`, the clock and the segment in; free, keep or pass on out), every
+  change to them would be checked against every state. Recorded 2026-11-23.
 - **Every read of `/net/tcp/clone` allocates a slot, and `cat` reads it
   until it fails.** `dial_file_op`'s clone arm ignores the read's offset, so
   `cat /net/tcp/clone` printed `0`, `1` and `2` and then `cat: disk full`,
