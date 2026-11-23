@@ -46,7 +46,18 @@ The checks:
    one answers), `ping 10.0.2.2` (the echo reply withheld), `resolve
    foo.test` (the DNS answer withheld), and `fetch foo.test` twice over,
    its DNS answered with 10.0.2.2, once at its SYN (the SYN-ACK withheld)
-   and once at its request (the response withheld, then a RST).
+   and once at its request (the response withheld, then a RST). Into
+   each wait a SYN to the HTTP server goes too, sent once and never
+   again: it must be answered with a SYN-ACK when the op has ended, since
+   `netd` keeps a frame its wait does not take and hands it on after
+   (its `Backlog`, since 2026-11-22; before, the wait dropped it and only
+   a retransmission was answered).
+4c. **More than `netd` keeps.** Into one wait (`ping 10.0.2.98`'s ARP
+   resolve) `NOISE` UDP datagrams, which `netd` must not keep, then `FLOOD`
+   SYNs to port 80 from as many ports. Exactly the first `KEPT` are
+   answered when the wait ends (a SYN-ACK or, the server's slots full, a
+   refusing RST), the rest logged lost in one line, `FLOOD - KEPT`; and an
+   echo request is answered after.
 5. No server called wedged or restarted (a `netd` that panicked on a
    frame is restarted, and its next request may still be answered), and no
    fault line in QEMU's trace.
@@ -113,6 +124,12 @@ BCAST_IP = bytes([10, 0, 2, 255])
 QUIET_S = 1.5
 REPLY_S = 3.0
 BURST = 40
+# Frames sent into one op's wait, and how many of them netd keeps
+# (BACKLOG_FRAMES in netd's main.rs).
+FLOOD = 40
+KEPT = 16
+# UDP datagrams sent into that wait before the flood: netd keeps none.
+NOISE = 20
 ECHO_ID = 0x5151
 # IP options whose words sum to zero in one's complement (0x0800 + 0xF7FF),
 # so the first 20 bytes' checksum holds too, and whose first byte is 8: a
@@ -140,6 +157,13 @@ class Wire:
         self.conn = conn
         self.frames = queue.Queue()
         self.guest_ip = None
+        # The guest's SYN-ACKs from port 80, by the port they answer: when
+        # each was seen. Recorded as they arrive, so no `wait` for another
+        # frame can drop one.
+        self.synacks = {}
+        # Every port the guest's port 80 first answered, a SYN-ACK or a RST,
+        # and with which flags: how 4c counts the SYNs `netd` kept.
+        self.from80 = {}
         threading.Thread(target=self._reader, daemon=True).start()
 
     def send(self, frame):
@@ -162,6 +186,11 @@ class Wire:
                 if frame[12:14] == b"\x08\x06" and frame[20:22] == b"\x00\x01" and frame[38:42] in (PEER_IP, DNS_IP):
                     self.send(arp(2, PEER_MAC, frame[38:42], frame[22:28], frame[28:32], frame[22:28]))
                     continue
+                t = guest_tcp(frame)
+                if t is not None and t[0] == 80 and t[3] & 0x12 == 0x12:
+                    self.synacks.setdefault(t[1], time.monotonic())
+                if t is not None and t[0] == 80:
+                    self.from80.setdefault(t[1], t[3])
                 self.frames.put(frame)
         except (EOFError, OSError):
             pass
@@ -255,6 +284,15 @@ def tcp_frame(guest_mac, guest_ip, sport, dport, seq, ack, flags):
     ip = struct.pack(">BBHHHBBH4s4s", 0x45, 0, 20 + len(tcp), 0, 0, 64, 6, 0, PEER_IP, guest_ip)
     ip = ip[:10] + struct.pack(">H", csum(ip)) + ip[12:]
     return guest_mac + PEER_MAC + b"\x08\x00" + ip + tcp
+
+
+def udp_frame(guest_mac, guest_ip, sport, dport, data):
+    """A UDP datagram from PEER_IP to the guest, no UDP checksum (zero,
+    allowed over IPv4): a frame `netd` has no use for."""
+    u = struct.pack(">HHHH", sport, dport, 8 + len(data), 0) + data
+    ip = struct.pack(">BBHHHBBH4s4s", 0x45, 0, 20 + len(u), 0, 0, 64, 17, 0, PEER_IP, guest_ip)
+    ip = ip[:10] + struct.pack(">H", csum(ip)) + ip[12:]
+    return guest_mac + PEER_MAC + b"\x08\x00" + ip + u
 
 
 def dns_answer(guest_mac, guest_ip, query, addr):
@@ -389,12 +427,18 @@ def main():
                 logged_in = g.run([("login:", "root"), ("assword", "root"), ("# ", "")])
                 check(logged_in, "the guest's shell logs in")
                 probe_seq = [200]
+                syns = []
 
                 def probe(what):
-                    """An echo request and an ARP request into netd's wait, now; both
-                    must be answered."""
+                    """An echo request, an ARP request and a SYN to the HTTP server
+                    into netd's wait, now. The echo and ARP requests must be
+                    answered in the wait; the SYN, sent once and never again, is
+                    judged when the op has ended (`syn_answered`)."""
                     probe_seq[0] += 1
                     seq = struct.pack(">H", probe_seq[0])
+                    port = 41000 + probe_seq[0]
+                    syns.append((port, what, time.monotonic()))
+                    wire.send(tcp_frame(guest_mac, guest_ip, port, 80, PEER_ISN, 0, 0x02))
                     wire.send(e(probe_seq[0], b"waiting"))
                     wire.send(arp(1, PEER_MAC, PEER_IP, b"\0" * 6, guest_ip, b"\xff" * 6))
                     want = {"echo", "arp"}
@@ -420,6 +464,24 @@ def main():
 
                 def back_at_prompt(command):
                     check(g.wait_for("# ", timeout=20), f"`{command}` ends and the shell prompts again")
+                    syn_answered()
+
+                def syn_answered():
+                    """Each SYN sent into a wait since the last call answered with a
+                    SYN-ACK, though it was sent once: kept while the op waited and
+                    handed to the HTTP server when it returned. Until 2026-11-22
+                    the wait dropped it, and only a retransmission was answered.
+                    Then the half-open connection is reset, so the four slots of
+                    `netd`'s server are free for the next."""
+                    for port, what, sent in syns:
+                        end = time.monotonic() + REPLY_S
+                        while port not in wire.synacks and time.monotonic() < end:
+                            time.sleep(0.05)
+                        at = wire.synacks.get(port)
+                        check(at is not None, f"while netd waits on {what}: a SYN to port 80, sent once, answered"
+                              + (f" {at - sent:.1f} s after it was sent" if at else " (no SYN-ACK)"))
+                        wire.send(tcp_frame(guest_mac, guest_ip, port, 80, PEER_ISN + 1, 0, 0x04))
+                    syns.clear()
 
                 is_arp_for = lambda ip: (lambda f: f[12:14] == b"\x08\x06" and f[20:22] == b"\x00\x01" and f[38:42] == ip)
                 if logged_in:
@@ -450,6 +512,34 @@ def main():
                                 _, _, rseq, _, rlen = guest_tcp(req)
                                 wire.send(tcp_frame(guest_mac, guest_ip, 80, sport, PEER_ISN + 1, rseq + rlen, 0x14))
                     back_at_prompt("fetch foo.test")
+                    # 4c: more frames into one wait than netd keeps. UDP first,
+                    # which it must not keep (only TCP is anything on_frame acts
+                    # on), then SYNs to port 80 from FLOOD ports: each one kept is
+                    # answered when the wait ends (a SYN-ACK while one of the
+                    # server's four slots is free, a refusing RST after), each
+                    # one lost is not. Exact counts, so a backlog of another
+                    # size, kept UDP or kept frames never handed on all fail.
+                    lost_mark = len(g.transcript())
+                    ports = [42000 + i for i in range(FLOOD)]
+                    if start("ping 10.0.2.98", is_arp_for(NOBODY_IP), "an ARP request for 10.0.2.98"):
+                        for i in range(NOISE):
+                            wire.send(udp_frame(guest_mac, guest_ip, 5000, 9, b"noise %d" % i))
+                        for port in ports:
+                            wire.send(tcp_frame(guest_mac, guest_ip, port, 80, PEER_ISN, 0, 0x02))
+                    back_at_prompt("ping 10.0.2.98")
+                    time.sleep(QUIET_S)
+                    lost = re.findall(r"netd: a client op's wait lost (\d+) frames", g.transcript()[lost_mark:])
+                    heard = [p for p in ports if p in wire.from80]
+                    check(len(lost) == 1 and int(lost[0]) == FLOOD - KEPT,
+                          f"{NOISE} UDP datagrams and {FLOOD} SYNs sent into one wait: {FLOOD - KEPT} counted lost, in one line"
+                          + f" ({', '.join(lost) or 'no line'})")
+                    check(heard == ports[:KEPT],
+                          f"the first {KEPT} SYNs of the flood answered when the wait ended, and none after them"
+                          + f" ({len(heard)} answered, {'the first ' + str(KEPT) if heard == ports[:KEPT] else heard})")
+                    for port in heard:
+                        if wire.from80[port] & 0x12 == 0x12:
+                            wire.send(tcp_frame(guest_mac, guest_ip, port, 80, PEER_ISN + 1, 0, 0x04))
+                    answered(e(300, b"after the flood"), "a request after the flood")
             during = g.transcript()[mark:]
             wedged, restarted = during.count("wedged"), during.count("restarted")
             check(wedged == 0 and restarted == 0, f"no server called wedged or restarted ({wedged} wedged, {restarted} restarted)")
