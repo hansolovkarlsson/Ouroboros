@@ -5166,6 +5166,15 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   connection's idle clock). So C's `stat` refuses every `/net` path with
   `ENOSYS` for now (#223), and `ls -l /net/tcp` would meet the same. Found by
   the third review of #223, 2026-10-06.
+- **A `/net/tcp` slot has no owner, so its idle reap can hand it to a new
+  client while the old one still holds its number.** Since #504 netd keeps
+  a `Closed` slot until its client writes `close` (`Reap::WhenReleased`), but
+  the 12 s idle reap (`DIAL_IDLE_TICKS`) still frees a slot whose client is
+  only silent: `dial ... | more` waiting on a key past 12 s. The next clone
+  takes the number, and the first client's later `data` reads and its
+  `close` land on the new connection. Closing it needs an owner or a
+  generation on each slot that `ctl` and `data` check. Found by the second
+  review of #504, 2026-11-23.
 - **Every read of `/net/tcp/clone` allocates a slot, and `cat` reads it
   until it fails.** `dial_file_op`'s clone arm ignores the read's offset, so
   `cat /net/tcp/clone` printed `0`, `1` and `2` and then `cat: disk full`,

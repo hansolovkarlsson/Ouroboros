@@ -41,8 +41,10 @@ The checks:
    idle-reaped in time: a slower run is INCONCLUSIVE.
 6. **A closed slot is its client's until it closes it.** `dialprobe
    10.0.2.98!8000`, in one process: clone slot A, `connect` to its `ctl`
-   fails (ARP unanswered, netd sets A `Closed`), and the next clone must
-   not be A; after `close` to A's `ctl`, the next clone is A again. Before
+   fails (ARP unanswered, netd sets A `Closed`, `NO_FS`), a second
+   `connect` to it is refused (`FS_ERROR`: a slot connects once, from
+   `Idle`), and the next clone must not be A; after `close` to A's `ctl`,
+   the next clone is A again. Before
    the review of #504 netd freed A on `Closed`, so a client's late `close`
    could shut the slot's next owner.
 7. No server called wedged or restarted, and no fault line in QEMU's
@@ -83,9 +85,9 @@ PORT = 5672
 # netd idle-reaps a slot DIAL_IDLE_TICKS (600 ticks, 12 s) after its last
 # activity. The last three failed dials must clone within this of the second
 # good dial's clone for a leak to hold all MAX_DIAL slots there. The window is
-# timed from before the first of the three is typed to before the good dial is,
-# so it overstates the time between the clones by the typing; 1 s of margin
-# below the 12. About 9 s on 2026-11-23.
+# timed from before the first of the three is typed to the good dial's SYN on
+# the wire, so it holds both clones and overstates the time between them by
+# the first one's typing; 1 s of margin below the 12.
 LEAK_WINDOW_S = 11
 PEER_ISN = 0x20000000
 REQUEST = b"hello\r\n\r\n"
@@ -180,14 +182,18 @@ def main():
             def prompt(command):
                 check(g.wait_for("# ", timeout=20), f"`{command}` ends and the shell prompts again")
 
-            def good_dial(port, n):
+            def good_dial(port, n, window=None):
                 """`dial` to the peer's `port`, served by this script: SYN-ACK,
-                the request read, the answer sent with a FIN."""
+                the request read, the answer sent with a FIN. With `window`,
+                its "end" is the moment the SYN is seen: the clone is done by
+                then."""
                 command = f"dial /net 10.0.2.2 {port} hello"
                 wire.drain()
                 before = len(g.transcript())
                 g.type_line(command)
                 syn = wire.wait(is_syn, 15)
+                if window is not None:
+                    window["end"] = time.monotonic()
                 t = tcp_of(syn) if syn else None
                 check(t is not None and t[0] == PEER_IP and t[2] == port,
                       f"`{command}`: the guest's SYN goes to 10.0.2.2 port {port}"
@@ -269,20 +275,21 @@ def main():
                 refused("0010.0.2.2", "8000", "an address part of four digits")
                 refused("10.0.2", "8000", "an address of three parts")
                 refused("10.0.2.2.5", "8000", "an address of five parts")
-                window["end"] = time.monotonic()
-                good_dial(8001, 2)
-                slow = window["end"] - window["start"]
+                good_dial(8001, 2, window)
+                slow = window.get("end", time.monotonic()) - window["start"]
                 print(f"[net-dial] the last three failed dials took {slow:.1f} s (the window is {LEAK_WINDOW_S} s)", flush=True)
                 # A slot netd has closed is held until its client writes
                 # `close`: the review of #504 found that freeing it on `Closed`
                 # alone let the next clone reuse it, and the first client's
                 # late `close` then shut the new connection.
                 out = run("dialprobe 10.0.2.98!8000")
-                m = re.search(r"dialprobe: (\S) connect (\d+) (\S) (\S)", out)
-                a, status, b, c = m.groups() if m else ("?", "?", "?", "?")
-                check(m is not None and a.isdigit() and status != "0" and b.isdigit() and b != a,
+                m = re.search(r"dialprobe: (\S) connect (\S+) again (\S+) (\S) (\S)", out)
+                a, status, again, b, c = m.groups() if m else ("?",) * 5
+                check(m is not None and a.isdigit() and status == "NO_FS" and b.isdigit() and b != a,
                       f"a slot netd closed (connect to 10.0.2.98, unanswered ARP) is not cloned again before its client closes it"
                       + (f" (slot {a}, connect answered {status}, then slot {b})" if m else f" (it said: {said(out)})"))
+                check(m is not None and again == "FS_ERROR",
+                      f"a second `connect` on that closed slot is refused at once (FS_ERROR, answered {again})")
                 check(m is not None and c == a, f"its client's `close` frees it for the next clone (slot {a}, then {c})")
             during = g.transcript()[mark:]
             wedged, restarted = during.count("wedged"), during.count("restarted")

@@ -4078,8 +4078,12 @@ struct Wire<const S: usize, const R: usize, const H: usize, const K: usize> {
     /// The client wrote `close` to this slot's `ctl`. Under
     /// [`Reap::WhenReleased`] (the `/net/tcp` table) a `Closed` slot is freed
     /// only once this is set, or after the idle reap, so a client's late
-    /// `close` can never reach the slot's next owner. Never set on the remote
-    /// and session tables, which reap under [`Reap::WhenClosed`].
+    /// `close` does not reach the slot's next owner. The idle reap is the
+    /// exception: it frees a slot its client still holds, a client silent for
+    /// `DIAL_IDLE_TICKS` (12 s), and the slot's next owner can then meet that
+    /// client's late `data` and `close`. Closing it needs an owner check on
+    /// every slot (docs/ROADMAP.md). Never set on the remote and session
+    /// tables, which reap under [`Reap::WhenClosed`].
     released: bool,
     /// A remote slot's parked request (`None` on every dial, and on a remote
     /// slot once its reply has gone out or its caller has been given up on).
@@ -6723,6 +6727,14 @@ fn dial_file_op(
 
     if leaf == b"ctl" && is_write {
         // "connect a.b.c.d!port" or "close".
+        // A slot is connected or announced once, from `Idle`. A slot netd has
+        // closed stays allocated until its client writes `close`
+        // (`Reap::WhenReleased`), and a second `connect` on it would reuse the
+        // failed attempt's ISN, buffers and flags (the second review of #504).
+        let idle = dials[n].as_ref().is_some_and(|c| c.state == DialState::Idle);
+        if (data_in.starts_with(b"connect ") || data_in.starts_with(b"announce ")) && !idle {
+            return (syscall_abi::FS_ERROR, 0);
+        }
         if data_in.starts_with(b"connect ") {
             let Some((ip, port)) = parse_connect(data_in) else {
                 return (syscall_abi::FS_ERR_INVALID_NAME, 0);
@@ -6762,13 +6774,19 @@ fn dial_file_op(
         }
         if data_in.starts_with(b"close") {
             let c = dials[n].as_mut().unwrap();
-            c.released = true;
             if c.state == DialState::Established {
+                // Its FIN still to send: the pump frees it once Closed.
+                c.released = true;
                 c.state = DialState::Closing;
+                c.last_activity = now();
             } else {
-                c.state = DialState::Closed;
+                // Nothing left to send: free it here, so the client's next
+                // clone can have it whatever order the loop's steps run in.
+                // Waiting for the pump made `dialprobe`'s third clone depend
+                // on the pump running between two client calls (the second
+                // review of #504).
+                dials[n] = None;
             }
-            c.last_activity = now();
             return (0, 0);
         }
         return (syscall_abi::FS_ERR_INVALID_NAME, 0);
@@ -6838,13 +6856,6 @@ fn dial_file_op(
     (syscall_abi::FS_ERR_NOT_FOUND, 0)
 }
 
-/// Event-loop step: drive every active dial connection - (re)send its SYN while
-/// Connecting, stream queued send data (stop-and-wait) and retransmit it, send
-/// the FIN while Closing, and reap idle slots. Called each `serve` pass, once
-/// per table. `idle_ticks` is that table's idle reap: `DIAL_IDLE_TICKS` for a
-/// dial or a parked path verb, `CLIENT_SESSION_IDLE_TICKS` for a held session,
-/// which must outlive the far side's own reap (see there).
-#[allow(clippy::needless_range_loop)] // index needed for the reap re-borrow
 /// When [`pump_dials`] frees a `Closed` slot. A parameter of the pump, not a
 /// default, so each table states which it is.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -6852,15 +6863,23 @@ enum Reap {
     /// Once its receive buffer is drained: the remote and session tables,
     /// whose only user is netd itself.
     WhenClosed,
-    /// Once its client has written `close` (`Wire::released`): the
-    /// `/net/tcp` table, whose slots a client holds by number. Freed on
-    /// `Closed` alone, a slot could be cloned by the next client before the
-    /// first wrote its `close`, which then shut the new connection, since
-    /// netd has no owner to check a slot against (the review of #504).
+    /// Once its client has written `close` (`Wire::released`), or at once
+    /// when no client holds its number yet (an accepted connection `listen`
+    /// has not handed out, `Wire::pending`): the `/net/tcp` table, whose
+    /// slots a client holds by number. Freed on `Closed` alone, a slot could
+    /// be cloned by the next client before the first wrote its `close`, which
+    /// then shut the new connection, since netd has no owner to check a slot
+    /// against (the review of #504).
     WhenReleased,
 }
 
-#[allow(clippy::needless_range_loop)] // index needed for the as_mut borrow and the reap's `dials[i] = None`
+/// Event-loop step: drive every active dial connection - (re)send its SYN while
+/// Connecting, stream queued send data (stop-and-wait) and retransmit it, send
+/// the FIN while Closing, and reap idle slots. Called each `serve` pass, once
+/// per table. `idle_ticks` is that table's idle reap: `DIAL_IDLE_TICKS` for a
+/// dial or a parked path verb, `CLIENT_SESSION_IDLE_TICKS` for a held session,
+/// which must outlive the far side's own reap (see there).
+#[allow(clippy::needless_range_loop)] // index needed for the reap re-borrow
 fn pump_dials<const S: usize, const R: usize, const H: usize, const K: usize>(mac: &[u8; 6], dials: &mut [Option<Wire<S, R, H, K>>], idle_ticks: u64, when: Reap) {
     let mut frame = [0u8; 1600];
     let t = now();
@@ -6988,7 +7007,7 @@ fn pump_dials<const S: usize, const R: usize, const H: usize, const K: usize>(ma
             // only the idle reap frees it, the backstop for a client that died.
             let done = match when {
                 Reap::WhenClosed => c.rlen == 0,
-                Reap::WhenReleased => c.released,
+                Reap::WhenReleased => c.released || c.pending,
             };
             c.parked.is_none()
                 && ((c.state == DialState::Closed && done)

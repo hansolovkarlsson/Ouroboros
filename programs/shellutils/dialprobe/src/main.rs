@@ -4,13 +4,15 @@
 //!
 //! In one process, so no other client's timing enters it: clone slot A,
 //! write `connect <ip!port>` to A's `ctl` (the rig gives an address nobody
-//! answers ARP for, so netd refuses it and sets A `Closed`), clone B, write
-//! `close` to A's `ctl`, clone C, then close B and C. It prints one line,
-//! `dialprobe: A connect <status> B C`, each slot a number or `-` for a
-//! clone that failed, and `<status>` the connect write's answer in decimal.
+//! answers ARP for, so netd refuses it and sets A `Closed`), write the same
+//! `connect` again, clone B, write `close` to A's `ctl`, clone C, then close
+//! B and C. It prints one line, `dialprobe: A connect <s1> again <s2> B C`,
+//! each slot a number or `-` for a clone that failed, and each status the
+//! write's answer: `0`, `NO_FS`, `FS_ERROR` or a decimal.
 //! Before the review of #504, netd freed a slot on `Closed` alone, so B was
 //! A, and a client's late `close` reached the slot's next owner. Now B is
-//! not A and C is.
+//! not A and C is, and the second `connect` is `FS_ERROR`: a slot is
+//! connected once, from `Idle` (the second review of #504).
 
 #![no_std]
 #![no_main]
@@ -32,6 +34,36 @@ fn ctl(n: u8, words: &[u8]) -> u64 {
     let mut path = *b"/net/tcp/0/ctl";
     path[9] = b'0' + n;
     fs_write_inline(core::str::from_utf8(&path).unwrap_or(""), words)
+}
+
+/// A write's answer by name where it has one, else in decimal.
+fn put_status(out: &mut [u8], w: &mut usize, v: u64) {
+    let name: &[u8] = match v {
+        syscall_abi::FS_ERROR => b"FS_ERROR",
+        syscall_abi::NO_FS => b"NO_FS",
+        _ => b"",
+    };
+    if !name.is_empty() {
+        out[*w..*w + name.len()].copy_from_slice(name);
+        *w += name.len();
+        return;
+    }
+    let mut digits = [0u8; 20];
+    let mut k = 0usize;
+    let mut v = v;
+    loop {
+        digits[k] = b'0' + (v % 10) as u8;
+        k += 1;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    while k > 0 {
+        k -= 1;
+        out[*w] = digits[k];
+        *w += 1;
+    }
 }
 
 fn put_slot(out: &mut [u8], w: &mut usize, n: Option<u8>) {
@@ -56,6 +88,7 @@ pub extern "C" fn _start() -> ! {
 
     let a = clone();
     let status = a.map_or(0, |a| ctl(a, connect));
+    let again = a.map_or(0, |a| ctl(a, connect));
     let b = clone();
     if let Some(a) = a {
         ctl(a, b"close");
@@ -65,7 +98,7 @@ pub extern "C" fn _start() -> ! {
         ctl(n, b"close");
     }
 
-    let mut out = [0u8; 64];
+    let mut out = [0u8; 96];
     let mut w = 0usize;
     for &x in b"dialprobe: " {
         out[w] = x;
@@ -76,22 +109,12 @@ pub extern "C" fn _start() -> ! {
         out[w] = x;
         w += 1;
     }
-    let mut digits = [0u8; 20];
-    let mut k = 0usize;
-    let mut v = status;
-    loop {
-        digits[k] = b'0' + (v % 10) as u8;
-        k += 1;
-        v /= 10;
-        if v == 0 {
-            break;
-        }
-    }
-    while k > 0 {
-        k -= 1;
-        out[w] = digits[k];
+    put_status(&mut out, &mut w, status);
+    for &x in b" again " {
+        out[w] = x;
         w += 1;
     }
+    put_status(&mut out, &mut w, again);
     out[w] = b' ';
     w += 1;
     put_slot(&mut out, &mut w, b);
