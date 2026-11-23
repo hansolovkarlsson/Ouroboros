@@ -6863,9 +6863,9 @@ enum Reap {
     /// Once its receive buffer is drained: the remote and session tables,
     /// whose only user is netd itself.
     WhenClosed,
-    /// Once its client has written `close` (`Wire::released`), or at once
-    /// when no client holds its number yet (an accepted connection `listen`
-    /// has not handed out, `Wire::pending`): the `/net/tcp` table, whose
+    /// Once its client has written `close` (`Wire::released`), or, when no
+    /// client holds its number yet (an accepted connection `listen` has not
+    /// handed out, `Wire::pending`), once its buffer is empty: the `/net/tcp` table, whose
     /// slots a client holds by number. Freed on `Closed` alone, a slot could
     /// be cloned by the next client before the first wrote its `close`, which
     /// then shut the new connection, since netd has no owner to check a slot
@@ -7007,7 +7007,12 @@ fn pump_dials<const S: usize, const R: usize, const H: usize, const K: usize>(ma
             // only the idle reap frees it, the backstop for a client that died.
             let done = match when {
                 Reap::WhenClosed => c.rlen == 0,
-                Reap::WhenReleased => c.released || c.pending,
+                // A connection `listen` has not handed out has no client to
+                // close it, so it goes once it has nothing left to hand: its
+                // buffer read, or empty. Freed on `Closed` alone, a client that
+                // sent its request and FIN before the `listen` read was lost
+                // with the request (the third review of #504).
+                Reap::WhenReleased => c.released || (c.pending && c.rlen == 0),
             };
             c.parked.is_none()
                 && ((c.state == DialState::Closed && done)
@@ -7036,7 +7041,12 @@ fn dial_on_segment<const S: usize, const R: usize, const H: usize, const K: usiz
             continue;
         };
         let c = dials[i].as_mut().unwrap();
-        c.last_activity = t;
+        // A Closed slot waits for its client's `close` or the idle reap; a
+        // peer resending its FIN to it must not keep putting the reap off
+        // (the third review of #504).
+        if c.state != DialState::Closed {
+            c.last_activity = t;
+        }
         if s.flags & TCP_RST != 0 {
             c.state = DialState::Closed;
             return true;

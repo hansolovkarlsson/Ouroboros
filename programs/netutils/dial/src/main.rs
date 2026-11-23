@@ -80,6 +80,21 @@ fn close(base: &str, n: u8) {
     }
 }
 
+/// Print what connection `n`'s `data` still holds, until a read is empty.
+fn drain(base: &str, n: u8, target: u64, pbuf: &mut [u8; 128]) {
+    for _ in 0..64 {
+        let Some(data_path) = join(base, Some(n), b"data", pbuf) else {
+            return;
+        };
+        let mut dbuf = [0u8; 512];
+        let dn = read_file(data_path, &mut dbuf).unwrap_or(0);
+        if dn == 0 {
+            return;
+        }
+        write_out(target, &dbuf[..dn]);
+    }
+}
+
 /// Read a `/net/tcp` file into `buf`; returns the byte count, or `None` on error.
 fn read_file(path: &str, buf: &mut [u8]) -> Option<usize> {
     let r = fs_read_file(path, buf);
@@ -215,6 +230,11 @@ pub extern "C" fn _start() -> ! {
         let mut sbuf = [0u8; 16];
         let sn = read_file(status_path, &mut sbuf).unwrap_or(0);
         if sbuf[..sn].starts_with(b"Closed") {
+            // The peer's last bytes may have come with its FIN between the
+            // empty `data` read above and this one: read `data` dry before
+            // stopping. netd keeps the slot, and its buffer, until our
+            // `close` (the third review of #504).
+            drain(base, n, target, &mut pbuf);
             break;
         }
         empties += 1;

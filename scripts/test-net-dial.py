@@ -47,7 +47,12 @@ The checks:
    the next clone is A again. Before
    the review of #504 netd freed A on `Closed`, so a client's late `close`
    could shut the slot's next owner.
-7. No server called wedged or restarted, and no fault line in QEMU's
+7. **A client that closes before `listen` is read is still handed out.**
+   `dialprobe accept 9200 2000` announces and sleeps before reading
+   `listen`; in that time the script connects and sends its request with a
+   FIN. The read must hand the connection out, request whole: before the
+   third review of #504 netd freed it on `Closed` with the request unread.
+8. No server called wedged or restarted, and no fault line in QEMU's
    trace.
 
 Exit status: 0, 1 for a failed check, drive-qemu's INCONCLUSIVE for a boot
@@ -89,6 +94,12 @@ PORT = 5672
 # the wire, so it holds both clones and overstates the time between them by
 # the first one's typing; 1 s of margin below the 12.
 LEAK_WINDOW_S = 11
+# The client the early-close check opens, what it sends with its FIN, and how
+# long dialprobe waits before its `listen` read: time for the handshake, the
+# request and the pump passes that freed the connection before the fix.
+CLIENT_EARLY = 43010
+EARLY_REQUEST = b"early-request\r\n"
+EARLY_WAIT_MS = 2000
 PEER_ISN = 0x20000000
 REQUEST = b"hello\r\n\r\n"
 ANSWER = b"dial-answer-%d\n"
@@ -240,7 +251,7 @@ def main():
                       + ("" if "dial: connect refused" in out else f" (not refused; it said: {said(out)})")
                       + (f" (a SYN to port {tcp_of(syn)[2]})" if syn else ""))
 
-            def run(command, timeout=20):
+            def run(command):
                 """Type `command` and return what the guest said before the prompt."""
                 before = len(g.transcript())
                 g.type_line(command)
@@ -291,6 +302,36 @@ def main():
                 check(m is not None and again == "FS_ERROR",
                       f"a second `connect` on that closed slot is refused at once (FS_ERROR, answered {again})")
                 check(m is not None and c == a, f"its client's `close` frees it for the next clone (slot {a}, then {c})")
+                # A client that connects, sends its request and closes before
+                # `listen` is read is still handed out, request and all: the
+                # third review of #504 found netd freeing such a connection on
+                # `Closed` with the request unread.
+                command = f"dialprobe accept 9200 {EARLY_WAIT_MS}"
+                wire.drain()
+                before = len(g.transcript())
+                g.type_line(command)
+                listening = g.wait_for("dialprobe: listening", timeout=20)
+                early = None
+                if listening:
+                    wire.send(segment(guest_mac, guest_ip, CLIENT_EARLY, 9200, PEER_ISN, 0, SYN))
+                    sa = wire.wait(lambda f: (x := tcp_of(f)) is not None and x[1] == 9200 and x[2] == CLIENT_EARLY
+                                   and x[5] & (SYN | ACK) == SYN | ACK, 3)
+                    if sa:
+                        early = tcp_of(sa)
+                        wire.send(segment(guest_mac, guest_ip, CLIENT_EARLY, 9200, PEER_ISN + 1, early[3] + 1,
+                                          PSH | ACK | FIN, EARLY_REQUEST))
+                prompt(command)
+                out = g.transcript()[before:]
+                fin = wire.wait(lambda f: (x := tcp_of(f)) is not None and x[1] == 9200 and x[2] == CLIENT_EARLY and x[5] & FIN, 3.0)
+                if fin:
+                    x = tcp_of(fin)
+                    wire.send(segment(guest_mac, guest_ip, CLIENT_EARLY, 9200, x[4], x[3] + 1, ACK))
+                handed = re.search(r"dialprobe: accepted (\d) (\S*)", out)
+                check(listening and early is not None and handed is not None
+                      and handed.group(2) == EARLY_REQUEST.decode().strip(),
+                      f"a client that sends its request and FIN before `listen` is read is handed out, request whole"
+                      + ("" if listening and early else " (no SYN-ACK)" if listening else " (never listening)")
+                      + ("" if handed else f" (it said: {said(out)})"))
             during = g.transcript()[mark:]
             wedged, restarted = during.count("wedged"), during.count("restarted")
             check(wedged == 0 and restarted == 0, f"no server called wedged or restarted ({wedged} wedged, {restarted} restarted)")

@@ -13,11 +13,19 @@
 //! A, and a client's late `close` reached the slot's next owner. Now B is
 //! not A and C is, and the second `connect` is `FS_ERROR`: a slot is
 //! connected once, from `Idle` (the second review of #504).
+//!
+//! `dialprobe accept <port> <ms>`: clone a slot, `announce <port>`, print
+//! `dialprobe: listening <N>`, sleep `<ms>`, and only then read `listen`, so
+//! a client can connect, send its request and close before the read. It
+//! prints `dialprobe: accepted <M> <request>`, or `dialprobe: accepted -`
+//! when `listen` hands out nothing, then closes both slots. Before the third
+//! review of #504, netd freed such a connection on `Closed` with its request
+//! unread, and the read found nothing.
 
 #![no_std]
 #![no_main]
 
-use ulib::{arg, con_write, exit, fs_read_file, fs_write_inline};
+use ulib::{arg, argc, con_write, exit, fs_read_file, fs_write_inline};
 
 /// Clone a slot: its number, or `None` when the clone failed.
 fn clone() -> Option<u8> {
@@ -71,10 +79,82 @@ fn put_slot(out: &mut [u8], w: &mut usize, n: Option<u8>) {
     *w += 1;
 }
 
+/// Read slot `n`'s `leaf` into `buf`: the byte count, 0 on an error.
+fn read_leaf(n: u8, leaf: &[u8], buf: &mut [u8]) -> usize {
+    let mut path = [0u8; 32];
+    let head = b"/net/tcp/0/";
+    path[..head.len()].copy_from_slice(head);
+    path[9] = b'0' + n;
+    path[head.len()..head.len() + leaf.len()].copy_from_slice(leaf);
+    let p = core::str::from_utf8(&path[..head.len() + leaf.len()]).unwrap_or("");
+    let r = fs_read_file(p, buf);
+    if r >= syscall_abi::FS_ERR_MIN {
+        0
+    } else {
+        (r as usize).min(buf.len())
+    }
+}
+
+/// `dialprobe accept <port> <ms>`; see the module doc.
+fn accept() -> ! {
+    let mut port = [0u8; 8];
+    let mut ms = [0u8; 8];
+    let (Some(pl), Some(ml)) = (arg(2, &mut port), arg(3, &mut ms)) else {
+        con_write(b"dialprobe: usage: dialprobe accept <port> <ms>\r\n");
+        exit(1);
+    };
+    let wait_ms = ms[..ml].iter().fold(0u64, |v, d| v * 10 + d.wrapping_sub(b'0') as u64);
+    let Some(n) = clone() else {
+        con_write(b"dialprobe: listening -\r\n");
+        exit(1);
+    };
+    let mut announce = [0u8; 24];
+    let head = b"announce ";
+    announce[..head.len()].copy_from_slice(head);
+    announce[head.len()..head.len() + pl].copy_from_slice(&port[..pl]);
+    if ctl(n, &announce[..head.len() + pl]) != 0 {
+        ctl(n, b"close");
+        con_write(b"dialprobe: announce refused\r\n");
+        exit(1);
+    }
+    con_write(b"dialprobe: listening ");
+    con_write(&[b'0' + n]);
+    con_write(b"\r\n");
+    ulib::syscall(syscall_abi::SLEEP_UNTIL, ulib::monotonic_us() + wait_ms * 1000);
+    let mut lbuf = [0u8; 16];
+    let ln = read_leaf(n, b"listen", &mut lbuf);
+    let m = (ln > 0 && lbuf[0].is_ascii_digit()).then(|| lbuf[0] - b'0');
+    con_write(b"dialprobe: accepted ");
+    let mut req = [0u8; 64];
+    let mut rl = 0usize;
+    if let Some(m) = m {
+        con_write(&[b'0' + m, b' ']);
+        rl = read_leaf(m, b"data", &mut req);
+    } else {
+        con_write(b"-");
+    }
+    // The request, its line ends left out so the line stays one line.
+    for &b in &req[..rl] {
+        if b != b'\r' && b != b'\n' {
+            con_write(&[b]);
+        }
+    }
+    con_write(b"\r\n");
+    if let Some(m) = m {
+        ctl(m, b"close");
+    }
+    ctl(n, b"close");
+    exit(0);
+}
+
 #[no_mangle]
 #[link_section = ".text.start"]
 pub extern "C" fn _start() -> ! {
-    ulib::usage_if_requested(b"usage: dialprobe <ip!port>  (a probe for make test-net-dial)\r\n");
+    ulib::usage_if_requested(b"usage: dialprobe <ip!port> | dialprobe accept <port> <ms>  (a probe for make test-net-dial)\r\n");
+    let mut mode = [0u8; 8];
+    if argc() == 4 && arg(1, &mut mode) == Some(6) && &mode[..6] == b"accept" {
+        accept();
+    }
     let mut target = [0u8; 32];
     let Some(tlen) = arg(1, &mut target) else {
         con_write(b"dialprobe: usage: dialprobe <ip!port>\r\n");
