@@ -32,11 +32,11 @@ The checks:
 4. **Unreachable.** `dial /net 10.0.2.98 8000`: an ARP request for
    10.0.2.98, which nobody answers, no SYN, and `dial` says it was refused.
    Run before the refusals of 3: its ARP wait is the slowest, and 5's
-   control needs the last three failures quick.
+   control needs the last `MAX_DIAL` failures quick.
 5. **The slots come back.** After those eight refusals, more than
    `MAX_DIAL` (3) connections' worth, a second good `dial` (port 8001)
    connects and is answered as in 2.
-   Only while the last three failures and that clone fall within
+   Only while the last `MAX_DIAL` failures and that clone fall within
    `LEAK_WINDOW_S` of each other, or a leaking `dial`'s slots would be
    idle-reaped in time: a slower run is INCONCLUSIVE.
 6. **A closed slot is its client's until it closes it.** `dialprobe
@@ -107,7 +107,7 @@ RIG = "test-net-dial"
 IMAGE = os.path.join(os.path.dirname(HERE), "build", "esp.img")
 PORT = 5672
 # netd idle-reaps a slot DIAL_IDLE_TICKS (600 ticks, 12 s) after its last
-# activity. The last three failed dials must clone within this of the second
+# activity. The last MAX_DIAL failed dials must clone within this of the second
 # good dial's clone for a leak to hold all MAX_DIAL slots there. The window is
 # timed from before the first of the three is typed to the good dial's SYN on
 # the wire, so it holds both clones and overstates the time between them by
@@ -127,6 +127,18 @@ EARLY_WAIT_MS = 3000
 with open(os.path.join(HERE, "..", "programs", "servers", "netd", "src", "main.rs")) as fh:
     MAX_DIAL = int(re.search(r"^const MAX_DIAL: usize = (\d+);", fh.read(), re.M).group(1))
 SERVE_TIMEOUT_S = 120
+# The connects netd must refuse with nothing on the wire: more of them than
+# MAX_DIAL, so a leaking dial runs out of slots.
+REFUSALS = [
+    ("10.0.2.2", "65536", "a port past 65535"),
+    ("10.0.2.2", "99999", "a port of five digits past 65535"),
+    ("10.0.2.2", "80x", "a port that is not a number"),
+    ("256.0.2.2", "8000", "an address part past 255"),
+    ("0010.0.2.2", "8000", "an address part of four digits"),
+    ("10.0.2", "8000", "an address of three parts"),
+    ("10.0.2.2.5", "8000", "an address of five parts"),
+]
+assert len(REFUSALS) > MAX_DIAL, "test-net-dial: more refusals than netd's MAX_DIAL are needed"
 # The far ports of the two clients the listener check opens.
 CLIENT_A, CLIENT_B = 43001, 43002
 PEER_ISN = 0x20000000
@@ -290,7 +302,7 @@ def main():
 
             if logged_in:
                 good_dial(8000, 1)
-                # The leak control below needs the last three failed dials to
+                # The leak control below needs the last MAX_DIAL failed dials to
                 # hold their slots together when good_dial(8001) clones: under
                 # netd's DIAL_IDLE_TICKS (12 s) of each other, or a leaking
                 # dial's slots are reaped in time and the control cannot fail.
@@ -308,17 +320,15 @@ def main():
                       f"`{command}` (nobody answers ARP): an ARP request, no SYN, and refused"
                       + ("" if asked else " (no ARP request)") + (" (a SYN)" if syn else "")
                       + ("" if "dial: connect refused" in out else f" (not refused; it said: {said(out)})"))
-                refused("10.0.2.2", "65536", "a port past 65535")
-                refused("10.0.2.2", "99999", "a port of five digits past 65535")
-                refused("10.0.2.2", "80x", "a port that is not a number")
-                refused("256.0.2.2", "8000", "an address part past 255")
-                window["start"] = time.monotonic()
-                refused("0010.0.2.2", "8000", "an address part of four digits")
-                refused("10.0.2", "8000", "an address of three parts")
-                refused("10.0.2.2.5", "8000", "an address of five parts")
+                # The window opens before the last MAX_DIAL refusals: a leak
+                # needs that many held at once to refuse the good dial.
+                for i, case in enumerate(REFUSALS):
+                    if i == len(REFUSALS) - MAX_DIAL:
+                        window["start"] = time.monotonic()
+                    refused(*case)
                 good_dial(8001, 2, window)
                 slow = window.get("end", time.monotonic()) - window["start"]
-                print(f"[net-dial] the last three failed dials took {slow:.1f} s (the window is {LEAK_WINDOW_S} s)", flush=True)
+                print(f"[net-dial] the last {MAX_DIAL} failed dials took {slow:.1f} s (the window is {LEAK_WINDOW_S} s)", flush=True)
                 # A slot netd has closed is held until its client writes
                 # `close`: the review of #504 found that freeing it on `Closed`
                 # alone let the next clone reuse it, and the first client's
@@ -493,7 +503,7 @@ def main():
     check(faults == 0, f"no fault lines in QEMU's trace ({faults})")
     failed = sum(1 for ok, _ in checks if not ok)
     if slow is not None and slow > LEAK_WINDOW_S:
-        unforced.append(f"the last three failed dials took {slow:.1f} s, past {LEAK_WINDOW_S} s: "
+        unforced.append(f"the last {MAX_DIAL} failed dials took {slow:.1f} s, past {LEAK_WINDOW_S} s: "
                         "a leaking dial's slots could be reaped in time, so the leak control could not fail")
     if not failed and unforced:
         for why in unforced:
