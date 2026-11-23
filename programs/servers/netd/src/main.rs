@@ -6774,8 +6774,11 @@ fn dial_file_op(
         }
         if data_in.starts_with(b"close") {
             let c = dials[n].as_mut().unwrap();
-            if c.state == DialState::Established {
-                // Its FIN still to send: the pump frees it once Closed.
+            if c.state == DialState::Established || c.state == DialState::Closing {
+                // Its FIN still to send: the pump frees it once Closed. A
+                // Closing slot (the idle reap's, or a second `close`) is
+                // left to finish, not freed with its FIN unsent (the fourth
+                // review of #504).
                 c.released = true;
                 c.state = DialState::Closing;
                 c.last_activity = now();
@@ -7032,6 +7035,7 @@ fn pump_dials<const S: usize, const R: usize, const H: usize, const K: usize>(ma
 fn dial_on_segment<const S: usize, const R: usize, const H: usize, const K: usize>(mac: &[u8; 6], frame: &[u8], dials: &mut [Option<Wire<S, R, H, K>>]) -> bool {
     let mut out = [0u8; 1600];
     let t = now();
+    let mut closed_match = false;
     for i in 0..dials.len() {
         let (peer, pport, sport) = match dials[i].as_ref() {
             Some(c) if c.state != DialState::Free && c.state != DialState::Idle => (c.peer_ip, c.peer_port, c.src_port),
@@ -7041,12 +7045,19 @@ fn dial_on_segment<const S: usize, const R: usize, const H: usize, const K: usiz
             continue;
         };
         let c = dials[i].as_mut().unwrap();
-        // A Closed slot waits for its client's `close` or the idle reap; a
-        // peer resending its FIN to it must not keep putting the reap off
-        // (the third review of #504).
-        if c.state != DialState::Closed {
-            c.last_activity = t;
+        // A Closed slot only waits, for its client's `close` or the idle
+        // reap: nothing a segment says changes it, and a peer resending its
+        // FIN must not put the reap off by refreshing its clock (the third
+        // review of #504). Its segments are used up here, unless a live slot
+        // on the same 4-tuple wants them, and a bare SYN goes on to
+        // `dial_accept`: a client reconnecting from the port of a connection
+        // still held Closed was ignored for up to the idle reap (the fourth
+        // review of #504).
+        if c.state == DialState::Closed {
+            closed_match |= s.flags & TCP_SYN == 0 || s.flags & TCP_ACK != 0;
+            continue;
         }
+        c.last_activity = t;
         if s.flags & TCP_RST != 0 {
             c.state = DialState::Closed;
             return true;
@@ -7143,7 +7154,7 @@ fn dial_on_segment<const S: usize, const R: usize, const H: usize, const K: usiz
         }
         return true;
     }
-    false
+    closed_match
 }
 
 /// Passive open (dial-in): if `frame` is a fresh inbound SYN to a port some slot

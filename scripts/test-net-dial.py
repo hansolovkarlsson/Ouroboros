@@ -52,6 +52,12 @@ The checks:
    `listen`; in that time the script connects and sends its request with a
    FIN. The read must hand the connection out, request whole: before the
    third review of #504 netd freed it on `Closed` with the request unread.
+   Then, with that connection held `Closed`, the client reconnects from
+   the same port, and the probe's second `listen` read must hand the new
+   one out: before the fourth review a bare SYN on a `Closed` slot's
+   4-tuple was used up there. Each client's FIN must reach netd before the
+   `listen` read it is about (netd's own FIN, sent on taking it, shows it),
+   or the run is INCONCLUSIVE.
 8. No server called wedged or restarted, and no fault line in QEMU's
    trace.
 
@@ -99,6 +105,7 @@ LEAK_WINDOW_S = 11
 # request and the pump passes that freed the connection before the fix.
 CLIENT_EARLY = 43010
 EARLY_REQUEST = b"early-request\r\n"
+AGAIN_REQUEST = b"again-request\r\n"
 EARLY_WAIT_MS = 2000
 PEER_ISN = 0x20000000
 REQUEST = b"hello\r\n\r\n"
@@ -164,6 +171,7 @@ def main():
     ), label="[net-dial] ")
     booted = False
     slow = None
+    unforced = []
     try:
         conn, _ = lst.accept()
         conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -305,33 +313,57 @@ def main():
                 # A client that connects, sends its request and closes before
                 # `listen` is read is still handed out, request and all: the
                 # third review of #504 found netd freeing such a connection on
-                # `Closed` with the request unread.
+                # `Closed` with the request unread. Then, while dialprobe holds
+                # that connection Closed, the client reconnects from the same
+                # port: the fourth review found its SYN used up by the Closed
+                # slot and never accepted.
                 command = f"dialprobe accept 9200 {EARLY_WAIT_MS}"
                 wire.drain()
                 before = len(g.transcript())
                 g.type_line(command)
                 listening = g.wait_for("dialprobe: listening", timeout=20)
-                early = None
-                if listening:
-                    wire.send(segment(guest_mac, guest_ip, CLIENT_EARLY, 9200, PEER_ISN, 0, SYN))
+
+                def connect_early(isn, request):
+                    """SYN, then the request with a FIN once the SYN-ACK is in:
+                    the SYN-ACK, and the guest's FIN when it came before
+                    dialprobe's next `listen` read printed."""
+                    wire.send(segment(guest_mac, guest_ip, CLIENT_EARLY, 9200, isn, 0, SYN))
                     sa = wire.wait(lambda f: (x := tcp_of(f)) is not None and x[1] == 9200 and x[2] == CLIENT_EARLY
-                                   and x[5] & (SYN | ACK) == SYN | ACK, 3)
-                    if sa:
-                        early = tcp_of(sa)
-                        wire.send(segment(guest_mac, guest_ip, CLIENT_EARLY, 9200, PEER_ISN + 1, early[3] + 1,
-                                          PSH | ACK | FIN, EARLY_REQUEST))
+                                   and x[5] & (SYN | ACK) == SYN | ACK, 1.5)
+                    if not sa:
+                        return None, None
+                    sa = tcp_of(sa)
+                    wire.send(segment(guest_mac, guest_ip, CLIENT_EARLY, 9200, isn + 1, sa[3] + 1, PSH | ACK | FIN, request))
+                    shown = len(g.transcript())
+                    fin = wire.wait(lambda f: (x := tcp_of(f)) is not None and x[1] == 9200 and x[2] == CLIENT_EARLY
+                                    and x[5] & FIN, 1.5)
+                    if fin:
+                        x = tcp_of(fin)
+                        wire.send(segment(guest_mac, guest_ip, CLIENT_EARLY, 9200, isn + 2 + len(request), x[3] + 1, ACK))
+                    # netd sends its FIN on taking the client's, so a FIN seen
+                    # before the probe printed its next line was taken before
+                    # the `listen` read: what each check is about.
+                    in_time = fin is not None and "dialprobe: " not in g.transcript()[shown:]
+                    return sa, in_time
+
+                early, early_in_time = connect_early(PEER_ISN, EARLY_REQUEST) if listening else (None, None)
+                first = g.wait_for("dialprobe: accepted", timeout=10)
+                again, again_in_time = connect_early(PEER_ISN + 0x1000, AGAIN_REQUEST) if first else (None, None)
                 prompt(command)
                 out = g.transcript()[before:]
-                fin = wire.wait(lambda f: (x := tcp_of(f)) is not None and x[1] == 9200 and x[2] == CLIENT_EARLY and x[5] & FIN, 3.0)
-                if fin:
-                    x = tcp_of(fin)
-                    wire.send(segment(guest_mac, guest_ip, CLIENT_EARLY, 9200, x[4], x[3] + 1, ACK))
                 handed = re.search(r"dialprobe: accepted (\d) (\S*)", out)
                 check(listening and early is not None and handed is not None
                       and handed.group(2) == EARLY_REQUEST.decode().strip(),
                       f"a client that sends its request and FIN before `listen` is read is handed out, request whole"
                       + ("" if listening and early else " (no SYN-ACK)" if listening else " (never listening)")
                       + ("" if handed else f" (it said: {said(out)})"))
+                rehanded = re.search(r"dialprobe: again (\d) (\S*)", out)
+                check(again is not None and rehanded is not None and rehanded.group(2) == AGAIN_REQUEST.decode().strip(),
+                      f"the client reconnecting from that port while its first connection is held Closed is accepted and handed out"
+                      + ("" if again else " (no SYN-ACK)") + ("" if rehanded else f" (it said: {said(out)})"))
+                for ok, what in ((early_in_time, "the first client's FIN"), (again_in_time, "the reconnected client's FIN")):
+                    if ok is False:
+                        unforced.append(f"netd took {what} after dialprobe's `listen` read, so its check did not test the close before the read")
             during = g.transcript()[mark:]
             wedged, restarted = during.count("wedged"), during.count("restarted")
             check(wedged == 0 and restarted == 0, f"no server called wedged or restarted ({wedged} wedged, {restarted} restarted)")
@@ -352,9 +384,13 @@ def main():
         check(False, "the boot reaches netd and a login")
     check(faults == 0, f"no fault lines in QEMU's trace ({faults})")
     failed = sum(1 for ok, _ in checks if not ok)
-    if not failed and slow is not None and slow > LEAK_WINDOW_S:
-        print(f"{RIG}: INCONCLUSIVE, the last three failed dials took {slow:.1f} s, past {LEAK_WINDOW_S} s: "
-              "a leaking dial's slots could be reaped in time, so the leak control could not fail. Run it again")
+    if slow is not None and slow > LEAK_WINDOW_S:
+        unforced.append(f"the last three failed dials took {slow:.1f} s, past {LEAK_WINDOW_S} s: "
+                        "a leaking dial's slots could be reaped in time, so the leak control could not fail")
+    if not failed and unforced:
+        for why in unforced:
+            print(f"{RIG}: INCONCLUSIVE, {why}")
+        print(f"{RIG}: run it again")
         return drive_qemu.INCONCLUSIVE
     return drive_qemu.verdict(RIG, failed, 0)
 

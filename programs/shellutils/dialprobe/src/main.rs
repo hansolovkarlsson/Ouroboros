@@ -18,9 +18,13 @@
 //! `dialprobe: listening <N>`, sleep `<ms>`, and only then read `listen`, so
 //! a client can connect, send its request and close before the read. It
 //! prints `dialprobe: accepted <M> <request>`, or `dialprobe: accepted -`
-//! when `listen` hands out nothing, then closes both slots. Before the third
-//! review of #504, netd freed such a connection on `Closed` with its request
-//! unread, and the read found nothing.
+//! when `listen` hands out nothing. Before the third review of #504, netd
+//! freed such a connection on `Closed` with its request unread, and the read
+//! found nothing. Then it sleeps `<ms>` again holding M, which its client has
+//! closed, so a client can reconnect from M's port in that time, and reads
+//! `listen` once more: `dialprobe: again <M2> <request>`, or `again -`. Before
+//! the fourth review of #504, a bare SYN on a Closed slot's 4-tuple was used
+//! up by that slot and never accepted. Last it closes every slot it holds.
 
 #![no_std]
 #![no_main]
@@ -95,6 +99,31 @@ fn read_leaf(n: u8, leaf: &[u8], buf: &mut [u8]) -> usize {
     }
 }
 
+/// Read listener `n`'s `listen` and print `<label><M> <request>`, or
+/// `<label>-`: the connection handed out, if any.
+fn handed(n: u8, label: &[u8]) -> Option<u8> {
+    let mut lbuf = [0u8; 16];
+    let ln = read_leaf(n, b"listen", &mut lbuf);
+    let m = (ln > 0 && lbuf[0].is_ascii_digit()).then(|| lbuf[0] - b'0');
+    con_write(label);
+    let mut req = [0u8; 64];
+    let mut rl = 0usize;
+    if let Some(m) = m {
+        con_write(&[b'0' + m, b' ']);
+        rl = read_leaf(m, b"data", &mut req);
+    } else {
+        con_write(b"-");
+    }
+    // The request, its line ends left out so the line stays one line.
+    for &b in &req[..rl] {
+        if b != b'\r' && b != b'\n' {
+            con_write(&[b]);
+        }
+    }
+    con_write(b"\r\n");
+    m
+}
+
 /// `dialprobe accept <port> <ms>`; see the module doc.
 fn accept() -> ! {
     let mut port = [0u8; 8];
@@ -121,27 +150,11 @@ fn accept() -> ! {
     con_write(&[b'0' + n]);
     con_write(b"\r\n");
     ulib::syscall(syscall_abi::SLEEP_UNTIL, ulib::monotonic_us() + wait_ms * 1000);
-    let mut lbuf = [0u8; 16];
-    let ln = read_leaf(n, b"listen", &mut lbuf);
-    let m = (ln > 0 && lbuf[0].is_ascii_digit()).then(|| lbuf[0] - b'0');
-    con_write(b"dialprobe: accepted ");
-    let mut req = [0u8; 64];
-    let mut rl = 0usize;
-    if let Some(m) = m {
-        con_write(&[b'0' + m, b' ']);
-        rl = read_leaf(m, b"data", &mut req);
-    } else {
-        con_write(b"-");
-    }
-    // The request, its line ends left out so the line stays one line.
-    for &b in &req[..rl] {
-        if b != b'\r' && b != b'\n' {
-            con_write(&[b]);
-        }
-    }
-    con_write(b"\r\n");
-    if let Some(m) = m {
-        ctl(m, b"close");
+    let m = handed(n, b"dialprobe: accepted ");
+    ulib::syscall(syscall_abi::SLEEP_UNTIL, ulib::monotonic_us() + wait_ms * 1000);
+    let m2 = handed(n, b"dialprobe: again ");
+    for k in [m, m2].into_iter().flatten() {
+        ctl(k, b"close");
     }
     ctl(n, b"close");
     exit(0);

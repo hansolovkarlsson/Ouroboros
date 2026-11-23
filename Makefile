@@ -2465,7 +2465,8 @@ test-echo-reply: image
 # A good dial, eight refused or unreachable ones with nothing on the wire,
 # and a second good dial after them, so a failed dial that keeps its
 # connection slot is seen, then a slot netd closed held until its client
-# closes it. About a minute. The full entry is in docs/testing/make-targets.md,
+# closes it, and a listener handing out a connection whose client closed
+# before the listen read, and the same client reconnecting from that port. About a minute. The full entry is in docs/testing/make-targets.md,
 # with the list of what to run it for.
 test-net-dial: image
 	python3 scripts/test-net-dial.py
