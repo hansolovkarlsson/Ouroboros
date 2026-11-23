@@ -239,6 +239,7 @@ make test-no-identity         # an export with no /etc/cluster/id runs nothing, 
 make test-net-config          # netd's address from /etc/net: a good file, a refused one, none, and one on a root `mount -a` brings in later, each reached where it should be and not elsewhere
 make test-net-flood           # netd lives through a 15 s flood of frames (no server called wedged, HTTP after), netd spun on NET_WAIT is a wedge, and NET_RECV never answers a length past the buffer
 make test-echo-reply          # netd answers an ICMP echo request whole, and none that is damaged, not its own, a fragment or from a source a reply cannot go to; ARP and echo answered inside every op's wait too
+make test-net-dial            # a /net/tcp connect on the wire, seven netd refuses with nothing sent, an unreachable one, and the slots back after them
 make test-heap                # the user heap on a booted image
 make test-malloc              # picolibc's malloc on a booted image
 make test-fpsimd              # a task's FP/SIMD registers across the kernel
