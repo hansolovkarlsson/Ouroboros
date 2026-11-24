@@ -917,3 +917,39 @@ repairs get a round of their own. But when every round uses the same
 evidence, the rounds do not converge, they alternate; stop when the next
 instrument is a different one, and say that the stop is not a pass.**
 
+
+## One branch, five rounds, and the stop that named the next instrument (2026-11-23)
+
+`make test-net-dial` (#504) was reviewed five times at high in a day, and
+from the second round on every round's important findings were in the
+previous round's repair. The repairs were all in a few lines of netd: when a
+`/net/tcp` slot is freed (`pump_dials`'s reap rule and the `close` arm) and
+which segments reach a slot once it is `Closed` (`dial_on_segment`).
+
+| round | the repair it found wanting |
+| --- | --- |
+| 1 | (the branch: a slot freed on `Closed` could be cloned before its client's `close`) |
+| 2 | round 1's hold: an accepted connection nobody holds was never released |
+| 3 | round 2's release: freed on `Closed`, it lost a request sent with its FIN |
+| 4 | round 3's `Closed` arm: it used up a reconnecting client's SYN |
+| 5 | round 4's pass: any bare SYN went on, a late duplicate included; and the idle reap held a slot twice |
+
+Every repair had a control, a mutation that made its new rig check fail, and
+every control failed as it should. That is the [cluster-keys
+rule](cluster-keys-postmortem.md) kept, and it did not help here: a control
+proves a check can fail, not that the rule it checks covers the states no
+check reaches. Each round's repair was the size of its bug, as this file
+asks, and was still wrong, because the bug was one state of a state machine
+whose other states nobody was looking at.
+
+The stop followed the [2026-11-04 entry](#one-scan-four-reviews-and-the-design-as-the-defect-2026-11-04)
+and the one above it. Four rounds in a row found the same class, so the
+defect is the representation, and every round used the same instrument, a
+reader and a rig that reaches some states. After the fifth I fixed its two
+findings and recommended no sixth review; Hans agreed, and the two PRs
+merged. What replaces the rounds is in the roadmap: the slot rules taken out
+into a pure crate, as `heldkeys` was, so that a host test can walk every
+state, `released`, `pending`, `parked` and the clock against every segment.
+**When the rounds keep landing in the same few lines, the next round is not a
+review but a host test of those lines; and the fixes of the round that
+stopped are unreviewed, which is said, not implied.**
