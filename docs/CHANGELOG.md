@@ -11,6 +11,24 @@ here actually works today, see [`architecture.md`](architecture.md) and
 
 **Not yet released.** Changes since v0.25.0, drafted as they land.
 
+**A failed `dial` or `serve` no longer blocks the next one (2026-11-23,
+#504, #505).** `dial` and `serve` gave their `/net/tcp` connection back
+only when they succeeded. Three failed `dial`s refused every `dial` for
+12 s, and three `serve`s that timed out refused every `dial` and `serve`
+until reboot. Both now give it back on every failure. `netd` also keeps a
+connection's number until its client closes it, so a client closing late
+can no longer close someone else's new connection. A connection that sent
+its request and closed before `serve` asked for it is handed out, request
+and all. A client reconnecting from the same port is accepted, and a stale
+copy of its first SYN is not. `make test-net-dial` plays the far host on
+the wire.
+
+**A node answers new connections that arrive while it waits (2026-11-22,
+#503).** While `netd` waited for an answer of its own (a `ping`, an
+address lookup, a DNS query, a `fetch`), it dropped every TCP frame that
+was not that answer, so a connection opened in that time went unanswered.
+It keeps them now and handles them once the wait is over.
+
 **A disk mounted after boot gives `netd` its address and identity
 (2026-11-22).** With a USB stick passed through to Parallels after the VM
 started, or plugged into a Pi after boot, `mount -a` mounts it, but
