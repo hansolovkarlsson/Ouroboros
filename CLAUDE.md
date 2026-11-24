@@ -239,6 +239,7 @@ make test-no-identity         # an export with no /etc/cluster/id runs nothing, 
 make test-net-config          # netd's address from /etc/net: a good file, a refused one, none, and one on a root `mount -a` brings in later, each reached where it should be and not elsewhere
 make test-net-flood           # netd lives through a 15 s flood of frames (no server called wedged, HTTP after), netd spun on NET_WAIT is a wedge, and NET_RECV never answers a length past the buffer
 make test-echo-reply          # netd answers an ICMP echo request whole, and none that is damaged, not its own, a fragment or from a source a reply cannot go to; ARP and echo answered inside every op's wait too
+make test-net-dial            # a /net/tcp connect on the wire, seven that netd refuses with nothing sent, an unreachable one, the slots back after them, a slot netd closed kept until its client closes it, and an accepted connection handed out after its client closed, and again when it reconnects from that port, but not for a late copy of its first SYN (dialprobe)
 make test-heap                # the user heap on a booted image
 make test-malloc              # picolibc's malloc on a booted image
 make test-fpsimd              # a task's FP/SIMD registers across the kernel
@@ -484,7 +485,7 @@ programs/            ALL userland programs, grouped by role. Annotated in full i
   textutils/         the pipeline filters: upper wc grep head tail nl rev uniq sort (sort is the one that
                      cannot stream, so it is the one that uses the heap)
   netutils/          ping resolve fetch dial serve - reach netd via the TO_NET cap the shell delegates at spawn
-  shellutils/        echo uptime clear pwd readkey send recv selftest bootid man printenv id args edtest rdprobe fpprobe coreprobe vtprobe syscost stageprobe cursorprobe dirprobe mountprobe stackprobe openprobe
+  shellutils/        echo uptime clear pwd readkey send recv selftest bootid man printenv id args edtest rdprobe fpprobe coreprobe vtprobe syscost stageprobe cursorprobe dirprobe mountprobe stackprobe openprobe dialprobe
   admin/             passwd useradd groupadd usermod clusterkey - root-only account + cluster-identity tools
   demos/             hello (how a program ends itself), pong (the IPC echo-server shape)
 

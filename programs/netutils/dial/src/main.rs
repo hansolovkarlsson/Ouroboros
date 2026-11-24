@@ -57,6 +57,44 @@ fn fail(msg: &[u8], target: u64) -> ! {
     exit(1);
 }
 
+/// [`fail`] once the clone has given this program connection `n`: close it
+/// first. Until 2026-11-22 every failure after the clone (a refused
+/// `connect`, a refused or closed connection, a timeout) ended here without
+/// the `close`, so the slot was held until `netd` reaped it idle, 12 s
+/// later, and with `MAX_DIAL` three such failures refused the next `dial`,
+/// anyone's, at its clone (found by `make test-net-dial`).
+/// A path too long to build is the one failure that cannot close: `close`
+/// builds the same `ctl` path, so those call [`fail`] and leave the slot to
+/// netd's idle reap. A `close` after netd has closed the slot itself is safe:
+/// netd keeps a `/net/tcp` slot until its client closes it (`Reap::WhenReleased`).
+fn fail_closed(msg: &[u8], target: u64, base: &str, n: u8) -> ! {
+    close(base, n);
+    fail(msg, target);
+}
+
+/// Write `close` to connection `n`'s `ctl`.
+fn close(base: &str, n: u8) {
+    let mut pbuf = [0u8; 128];
+    if let Some(ctl_path) = join(base, Some(n), b"ctl", &mut pbuf) {
+        let _ = fs_write_inline(ctl_path, b"close");
+    }
+}
+
+/// Print what connection `n`'s `data` still holds, until a read is empty.
+fn drain(base: &str, n: u8, target: u64, pbuf: &mut [u8; 128]) {
+    for _ in 0..64 {
+        let Some(data_path) = join(base, Some(n), b"data", pbuf) else {
+            return;
+        };
+        let mut dbuf = [0u8; 512];
+        let dn = read_file(data_path, &mut dbuf).unwrap_or(0);
+        if dn == 0 {
+            return;
+        }
+        write_out(target, &dbuf[..dn]);
+    }
+}
+
 /// Read a `/net/tcp` file into `buf`; returns the byte count, or `None` on error.
 fn read_file(path: &str, buf: &mut [u8]) -> Option<usize> {
     let r = fs_read_file(path, buf);
@@ -119,7 +157,7 @@ pub extern "C" fn _start() -> ! {
         None => fail(b"dial: path too long\r\n", target),
     };
     if fs_write_inline(ctl_path, &ctlbuf[..cw]) >= syscall_abi::FS_ERR_MIN {
-        fail(b"dial: connect refused\r\n", target);
+        fail_closed(b"dial: connect refused\r\n", target, base, n);
     }
 
     // 3. poll status until Established (or Closed/error). Each read is a blocking
@@ -138,11 +176,11 @@ pub extern "C" fn _start() -> ! {
             break;
         }
         if sbuf[..sn].starts_with(b"Closed") {
-            fail(b"dial: connection refused / closed\r\n", target);
+            fail_closed(b"dial: connection refused / closed\r\n", target, base, n);
         }
     }
     if !established {
-        fail(b"dial: connect timed out\r\n", target);
+        fail_closed(b"dial: connect timed out\r\n", target, base, n);
     }
 
     // 4. optional request: the remaining args joined by spaces, then CRLF.
@@ -192,6 +230,11 @@ pub extern "C" fn _start() -> ! {
         let mut sbuf = [0u8; 16];
         let sn = read_file(status_path, &mut sbuf).unwrap_or(0);
         if sbuf[..sn].starts_with(b"Closed") {
+            // The peer's last bytes may have come with its FIN between the
+            // empty `data` read above and this one: read `data` dry before
+            // stopping. netd keeps the slot, and its buffer, until our
+            // `close` (the third review of #504).
+            drain(base, n, target, &mut pbuf);
             break;
         }
         empties += 1;
@@ -201,9 +244,7 @@ pub extern "C" fn _start() -> ! {
     }
 
     // 6. close.
-    if let Some(ctl_path) = join(base, Some(n), b"ctl", &mut pbuf) {
-        let _ = fs_write_inline(ctl_path, b"close");
-    }
+    close(base, n);
     ulib::end_of_stream(target);
     exit(0);
 }

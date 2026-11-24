@@ -1997,8 +1997,18 @@ own. The entries below stand as they were put.
      `parse_u64` stay theirs: on `&str`, already checked, and for every
      number a command takes. `test-net-config` (`ping`),
      `test-mount-points` (`mount -r`), `test-run-silent` (`cpu`) and
-     `test-no-identity` (`/etc/cluster/authorized`) passed. No rig sends
-     a `/net/tcp` `connect`.
+     `test-no-identity` (`/etc/cluster/authorized`) passed. No rig sent
+     a `/net/tcp` `connect` until `make test-net-dial` (2026-11-22): one
+     good dial, seven connects refused with nothing on the wire, an
+     unreachable one and a second good dial. Its first run found `dial`
+     holding its connection slot after every failed dial, three of which
+     refused the next at its clone; `dial` closes it now (`fail_closed`).
+     The review of #504 found that close could reach another client:
+     netd freed a slot on `Closed`, so the next clone could take it
+     first. netd keeps a `/net/tcp` slot until its client closes it
+     (`Reap::WhenReleased`), checked by the rig's `dialprobe`.
+     The 20-digit port does not fit `dial`'s 8-byte argument and stays a
+     host test.
    - *The ext2 root's place in the image* is written out in three rigs
      now (`test-no-identity.py`, `test-net-config.py` and
      `mkext2.py`, which decides it).
