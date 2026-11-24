@@ -6773,6 +6773,23 @@ fn dial_file_op(
             return (0, 0);
         }
         if data_in.starts_with(b"close") {
+            // A listener takes its accepted connections `listen` has not handed
+            // out with it, each reset, for no client holds their numbers. Left
+            // behind, each still named slot `n` its parent, and once `n` was
+            // cloned again its new owner's first `listen` was handed a
+            // connection to the old port (the review of #505).
+            if dials[n].as_ref().is_some_and(|c| c.state == DialState::Listening) {
+                for slot in dials.iter_mut() {
+                    let Some(d) = slot.as_ref().filter(|d| d.parent == n as u8 && d.pending) else {
+                        continue;
+                    };
+                    let mut frame = [0u8; 1600];
+                    if let Some(nn) = build_tcp(mac, &d.peer_mac, &d.peer_ip, d.src_port, d.peer_port, d.snd_nxt, d.rcv_nxt, TCP_RST | TCP_ACK, false, &[], &mut frame) {
+                        let _ = send(&frame[..nn]);
+                    }
+                    *slot = None;
+                }
+            }
             let c = dials[n].as_mut().unwrap();
             if c.state == DialState::Established || c.state == DialState::Closing {
                 // Its FIN still to send: the pump frees it once Closed. A

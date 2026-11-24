@@ -54,6 +54,28 @@ fn fail(msg: &[u8], target: u64) -> ! {
     exit(1);
 }
 
+/// [`fail`] once the clone has given this program listener slot `n`: close
+/// it first. Until 2026-11-23 a `serve` that timed out with no connection
+/// ended without the `close`, and a `Listening` slot is never idle-reaped, so
+/// the slot was held for the rest of the boot; three such runs refused every
+/// `dial` and `serve` after them at the clone (the second review of #504).
+/// The "path too long" failures after the clone close too. They cannot
+/// happen today (a base of at most 96 bytes, a 128-byte buffer, and a
+/// `/tcp/N/<leaf>` suffix of ASCII), and if one did, `close` would only
+/// fail as well where its own `ctl` path did, which is shorter than `listen`'s.
+fn fail_closed(msg: &[u8], target: u64, base: &str, n: u8) -> ! {
+    close(base, n);
+    fail(msg, target);
+}
+
+/// Write `close` to slot `n`'s `ctl`.
+fn close(base: &str, n: u8) {
+    let mut pbuf = [0u8; 128];
+    if let Some(cp) = join(base, Some(n), b"ctl", &mut pbuf) {
+        let _ = fs_write_inline(cp, b"close");
+    }
+}
+
 fn read_file(path: &str, buf: &mut [u8]) -> Option<usize> {
     let r = fs_read_file(path, buf);
     if r >= syscall_abi::FS_ERR_MIN {
@@ -105,10 +127,10 @@ pub extern "C" fn _start() -> ! {
     push(&mut ctlbuf, &mut cw, port);
     let ctl_path = match join(base, Some(n), b"ctl", &mut pbuf) {
         Some(p) => p,
-        None => fail(b"serve: path too long\r\n", target),
+        None => fail_closed(b"serve: path too long\r\n", target, base, n),
     };
     if fs_write_inline(ctl_path, &ctlbuf[..cw]) >= syscall_abi::FS_ERR_MIN {
-        fail(b"serve: announce refused\r\n", target);
+        fail_closed(b"serve: announce refused\r\n", target, base, n);
     }
     write_out(target, b"listening on ");
     write_out(target, port);
@@ -120,7 +142,7 @@ pub extern "C" fn _start() -> ! {
     for _ in 0..6000 {
         let listen_path = match join(base, Some(n), b"listen", &mut pbuf) {
             Some(p) => p,
-            None => fail(b"serve: path too long\r\n", target),
+            None => fail_closed(b"serve: path too long\r\n", target, base, n),
         };
         let mut lbuf = [0u8; 16];
         let ln = read_file(listen_path, &mut lbuf).unwrap_or(0);
@@ -131,7 +153,7 @@ pub extern "C" fn _start() -> ! {
         }
     }
     if !got {
-        fail(b"serve: no connection accepted (timed out)\r\n", target);
+        fail_closed(b"serve: no connection accepted (timed out)\r\n", target, base, n);
     }
 
     // 4. read the request (drain a little), then respond.
@@ -174,21 +196,17 @@ pub extern "C" fn _start() -> ! {
         push(&mut resp, &mut rw, b"hello from Ouroboros /net/tcp");
     }
     push(&mut resp, &mut rw, b"\r\n");
-    let data_path = match join(base, Some(m), b"data", &mut pbuf) {
-        Some(p) => p,
-        None => fail(b"serve: path too long\r\n", target),
+    let Some(data_path) = join(base, Some(m), b"data", &mut pbuf) else {
+        close(base, m);
+        fail_closed(b"serve: path too long\r\n", target, base, n);
     };
     let _ = fs_write_inline(data_path, &resp[..rw]);
 
     // 6. close the accepted connection (netd flushes the response, then FINs -
     // it holds the conn independent of this program's lifetime).
-    if let Some(cp) = join(base, Some(m), b"ctl", &mut pbuf) {
-        let _ = fs_write_inline(cp, b"close");
-    }
+    close(base, m);
     // Also stop listening.
-    if let Some(cp) = join(base, Some(n), b"ctl", &mut pbuf) {
-        let _ = fs_write_inline(cp, b"close");
-    }
+    close(base, n);
     write_out(target, b"served + closed\r\n");
     ulib::end_of_stream(target);
     exit(0);

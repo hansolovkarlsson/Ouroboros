@@ -5175,11 +5175,20 @@ in [`roadmap-completed.md`](roadmap-completed.md)):
   `close` land on the new connection. Closing it needs an owner or a
   generation on each slot that `ctl` and `data` check. Found by the second
   review of #504, 2026-11-23.
+- **A `serve` that dies while it listens holds its slot for the boot.**
+  `serve` closes its listener on every failure since #505, but a `serve`
+  that never gets to (Ctrl-C, `kill`, a fault, a remote `serve /mnt/a/net`
+  whose session drops) leaves a `Listening` slot, and `pump_dials` leaves
+  `Listening` out of the idle reap on purpose (a listener has no traffic of
+  its own). Three such deaths refuse every `dial` and `serve` at the clone
+  until reboot. Closing it wants the same owner as the item above: a slot
+  whose owner is gone is freed whatever its state. Found by the review of
+  #505, 2026-11-23.
 - **A `/net/tcp` client killed after its peer closed holds its slot 12 s.**
   Since #504 a slot netd has set `Closed` waits for its client's `close`, so a
   `dial` killed in that window holds the slot until the idle reap, where
   before it was freed at once. Kept on purpose: freeing on `Closed` alone is
-  the bug the first review of #504 found. A slot owner (the item above), seen
+  the bug the first review of #504 found. A slot owner (the owner item above), seen
   dead by netd, would free it at once. Found by the fifth review of #504,
   2026-11-23.
 - **netd's `/net/tcp` slot rules as a pure, host-tested function.** Reviews
